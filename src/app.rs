@@ -62,6 +62,8 @@ struct UiState {
     band: Option<(u64, Pos2)>,
     /// The icon picture flying with the mouse during an icon drag (window handle).
     drag_image: Option<isize>,
+    /// Safety net: when an icon drag was first seen with the mouse button up.
+    drag_up_since: Option<Instant>,
     /// (box id, tab index or None for the box title, text being typed)
     renaming: Option<(u64, Option<usize>, String)>,
     confirm_delete: Option<u64>,
@@ -947,6 +949,28 @@ fn fence_window(
             );
         }
 
+        // Safety net: an icon drag whose end was never reported (icon vanished mid-drag) is
+        // cleared once the button has been up for half a second, so a normal drop (handled on
+        // drag_stopped, within a frame or two) always goes first. Wall time, not pass numbers:
+        // every box's frame is a pass of the shared context.
+        if st.item_drag.is_some() || st.drag_image.is_some() {
+            if ghost::primary_button_down() {
+                st.drag_up_since = None;
+            } else {
+                let since = *st.drag_up_since.get_or_insert_with(Instant::now);
+                if since.elapsed() > Duration::from_millis(500) {
+                    st.item_drag = None;
+                    if let Some(img) = st.drag_image.take() {
+                        ghost::destroy(img);
+                    }
+                    st.drag_up_since = None;
+                } else {
+                    ctx.request_repaint_after(Duration::from_millis(550));
+                }
+            }
+        } else {
+            st.drag_up_since = None;
+        }
         // Icons being dragged over this box from another one: show where they will land.
         if let Some((from, _)) = st.item_drag.as_ref() {
             let accepts = *from != fence.id && !fence.auto_sort && fence.widget.is_none();
@@ -1172,7 +1196,7 @@ fn fence_window(
                         st.band = None;
                     }
                     let pad = ((width - cols as f32 * cell.x) / 2.0).max(0.0).min(cell.x * 0.5);
-                    let mut reorder: Option<(usize, usize)> = None;
+                    let mut reorder: Option<(String, String)> = None;
                     let mut icon_rects: Vec<Rect> = Vec::new();
                     let clip = ui.clip_rect();
                     for (i, it) in items.iter().enumerate() {
@@ -1262,9 +1286,10 @@ fn fence_window(
                             actions.push(Act::Opened(it.path.clone()));
                         }
                         if manual {
-                            resp.dnd_set_drag_payload(i);
-                            if let Some(src) = resp.dnd_release_payload::<usize>() {
-                                reorder = Some((*src, i));
+                            // The payload is the item's path, so a changed list can't break it.
+                            resp.dnd_set_drag_payload(it.path.clone());
+                            if let Some(src) = resp.dnd_release_payload::<String>() {
+                                reorder = Some(((*src).clone(), it.path.clone()));
                             }
                         }
                         if resp.secondary_clicked() {
@@ -1283,18 +1308,19 @@ fn fence_window(
                         );
                     }
                     st.icon_rects.insert(fence.id, icon_rects);
-                    if let Some((from, to)) = reorder {
-                        if from != to {
-                            if let Some(tab) = fence.tabs.get_mut(sel) {
-                                // Indices refer to the shown (existing) items; map back to paths.
-                                let shown: Vec<String> = items.iter().map(|i| i.path.clone()).collect();
-                                let moving = shown[from].clone();
-                                let target = shown[to].clone();
-                                tab.items.retain(|p| !p.eq_ignore_ascii_case(&moving));
-                                let pos = tab.items.iter().position(|p| p.eq_ignore_ascii_case(&target)).unwrap_or(tab.items.len());
-                                let pos = if from < to { (pos + 1).min(tab.items.len()) } else { pos };
-                                tab.items.insert(pos, moving);
-                                dirty = true;
+                    if let Some((moving, target)) = reorder {
+                        // Look the items up by path in the shown list; if either is gone, do nothing.
+                        let from = items.iter().position(|x| x.path.eq_ignore_ascii_case(&moving));
+                        let to = items.iter().position(|x| x.path.eq_ignore_ascii_case(&target));
+                        if let (Some(from), Some(to)) = (from, to) {
+                            if from != to {
+                                if let Some(tab) = fence.tabs.get_mut(sel) {
+                                    tab.items.retain(|p| !p.eq_ignore_ascii_case(&moving));
+                                    let pos = tab.items.iter().position(|p| p.eq_ignore_ascii_case(&target)).unwrap_or(tab.items.len());
+                                    let pos = if from < to { (pos + 1).min(tab.items.len()) } else { pos };
+                                    tab.items.insert(pos, moving);
+                                    dirty = true;
+                                }
                             }
                         }
                     }

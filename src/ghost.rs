@@ -57,7 +57,6 @@ mod imp {
         std::thread::Builder::new()
             .name("box-drag".into())
             .spawn(move || unsafe {
-                use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON};
                 use windows::Win32::UI::WindowsAndMessaging::{
                     DispatchMessageW, GetCursorPos, IsWindow, PeekMessageW, TranslateMessage, MSG, PM_REMOVE,
                 };
@@ -124,7 +123,7 @@ mod imp {
                                 ly = ny;
                             }
                         }
-                        if (GetAsyncKeyState(VK_LBUTTON.0 as i32) as u16 & 0x8000) == 0 {
+                        if !super::primary_button_down() {
                             dragging = false;
                             if std::env::var_os("DESKBOXES_DEBUG_DRAG").is_some() {
                                 crate::storage::log_line(&format!("drag helper: button up at {lx},{ly} (start {x},{y}, grab {:?})", grab));
@@ -349,8 +348,8 @@ mod imp {
             .name("icon-drag".into())
             .spawn(move || unsafe {
                 use windows::Win32::UI::WindowsAndMessaging::{
-                    DispatchMessageW, GetCursorPos, IsWindow, PeekMessageW, TranslateMessage, HWND_TOPMOST, MSG, PM_REMOVE,
-                    SWP_NOMOVE, SWP_NOZORDER,
+                    DestroyWindow, DispatchMessageW, GetCursorPos, IsWindow, PeekMessageW, TranslateMessage, HWND_TOPMOST,
+                    MSG, PM_REMOVE, SWP_NOMOVE, SWP_NOZORDER,
                 };
                 let mut p = POINT::default();
                 let _ = GetCursorPos(&mut p);
@@ -369,6 +368,12 @@ mod imp {
                         DispatchMessageW(&msg);
                     }
                     if !IsWindow(hw).as_bool() {
+                        break;
+                    }
+                    // Button released: remove the picture ourselves, so it can never get stuck
+                    // if the app misses the end of the drag.
+                    if !super::primary_button_down() {
+                        let _ = DestroyWindow(hw);
                         break;
                     }
                     let mut c = POINT::default();
@@ -441,6 +446,23 @@ mod imp {
     }
     pub fn destroy(_: isize) {}
     pub fn set_alpha(_: isize, _: Option<u8>) {}
+}
+
+/// True while the user's main mouse button is held. Honors "swap primary and secondary
+/// buttons": then the physical right button is the main one.
+#[cfg(windows)]
+pub(crate) fn primary_button_down() -> bool {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON, VK_RBUTTON};
+    use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_SWAPBUTTON};
+    unsafe {
+        let vk = if GetSystemMetrics(SM_SWAPBUTTON) != 0 { VK_RBUTTON } else { VK_LBUTTON };
+        (GetAsyncKeyState(vk.0 as i32) as u16 & 0x8000) != 0
+    }
+}
+
+#[cfg(not(windows))]
+pub(crate) fn primary_button_down() -> bool {
+    false
 }
 
 /// Wakes the app (asks for a redraw) when Windows finishes moving the copy.

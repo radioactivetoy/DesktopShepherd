@@ -12,7 +12,7 @@ written from these notes, not copied.
 - On `TaskbarCreated` (Explorer restarted) it checks the helper window and restarts if needed.
 - Timer id 100 waits up to **60 ticks** (0x3c) before calling `Startup2`.
 - **Rebuild:** a supervisor process starts the app with `--worker` and restarts it after a
-  crash, **2000 ms** later. A clean exit ends both. It gives up after **3 crashes within 60 s**
+  crash, **2000 ms** later. A clean exit ends both. (2026-11-21: no longer gives up; it waits longer after each failure in a row, 2 s up to 5 min, see ARCHITECTURE.md.) It used to give up after **3 crashes within 60 s**
   (our own limit, so it can never loop) and then shows the desktop icons again if the app had
   hidden them.
 

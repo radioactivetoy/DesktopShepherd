@@ -9,7 +9,10 @@ deskboxes.exe            supervisor (main.rs: supervise)
 
 - The supervisor claims a single-instance mutex, starts the worker and waits. Whenever the
   worker exits (quit, crash, kill) it restores Windows' desktop icons. Non-zero exit → restart
-  after 2 s; 3 crashes within 60 s → give up (icons restored, logged).
+  with growing waits for failures in a row (2, 5, 15, 30, 60, 120, then every 300 s; a run of
+  ≥ 60 s resets them). Only exit code 0 (a real quit) stops the supervisor. A failed start
+  exits with code 2; code 3 means "GL had no see-through setup" and the supervisor restarts at
+  once with `--opaque` (main window not see-through).
 - The worker also has a panic hook that logs and restores icons.
 - Log: `%APPDATA%\DeskBoxes\log.txt`. Layout: `%APPDATA%\DeskBoxes\layout.json` (written via
   `.tmp` + rename; rolling copies in `backups\`).

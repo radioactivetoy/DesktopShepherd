@@ -25,7 +25,8 @@ an original Rust program; its behaviour was modelled on an existing desktop orga
   flying icon under the cursor; open, show in folder, sort (manual, name, size, type, date,
   times opened).
 - Hides Windows' own desktop icons while running; a supervisor process gives them back after
-  any exit or crash and restarts the app after a crash (max 3 per minute).
+  any exit or crash and restarts the app after a crash or failed start, waiting longer after
+  each failure in a row (2 s up to 5 min).
 - Multi-monitor: boxes follow a monitor **role** (main/second…) or stay on a **fixed** monitor.
 - Tray icon, Windows 11 style menus and settings page, start with Windows, low CPU priority,
   layout backups.

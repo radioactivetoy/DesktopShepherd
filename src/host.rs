@@ -563,7 +563,6 @@ impl HostSystem {
 /// (the window is truly see-through, so moving needs no redrawing at all).
 pub fn move_with_mouse(hwnd: isize, grab: (i32, i32)) {
     let _ = std::thread::Builder::new().name("box-move".into()).spawn(move || unsafe {
-        use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON};
         let h = HWND(hwnd as *mut _);
         let mut last = (i32::MIN, i32::MIN);
         loop {
@@ -575,7 +574,7 @@ pub fn move_with_mouse(hwnd: isize, grab: (i32, i32)) {
                     last = (x, y);
                 }
             }
-            if (GetAsyncKeyState(VK_LBUTTON.0 as i32) as u16 & 0x8000) == 0 {
+            if !crate::ghost::primary_button_down() {
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(1));
