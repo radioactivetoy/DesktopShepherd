@@ -1,0 +1,4 @@
+# This computer's Rust uses the GNU toolchain; point the compiler at its bundled dlltool
+# (needed by the Windows API crates).
+[target.x86_64-pc-windows-gnu]
+rustflags = ["-C", "dlltool=C:/Users/nesto/.rustup/toolchains/stable-x86_64-pc-windows-gnu/lib/rustlib/x86_64-pc-windows-gnu/bin/self-contained/dlltool.exe"]

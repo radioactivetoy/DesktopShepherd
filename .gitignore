@@ -1,0 +1,4 @@
+/target
+shots/
+*.log
+layout.json.tmp

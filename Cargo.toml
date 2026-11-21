@@ -1,0 +1,63 @@
+[package]
+name = "deskboxes"
+version = "0.1.0"
+edition = "2021"
+description = "A lightweight desktop icon organizer: boxes (fences) on your desktop, plus widgets."
+
+[[bin]]
+name = "deskboxes"
+path = "src/main.rs"
+
+[dependencies]
+eframe = { version = "0.31", default-features = false, features = ["default_fonts", "glow"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+dirs = "5"
+blowfish = "0.9"
+
+[target.'cfg(windows)'.dependencies]
+winreg = "0.52"
+tray-icon = "0.19"
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_HiDpi",
+    "Win32_Graphics_Gdi",
+    "Win32_Graphics_Dwm",
+    "Win32_UI_Controls",
+    "Win32_Storage_Xps",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Accessibility",
+    "Win32_System_LibraryLoader",
+    "Win32_System_WinRT",
+    "Win32_System_WinRT_Composition",
+    "UI",
+    "UI_Composition",
+    "UI_Composition_Desktop",
+    "Foundation_Numerics",
+    "System",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D_Fxc",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_System_Com",
+    "Win32_System_Threading",
+    "Win32_Security",
+] }
+
+[profile.dev]
+# Full speed even in everyday builds: the app must never slow anything down.
+opt-level = 3
+
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
