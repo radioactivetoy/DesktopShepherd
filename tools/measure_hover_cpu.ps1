@@ -8,6 +8,11 @@ if (-not $w) { "DeskBoxes worker is not running"; exit 1 }
 $p = Get-Process -Id $w.ProcessId
 $cores = [Environment]::ProcessorCount
 $orig = New-Object M+P; [void][M]::GetCursorPos([ref]$orig)
+# The boxes must be visible: show the desktop first (Win+D) if an app is in front, and put
+# things back at the end.
+Add-Type 'using System; using System.Runtime.InteropServices; public static class MD { [DllImport("user32.dll")] public static extern void keybd_event(byte k, byte s, uint f, UIntPtr e); [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow(); [DllImport("user32.dll")] public static extern int GetClassName(IntPtr h, System.Text.StringBuilder s, int n); public static string Fg(){ var s=new System.Text.StringBuilder(64); GetClassName(GetForegroundWindow(),s,64); return s.ToString(); } public static void WinD(){ keybd_event(0x5B,0,0,UIntPtr.Zero); keybd_event(0x44,0,0,UIntPtr.Zero); keybd_event(0x44,0,2,UIntPtr.Zero); keybd_event(0x5B,0,2,UIntPtr.Zero); } }'
+$pressed = $false
+if ([MD]::Fg() -ne 'Progman' -and [MD]::Fg() -ne 'WorkerW') { [MD]::WinD(); $pressed = $true; Start-Sleep 1.5 }
 
 $a = $p.TotalProcessorTime.TotalMilliseconds
 $sw = [Diagnostics.Stopwatch]::StartNew()
@@ -25,3 +30,4 @@ $p.Refresh(); $a = $p.TotalProcessorTime.TotalMilliseconds
 Start-Sleep 10
 $p.Refresh(); $b = $p.TotalProcessorTime.TotalMilliseconds
 "idle:         cpu={0:N2}% of all cores ({1:N0} ms CPU in 10 s), ws={2:N0} MB" -f (($b-$a)/10000/$cores*100), ($b-$a), ($p.WorkingSet64/1MB)
+if ($pressed) { [MD]::WinD() }

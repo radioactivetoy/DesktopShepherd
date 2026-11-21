@@ -56,6 +56,69 @@ struct Shared {
     no_activate: bool,
     /// Something happened to the window (input, move, resize, DPI): draw it on the next pass.
     dirty: bool,
+    /// Panels only: the close button (or Alt+F4) was used; boxes never close.
+    can_close: bool,
+    close: bool,
+    /// Panels only: smallest size the person can resize to (pixels, 0 = none).
+    min_size: [i32; 2],
+}
+
+/// Reads text from the clipboard (for Ctrl+V in text fields).
+fn clipboard_get(h: HWND) -> Option<String> {
+    use windows::Win32::Foundation::HGLOBAL;
+    use windows::Win32::System::DataExchange::{CloseClipboard, GetClipboardData, OpenClipboard};
+    use windows::Win32::System::Memory::{GlobalLock, GlobalUnlock};
+    const CF_UNICODETEXT: u32 = 13;
+    unsafe {
+        OpenClipboard(h).ok()?;
+        let text = (|| {
+            let data = GetClipboardData(CF_UNICODETEXT).ok()?;
+            let mem = HGLOBAL(data.0);
+            let p = GlobalLock(mem) as *const u16;
+            if p.is_null() {
+                return None;
+            }
+            let mut n = 0usize;
+            while n < 1 << 24 && *p.add(n) != 0 {
+                n += 1;
+            }
+            let s = String::from_utf16_lossy(std::slice::from_raw_parts(p, n));
+            let _ = GlobalUnlock(mem);
+            Some(s)
+        })();
+        let _ = CloseClipboard();
+        text
+    }
+}
+
+/// Puts text on the clipboard (for Ctrl+C / Ctrl+X in text fields).
+fn clipboard_set(h: HWND, text: &str) {
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::System::DataExchange::{CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData};
+    use windows::Win32::Foundation::GlobalFree;
+    use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
+    const CF_UNICODETEXT: u32 = 13;
+    let wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+    unsafe {
+        if OpenClipboard(h).is_err() {
+            return;
+        }
+        let _ = EmptyClipboard();
+        if let Ok(mem) = GlobalAlloc(GMEM_MOVEABLE, wide.len() * 2) {
+            let p = GlobalLock(mem) as *mut u16;
+            if p.is_null() {
+                let _ = GlobalFree(mem);
+            } else {
+                std::ptr::copy_nonoverlapping(wide.as_ptr(), p, wide.len());
+                let _ = GlobalUnlock(mem);
+                // On success the clipboard owns the memory; otherwise free it.
+                if SetClipboardData(CF_UNICODETEXT, HANDLE(mem.0)).is_err() {
+                    let _ = GlobalFree(mem);
+                }
+            }
+        }
+        let _ = CloseClipboard();
+    }
 }
 
 static WAKE: OnceLock<egui::Context> = OnceLock::new();
@@ -93,6 +156,9 @@ fn key_of(vk: u32) -> Option<egui::Key> {
         x if x == VK_DOWN.0 as u32 => Key::ArrowDown,
         x if x == VK_HOME.0 as u32 => Key::Home,
         x if x == VK_END.0 as u32 => Key::End,
+        0x21 => Key::PageUp,
+        0x22 => Key::PageDown,
+        0x20 => Key::Space,
         0x41 => Key::A,
         0x43 => Key::C,
         0x56 => Key::V,
@@ -194,6 +260,11 @@ unsafe extern "system" fn wndproc(h: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LR
                     match key {
                         egui::Key::C => push(egui::Event::Copy),
                         egui::Key::X => push(egui::Event::Cut),
+                        egui::Key::V => {
+                            if let Some(text) = clipboard_get(h) {
+                                push(egui::Event::Paste(text.replace("\r\n", "\n")));
+                            }
+                        }
                         _ => {}
                     }
                 }
@@ -254,7 +325,25 @@ unsafe extern "system" fn wndproc(h: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LR
             LRESULT(0)
         }
         WM_ERASEBKGND => LRESULT(1),
-        WM_CLOSE => LRESULT(0), // never closed by Alt+F4
+        WM_CLOSE => {
+            // Boxes are never closed by Alt+F4; a panel tells the app, which closes it.
+            if let Ok(mut s) = shared.lock() {
+                if s.can_close {
+                    s.close = true;
+                    s.dirty = true;
+                }
+            }
+            wake();
+            LRESULT(0)
+        }
+        WM_GETMINMAXINFO => {
+            let min = shared.lock().map(|s| s.min_size).unwrap_or([0, 0]);
+            if min[0] > 0 && lp.0 != 0 {
+                let info = &mut *(lp.0 as *mut MINMAXINFO);
+                info.ptMinTrackSize = POINT { x: min[0], y: min[1] };
+            }
+            LRESULT(0)
+        }
         WM_DPICHANGED | WM_SIZE | WM_MOVE => {
             if let Ok(mut s) = shared.lock() {
                 s.dirty = true;
@@ -299,6 +388,112 @@ impl Drop for Host {
     }
 }
 
+/// Window commands from egui (move, resize, focus), for boxes and panels.
+fn apply_to(hwnd: HWND, cmd: &ViewportCommand) {
+    unsafe {
+        let ppp = ppp_of(hwnd);
+        match cmd {
+            ViewportCommand::InnerSize(v) => {
+                let _ = SetWindowPos(hwnd, None, 0, 0, (v.x * ppp).round() as i32, (v.y * ppp).round() as i32, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+            }
+            ViewportCommand::OuterPosition(p) => {
+                let _ = SetWindowPos(hwnd, None, (p.x * ppp).round() as i32, (p.y * ppp).round() as i32, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+            }
+            ViewportCommand::Focus => {
+                let _ = SetForegroundWindow(hwnd);
+                let _ = windows::Win32::UI::Input::KeyboardAndMouse::SetFocus(hwnd);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// The two kinds of ordinary windows drawn like the boxes.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum PanelKind {
+    /// A right-click menu: borderless, always on top, rounded, closes when it loses focus.
+    Menu,
+    /// The settings window: a normal window with a title bar, resizable, in the taskbar.
+    Settings,
+}
+
+/// A menu or settings window: an ordinary window with its own swap chain (no composition
+/// glass), drawn by the same renderer and egui context as the boxes.
+pub struct Panel {
+    pub hwnd: HWND,
+    shared: Arc<Mutex<Shared>>,
+    swapchain: IDXGISwapChain1,
+    size: [u32; 2],
+    next: Option<std::time::Instant>,
+    /// Not drawn yet.
+    fresh: bool,
+}
+
+impl Panel {
+    fn create(renderer: &Renderer, kind: PanelKind, title: &str, r: [i32; 4]) -> Result<Panel> {
+        unsafe {
+            let inst = GetModuleHandleW(None)?;
+            let (ex, style) = match kind {
+                PanelKind::Menu => (WS_EX_TOPMOST | WS_EX_TOOLWINDOW, WS_POPUP),
+                PanelKind::Settings => (WINDOW_EX_STYLE(0), WS_OVERLAPPEDWINDOW),
+            };
+            let hwnd = CreateWindowExW(ex, w!("DeskBoxesPanel"), &HSTRING::from(title), style, r[0], r[1], r[2].max(1), r[3].max(1), None, None, inst, None)?;
+            let s = ppp_of(hwnd);
+            let shared = Arc::new(Mutex::new(Shared {
+                // A new window starts with no mouse over it: forget where the mouse was in the
+                // last window that used this id (otherwise a menu row shows as hovered).
+                events: vec![egui::Event::PointerGone],
+                dirty: true,
+                can_close: true,
+                min_size: if kind == PanelKind::Settings { [(640.0 * s) as i32, (420.0 * s) as i32] } else { [0, 0] },
+                ..Default::default()
+            }));
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, Arc::into_raw(shared.clone()) as isize);
+            {
+                use windows::Win32::Graphics::Dwm::{DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND};
+                let dark = BOOL(1);
+                let _ = DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark as *const _ as *const _, 4);
+                if kind == PanelKind::Menu {
+                    let round = DWMWCP_ROUND;
+                    let _ = DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &round as *const _ as *const _, std::mem::size_of_val(&round) as u32);
+                }
+            }
+            let mut cr = RECT::default();
+            let _ = GetClientRect(hwnd, &mut cr);
+            let size = [(cr.right - cr.left).max(1) as u32, (cr.bottom - cr.top).max(1) as u32];
+            let swapchain = match renderer.create_swapchain_for_hwnd(hwnd, size[0], size[1]) {
+                Ok(s) => s,
+                Err(e) => {
+                    let p = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const Mutex<Shared>;
+                    SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+                    let _ = DestroyWindow(hwnd);
+                    if !p.is_null() {
+                        drop(Arc::from_raw(p));
+                    }
+                    return Err(e);
+                }
+            };
+            let _ = ShowWindow(hwnd, SW_SHOW);
+            let _ = SetForegroundWindow(hwnd);
+            let _ = windows::Win32::UI::Input::KeyboardAndMouse::SetFocus(hwnd);
+            Ok(Panel { hwnd, shared, swapchain, size, next: None, fresh: true })
+        }
+    }
+}
+
+impl Drop for Panel {
+    fn drop(&mut self) {
+        unsafe {
+            let p = GetWindowLongPtrW(self.hwnd, GWLP_USERDATA) as *const Mutex<Shared>;
+            SetWindowLongPtrW(self.hwnd, GWLP_USERDATA, 0);
+            let _ = DestroyWindow(self.hwnd);
+            if !p.is_null() {
+                drop(Arc::from_raw(p));
+            }
+        }
+    }
+}
+
 /// How a box should look this frame (glass layers).
 pub struct Look {
     pub tint: [u8; 4],
@@ -313,6 +508,8 @@ pub struct HostSystem {
     renderer: Renderer,
     pub ctx: egui::Context,
     hosts: HashMap<u64, Host>,
+    /// Menu and settings windows (see `panel`).
+    panels: HashMap<u64, Panel>,
     start: std::time::Instant,
     /// The graphics device was lost (driver reset, sleep/resume...): rebuild before drawing.
     pub lost: bool,
@@ -344,7 +541,9 @@ impl HostSystem {
                     root.request_repaint_after(info.delay.max(MIN_PASS_GAP));
                 });
             }
-            Ok(Self { _controller: controller, compositor, renderer, ctx, hosts: HashMap::new(), start: std::time::Instant::now(), lost: false, logged_error: false })
+            let pc = WNDCLASSW { lpfnWndProc: Some(wndproc), hInstance: inst.into(), lpszClassName: w!("DeskBoxesPanel"), hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(), ..Default::default() };
+            RegisterClassW(&pc);
+            Ok(Self { _controller: controller, compositor, renderer, ctx, hosts: HashMap::new(), panels: HashMap::new(), start: std::time::Instant::now(), lost: false, logged_error: false })
         }
     }
 
@@ -424,6 +623,7 @@ impl HostSystem {
         match Renderer::new() {
             Ok(r) => {
                 self.hosts.clear();
+                self.panels.clear();
                 self.renderer = r;
                 let ctx = egui::Context::default();
                 let root = root_ctx.clone();
@@ -442,7 +642,7 @@ impl HostSystem {
     /// The app re-arms its own wake-up with it after every pass: egui forgets a pending wake-up
     /// when another pass runs in between, and skipped boxes would not ask again.
     pub fn next_due(&self) -> Option<std::time::Instant> {
-        self.hosts.values().filter_map(|h| h.next).min()
+        self.hosts.values().filter_map(|h| h.next).chain(self.panels.values().filter_map(|p| p.next)).min()
     }
 
     /// Removes the windows of boxes that no longer exist.
@@ -457,23 +657,133 @@ impl HostSystem {
 
     /// Applies a command (move, resize, focus) to a box window.
     pub fn apply(&self, id: u64, cmd: &ViewportCommand) {
-        let Some(h) = self.hosts.get(&id) else { return };
-        unsafe {
-            let ppp = ppp_of(h.hwnd);
-            match cmd {
-                ViewportCommand::InnerSize(v) => {
-                    let _ = SetWindowPos(h.hwnd, None, 0, 0, (v.x * ppp).round() as i32, (v.y * ppp).round() as i32, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+        let Some(hwnd) = self.hosts.get(&id).map(|h| h.hwnd).or_else(|| self.panels.get(&id).map(|p| p.hwnd)) else { return };
+        apply_to(hwnd, cmd);
+    }
+
+    /// Runs one egui frame for a menu or settings window (creating it if needed) and draws it
+    /// with the same renderer and egui context as the boxes. Like boxes, it draws only when it
+    /// has a reason to (`force`, input, resize, its egui timer, or first show). `rect_px` is the
+    /// window's place on screen (pixels): a menu is kept there (`keep_rect`); a settings window
+    /// only starts there and the person moves it. Returns true when the window was drawn.
+    #[allow(clippy::too_many_arguments)]
+    pub fn panel(&mut self, id: u64, kind: PanelKind, title: &str, rect_px: [i32; 4], keep_rect: bool, force: bool, mut ui: impl FnMut(&egui::Context)) -> bool {
+        if !self.panels.contains_key(&id) {
+            match Panel::create(&self.renderer, kind, title, rect_px) {
+                Ok(p) => {
+                    self.panels.insert(id, p);
                 }
-                ViewportCommand::OuterPosition(p) => {
-                    let _ = SetWindowPos(h.hwnd, None, (p.x * ppp).round() as i32, (p.y * ppp).round() as i32, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+                Err(e) => {
+                    crate::storage::log_line(&format!("could not create {title} window: {e:?}"));
+                    return false;
                 }
-                ViewportCommand::Focus => {
-                    let _ = SetForegroundWindow(h.hwnd);
-                    let _ = windows::Win32::UI::Input::KeyboardAndMouse::SetFocus(h.hwnd);
-                }
-                _ => {}
             }
         }
+        let vid = ViewportId::from_hash_of(("deskboxes-panel", id));
+        let time = self.start.elapsed().as_secs_f64();
+        let Some(p) = self.panels.get_mut(&id) else { return false };
+        unsafe {
+            if keep_rect {
+                let mut wr = RECT::default();
+                let _ = GetWindowRect(p.hwnd, &mut wr);
+                if [wr.left, wr.top, wr.right - wr.left, wr.bottom - wr.top] != rect_px {
+                    let _ = SetWindowPos(p.hwnd, None, rect_px[0], rect_px[1], rect_px[2].max(1), rect_px[3].max(1), SWP_NOZORDER | SWP_NOACTIVATE);
+                }
+            }
+            let ppp = ppp_of(p.hwnd);
+            let mut cr = RECT::default();
+            let _ = GetClientRect(p.hwnd, &mut cr);
+            let (w, ht) = ((cr.right - cr.left).max(1) as u32, (cr.bottom - cr.top).max(1) as u32);
+            let now = std::time::Instant::now();
+            let has_input = p.shared.lock().map(|s| s.dirty).unwrap_or(true);
+            let due = p.next.map(|t| t <= now).unwrap_or(false);
+            let resized = [w, ht] != p.size;
+            if !(force || has_input || due || resized || p.fresh) {
+                return false;
+            }
+            p.fresh = false;
+            if resized && self.renderer.resize(&p.swapchain, w, ht).is_ok() {
+                p.size = [w, ht];
+            }
+            let (events, focused, close) = match p.shared.lock() {
+                Ok(mut s) => {
+                    s.dirty = false;
+                    (std::mem::take(&mut s.events), s.focused, std::mem::take(&mut s.close))
+                }
+                Err(_) => (Vec::new(), false, false),
+            };
+            let mut origin = POINT::default();
+            let _ = windows::Win32::Graphics::Gdi::ClientToScreen(p.hwnd, &mut origin);
+            let inner = Rect::from_min_size(Pos2::new(origin.x as f32 / ppp, origin.y as f32 / ppp), Vec2::new(w as f32 / ppp, ht as f32 / ppp));
+            let mut wr = RECT::default();
+            let _ = GetWindowRect(p.hwnd, &mut wr);
+            let outer = Rect::from_min_max(Pos2::new(wr.left as f32 / ppp, wr.top as f32 / ppp), Pos2::new(wr.right as f32 / ppp, wr.bottom as f32 / ppp));
+            let mut viewports = egui::ViewportIdMap::default();
+            viewports.insert(
+                vid,
+                egui::ViewportInfo {
+                    native_pixels_per_point: Some(ppp),
+                    inner_rect: Some(inner),
+                    outer_rect: Some(outer),
+                    focused: Some(focused),
+                    minimized: Some(false),
+                    maximized: Some(false),
+                    fullscreen: Some(false),
+                    events: if close { vec![egui::ViewportEvent::Close] } else { vec![] },
+                    ..Default::default()
+                },
+            );
+            let raw = egui::RawInput {
+                viewport_id: vid,
+                viewports,
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, inner.size())),
+                max_texture_side: Some(8192),
+                time: Some(time),
+                modifiers: modifiers(),
+                events,
+                focused,
+                ..Default::default()
+            };
+            let out = self.ctx.run(raw, |c| ui(c));
+            if let Ok(mut s) = p.shared.lock() {
+                s.cursor = out.platform_output.cursor_icon;
+            }
+            // Copy / cut in text fields.
+            #[allow(deprecated)]
+            let mut copied = out.platform_output.copied_text.clone();
+            for c in &out.platform_output.commands {
+                if let egui::OutputCommand::CopyText(t) = c {
+                    copied = t.clone();
+                }
+            }
+            if !copied.is_empty() {
+                clipboard_set(p.hwnd, &copied);
+            }
+            let cmds: Vec<ViewportCommand> = out.viewport_output.get(&vid).map(|v| v.commands.clone()).unwrap_or_default();
+            let delay = out.viewport_output.get(&vid).map(|v| v.repaint_delay).unwrap_or(Duration::MAX);
+            p.next = if delay < Duration::from_secs(86_400) { Some(now + delay) } else { None };
+            self.renderer.update_textures(&out.textures_delta);
+            let prims = self.ctx.tessellate(out.shapes, out.pixels_per_point);
+            if let Err(e) = self.renderer.render(&p.swapchain, p.size, out.pixels_per_point, &prims) {
+                use windows::Win32::Graphics::Dxgi::{DXGI_ERROR_DEVICE_REMOVED, DXGI_ERROR_DEVICE_RESET};
+                if e.code() == DXGI_ERROR_DEVICE_REMOVED || e.code() == DXGI_ERROR_DEVICE_RESET {
+                    self.lost = true;
+                }
+                if !self.logged_error {
+                    self.logged_error = true;
+                    crate::storage::log_line(&format!("{title} drawing failed: {e:?}"));
+                }
+            }
+            for c in &cmds {
+                apply_to(p.hwnd, c);
+            }
+        }
+        true
+    }
+
+    /// Closes a menu or settings window (nothing happens if it isn't open).
+    pub fn close_panel(&mut self, id: u64) {
+        self.panels.remove(&id);
     }
 
     /// Runs one egui frame for a box (creating its window if needed) and draws it — but only

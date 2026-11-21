@@ -19,6 +19,11 @@ deskboxes.exe            supervisor (main.rs: supervise)
 
 ## Windows inside the worker
 
+- **Menus and settings (DirectX path)**: `host::Panel` windows (class `DeskBoxesPanel`):
+  plain Win32 windows with an ordinary flip swap chain, drawn by the boxes' renderer and egui
+  context (`HostSystem::panel`, ids `MENU_PANEL` / `SETTINGS_PANEL` in `app.rs`). Same input
+  mapping as boxes plus clipboard (Ctrl+C/X/V), close button (`WM_CLOSE` → egui close
+  request) and a minimum size. With the classic path they are still eframe GL viewports.
 - **Root window**: eframe/glow, 1×1, invisible, click-through, bottom-most, vsync off, not
   see-through by default. If DirectX boxes can't start, the worker exits with code 4 and the
   supervisor restarts it with `--transparent` (classic boxes need a see-through GL setup); if

@@ -146,8 +146,10 @@ pub struct DeskApp {
     /// The DirectX/composition box windows (None = previous way of drawing boxes).
     #[cfg(windows)]
     hosts: Option<crate::host::HostSystem>,
-    /// Icons for the layout preview when boxes are composition windows.
-    preview_icons: Option<IconCache>,
+    /// This pass draws every box (`redraw_all` was set): menu and settings draw too.
+    panel_force: bool,
+    /// Bring the settings window to the front on its next pass (tray "Open" while it's open).
+    focus_settings: bool,
     /// Shared data changed (files, icons, layout, selection): every box draws on the next pass.
     /// Otherwise a DirectX box draws only for its own reasons (see `HostSystem::frame`).
     redraw_all: bool,
@@ -324,7 +326,8 @@ impl DeskApp {
             monitors_changed,
             #[cfg(windows)]
             hosts,
-            preview_icons: None,
+            panel_force: true,
+            focus_settings: false,
             redraw_all: true,
             layout,
         };
@@ -581,16 +584,16 @@ impl DeskApp {
         if icons_arrived {
             self.redraw_all = true;
         }
-        if let Some(p) = self.preview_icons.as_mut() {
-            p.poll(ctx);
-        }
         self.wallpaper.poll(ctx);
         let levels: HashSet<u32> = self.layout.fences.iter().map(|f| f.blur as u32).filter(|b| *b > 0).collect();
         self.wallpaper.keep_blur_levels(&levels);
         let cmds: Vec<TrayCmd> = self.tray_cmds.lock().map(|mut v| std::mem::take(&mut *v)).unwrap_or_default();
         for c in cmds {
             match c {
-                TrayCmd::Open => self.manager_open = true,
+                TrayCmd::Open => {
+                    self.focus_settings = self.manager_open;
+                    self.manager_open = true;
+                }
                 TrayCmd::NewBox => self.actions.push(Act::NewFence { auto: false }),
                 TrayCmd::Quit => self.actions.push(Act::Quit),
             }
@@ -626,6 +629,11 @@ impl DeskApp {
         // ---- settings window
         if self.manager_open {
             self.show_manager(ctx);
+        } else {
+            #[cfg(windows)]
+            if let Some(h) = self.hosts.as_mut() {
+                h.close_panel(SETTINGS_PANEL);
+            }
         }
 
         if !self.actions.is_empty() {
@@ -693,6 +701,7 @@ impl DeskApp {
         // Every box draws when shared data changed, and during an icon drag (the box under the
         // mouse shows where the icons will land).
         let force_all = std::mem::take(&mut self.redraw_all) || self.ui.item_drag.is_some();
+        self.panel_force = force_all;
         let fingerprint = shared_ui_fingerprint(&self.ui);
         #[cfg(windows)]
         if let Some(hosts) = self.hosts.as_mut().filter(|h| !h.lost) {
@@ -773,6 +782,11 @@ impl DeskApp {
         }
         if self.ui.menu.is_some() {
             self.show_menu(ctx, &targets);
+        } else {
+            #[cfg(windows)]
+            if let Some(h) = self.hosts.as_mut() {
+                h.close_panel(MENU_PANEL);
+            }
         }
         // Commands for box windows from the menus (focus for renaming, roll up/down).
         for (id, cmd) in std::mem::take(&mut self.ui.box_cmds) {
@@ -1871,19 +1885,67 @@ impl DeskApp {
         if pos.y + m.size.y > work.max.y {
             pos.y = (m.at.y - m.size.y).max(work.min.y);
         }
-        let builder = ViewportBuilder::default()
-            .with_title("DeskBoxes menu")
-            .with_decorations(false)
-            .with_taskbar(false)
-            .with_resizable(false)
-            .with_window_level(egui::WindowLevel::AlwaysOnTop)
-            .with_position(pos)
-            .with_inner_size(m.size);
         let mut close = false;
         let mut dirty = false;
         let mut measured = m.size;
         let root_ctx = ctx.clone();
-        ctx.show_viewport_immediate(ViewportId::from_hash_of("deskboxes-menu"), builder, |ctx, _| {
+        // DirectX boxes: the menu is a DirectX window too (no GL window).
+        #[cfg(windows)]
+        let drawn_by_host = if let Some(mut hosts) = self.hosts.take() {
+            let s = desktop::system_scale();
+            let rect_px = [(pos.x * s).round() as i32, (pos.y * s).round() as i32, (m.size.x * s).round() as i32, (m.size.y * s).round() as i32];
+            let force = self.panel_force;
+            hosts.panel(MENU_PANEL, crate::host::PanelKind::Menu, "DeskBoxes menu", rect_px, true, force, |pctx| {
+                self.menu_body(pctx, &mut m, targets, &root_ctx, &mut close, &mut dirty, &mut measured);
+            });
+            if close {
+                hosts.close_panel(MENU_PANEL);
+            }
+            self.hosts = Some(hosts);
+            true
+        } else {
+            false
+        };
+        #[cfg(not(windows))]
+        let drawn_by_host = false;
+        if !drawn_by_host {
+            let builder = ViewportBuilder::default()
+                .with_title("DeskBoxes menu")
+                .with_decorations(false)
+                .with_taskbar(false)
+                .with_resizable(false)
+                .with_window_level(egui::WindowLevel::AlwaysOnTop)
+                .with_position(pos)
+                .with_inner_size(m.size);
+            ctx.show_viewport_immediate(ViewportId::from_hash_of("deskboxes-menu"), builder, |vctx, _| {
+                self.menu_body(vctx, &mut m, targets, &root_ctx, &mut close, &mut dirty, &mut measured);
+            });
+        }
+        if (measured.y - m.size.y).abs() > 1.0 {
+            m.size = measured;
+            ctx.request_repaint();
+        }
+        if dirty {
+            self.mark_dirty();
+        }
+        if !close {
+            self.ui.menu = Some(m);
+        }
+    }
+
+    /// The menu's contents (same for the DirectX and the GL window).
+    #[allow(clippy::too_many_arguments)]
+    fn menu_body(
+        &mut self,
+        ctx: &egui::Context,
+        m: &mut OpenMenu,
+        targets: &[(u64, String, Vec<String>)],
+        root_ctx: &egui::Context,
+        close: &mut bool,
+        dirty: &mut bool,
+        measured: &mut Vec2,
+    ) {
+        {
             m.frames += 1;
             if m.frames == 1 {
                 ctx.send_viewport_cmd(ViewportCommand::Focus);
@@ -1893,11 +1955,11 @@ impl DeskApp {
             }
             match ctx.input(|i| i.viewport().focused) {
                 Some(true) => m.was_focused = true,
-                Some(false) if m.was_focused => close = true,
+                Some(false) if m.was_focused => *close = true,
                 _ => {}
             }
             if ctx.input(|i| i.key_pressed(egui::Key::Escape) || i.viewport().close_requested()) {
-                close = true;
+                *close = true;
             }
             let frame = egui::Frame::new()
                 .fill(Color32::from_rgb(44, 44, 46))
@@ -1911,47 +1973,43 @@ impl DeskApp {
                     MenuTarget::Fence(id) => {
                         let Layout { fences, settings, .. } = &mut self.layout;
                         if let Some(f) = fences.iter_mut().find(|f| f.id == id) {
-                            let (d, c) = fence_menu(ui, f, &mut self.ui, &mut m.page, &mut self.actions, &root_ctx, &mut settings.blur, &self.blur_shared);
-                            dirty |= d;
-                            close |= c;
+                            let (d, c) = fence_menu(ui, f, &mut self.ui, &mut m.page, &mut self.actions, root_ctx, &mut settings.blur, &self.blur_shared);
+                            *dirty |= d;
+                            *close |= c;
                         } else {
-                            close = true;
+                            *close = true;
                         }
                     }
                     MenuTarget::Tab(id, t) => {
                         if let Some(f) = self.layout.fences.iter_mut().find(|f| f.id == id) {
-                            let (d, c) = tab_menu(ui, f, t, &mut self.ui, &root_ctx);
-                            dirty |= d;
-                            close |= c;
+                            let (d, c) = tab_menu(ui, f, t, &mut self.ui, root_ctx);
+                            *dirty |= d;
+                            *close |= c;
                         } else {
-                            close = true;
+                            *close = true;
                         }
                     }
                     MenuTarget::Item(id, path) => {
                         let from_auto = self.layout.fences.iter().find(|f| f.id == id).map(|f| f.auto_sort).unwrap_or(false);
                         if let Some(it) = self.items.get(&path.to_lowercase()).cloned() {
-                            close |= item_menu(ui, id, from_auto, &it, targets, &mut m.page, &mut self.actions);
+                            *close |= item_menu(ui, id, from_auto, &it, targets, &mut m.page, &mut self.actions);
                         } else {
-                            close = true;
+                            *close = true;
                         }
                     }
                 }
                 let h = ui.cursor().min.y - top + 12.0;
-                measured = Vec2::new(m.size.x, h.max(40.0));
+                *measured = Vec2::new(m.size.x, h.max(40.0));
             });
-        });
-        if (measured.y - m.size.y).abs() > 1.0 {
-            m.size = measured;
-            ctx.request_repaint();
-        }
-        if dirty {
-            self.mark_dirty();
-        }
-        if !close {
-            self.ui.menu = Some(m);
         }
     }
 }
+
+/// Panel ids for the menu and the settings window (box ids are small numbers).
+#[cfg(windows)]
+const MENU_PANEL: u64 = u64::MAX - 1;
+#[cfg(windows)]
+const SETTINGS_PANEL: u64 = u64::MAX - 2;
 
 // ============================================================================================
 // Settings window
@@ -1965,11 +2023,36 @@ impl DeskApp {
             self.screenshot_step(ctx);
             return;
         }
+        let mut close = false;
+        // DirectX boxes: the settings window is a DirectX window too (no GL window).
+        #[cfg(windows)]
+        if let Some(mut hosts) = self.hosts.take() {
+            let s = desktop::system_scale();
+            let [sw, sh] = desktop::primary_screen_points();
+            let (w, h) = (1100.0_f32.min(sw - 40.0), 680.0_f32.min(sh - 80.0));
+            let (x, y) = (((sw - w) / 2.0).max(0.0), ((sh - h) / 2.0).max(0.0));
+            let rect_px = [(x * s) as i32, (y * s) as i32, (w * s) as i32, (h * s) as i32];
+            let force = self.panel_force;
+            hosts.panel(SETTINGS_PANEL, crate::host::PanelKind::Settings, "DeskBoxes", rect_px, false, force, |pctx| {
+                if pctx.input(|i| i.viewport().close_requested()) {
+                    close = true;
+                }
+                self.manager_contents(pctx);
+            });
+            if std::mem::take(&mut self.focus_settings) {
+                hosts.apply(SETTINGS_PANEL, &ViewportCommand::Focus);
+            }
+            if close {
+                hosts.close_panel(SETTINGS_PANEL);
+                self.manager_open = false;
+            }
+            self.hosts = Some(hosts);
+            return;
+        }
         let builder = ViewportBuilder::default()
             .with_title("DeskBoxes")
             .with_inner_size([1100.0, 680.0])
             .with_min_inner_size([640.0, 420.0]);
-        let mut close = false;
         ctx.show_viewport_immediate(ViewportId::from_hash_of("deskboxes-manager"), builder, |ctx, _| {
             if ctx.input(|i| i.viewport().close_requested()) {
                 close = true;
@@ -2077,7 +2160,9 @@ impl DeskApp {
                 ui.strong("");
                 ui.end_row();
                 for f in self.layout.fences.iter_mut() {
-                    dirty |= ui.add(egui::TextEdit::singleline(&mut f.name).desired_width(200.0)).changed();
+                    // A fixed size: in a grid, a text field otherwise keeps the column's first
+                    // (tiny) width forever.
+                    dirty |= ui.add_sized([200.0, 26.0], egui::TextEdit::singleline(&mut f.name)).changed();
                     let kind = match &f.widget {
                         Some(w) => widgets::find(&w.kind).map(|k| k.label).unwrap_or("Widget").to_string(),
                         None if f.auto_sort => "Auto-sort box".into(),
@@ -2118,7 +2203,6 @@ impl DeskApp {
     }
 
     fn page_layout(&mut self, ui: &mut egui::Ui) {
-        let rctx = ui.ctx().clone();
         // Show the main monitor, widened to include any box sitting on another monitor.
         let [sw, sh] = desktop::primary_screen_points();
         let mut screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(sw, sh));
@@ -2160,13 +2244,9 @@ impl DeskApp {
                 area.min + (Pos2::new(f.rect[0], f.rect[1]) - screen.min) * scale,
                 Vec2::new(f.rect[2], h) * scale,
             );
-            // DirectX boxes keep their icons on the graphics card for the boxes; the preview has
-            // its own small set.
-            #[cfg(windows)]
-            let icons = if self.hosts.is_some() { self.preview_icons.get_or_insert_with(|| IconCache::new(&rctx)) } else { &mut self.icons };
-            #[cfg(not(windows))]
-            let icons = &mut self.icons;
-            fv::paint_static(&painter, icons, f, &desk, r, scale);
+            // The settings window is drawn by the same egui context as the boxes (DirectX) or as
+            // the classic boxes (GL), so the boxes' icon cache serves the preview either way.
+            fv::paint_static(&painter, &mut self.icons, f, &desk, r, scale);
         }
     }
 
@@ -2235,9 +2315,9 @@ impl DeskApp {
         let mut remove = None;
         egui::Grid::new("cats").num_columns(3).spacing([10.0, 6.0]).show(ui, |ui| {
             for (i, r) in s.categories.iter_mut().enumerate() {
-                dirty |= ui.add(egui::TextEdit::singleline(&mut r.name).desired_width(120.0)).changed();
+                dirty |= ui.add_sized([120.0, 26.0], egui::TextEdit::singleline(&mut r.name)).changed();
                 let mut exts = r.exts.join(", ");
-                if ui.add(egui::TextEdit::singleline(&mut exts).desired_width(420.0).hint_text("zip, rar, 7z")).changed() {
+                if ui.add_sized([420.0, 26.0], egui::TextEdit::singleline(&mut exts).hint_text("zip, rar, 7z")).changed() {
                     r.exts = exts
                         .split([',', ' ', ';'])
                         .map(|e| e.trim().trim_start_matches('.').to_lowercase())

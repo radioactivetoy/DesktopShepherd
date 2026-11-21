@@ -207,6 +207,30 @@ impl Renderer {
         }
     }
 
+    /// An ordinary (not see-through) swap chain for a normal window: menus and settings.
+    pub fn create_swapchain_for_hwnd(&self, hwnd: windows::Win32::Foundation::HWND, w: u32, h: u32) -> Result<IDXGISwapChain1> {
+        unsafe {
+            let desc = DXGI_SWAP_CHAIN_DESC1 {
+                Width: w.max(1),
+                Height: h.max(1),
+                Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+                BufferUsage: DXGI_USAGE_RENDER_TARGET_OUTPUT,
+                BufferCount: 2,
+                // While the person drags the window bigger, new areas stay empty instead of
+                // showing a stretched picture; the next frame fills them.
+                Scaling: DXGI_SCALING_NONE,
+                SwapEffect: DXGI_SWAP_EFFECT_FLIP_DISCARD,
+                AlphaMode: DXGI_ALPHA_MODE_IGNORE,
+                ..Default::default()
+            };
+            let sc = self.factory.CreateSwapChainForHwnd(&self.device, hwnd, &desc, None, None)?;
+            // No Alt+Enter full-screen switching.
+            let _ = self.factory.MakeWindowAssociation(hwnd, DXGI_MWA_NO_ALT_ENTER);
+            Ok(sc)
+        }
+    }
+
     pub fn update_textures(&mut self, delta: &TexturesDelta) {
         for (id, d) in &delta.set {
             let (size, pixels): ([usize; 2], Vec<u8>) = match &d.image {
