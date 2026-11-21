@@ -36,7 +36,10 @@ Start-Process .\target\debug\deskboxes.exe
 - Logs: `%APPDATA%\DeskBoxes\log.txt`. Layout: `%APPDATA%\DeskBoxes\layout.json` (back it up
   before experiments; backups are in `backups\`).
 - Synthetic mouse tests: add waits of ≥150 ms between press/move/release, or egui won't start
-  a drag.
+  a drag. Display scale is 125 %: from a (DPI-unaware) PowerShell, `SetCursorPos` and
+  `GetWindowRect` use scaled coordinates, but `CopyFromScreen` captures real pixels (×1.25).
+- CPU while hovering: `tools\measure_hover_cpu.ps1`; Win+D: `tools\measure_show_desktop_gap.ps1`
+  (start with the desktop not shown).
 
 ## Measuring
 

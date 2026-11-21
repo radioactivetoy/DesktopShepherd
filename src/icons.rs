@@ -35,13 +35,17 @@ impl IconCache {
         Self { tx, rx, textures: HashMap::new(), pending: HashSet::new() }
     }
 
-    /// Moves finished icons into textures. Call once per frame.
-    pub fn poll(&mut self, ctx: &egui::Context) {
+    /// Moves finished icons into textures. Call once per frame. Returns true when any arrived
+    /// (the boxes showing them must be drawn again).
+    pub fn poll(&mut self, ctx: &egui::Context) -> bool {
+        let mut any = false;
         while let Ok((key, img)) = self.rx.try_recv() {
             self.pending.remove(&key);
             let tex = img.map(|i| ctx.load_texture(format!("icon:{}:{}", key.0, key.1), i, TextureOptions::LINEAR));
             self.textures.insert(key, tex);
+            any = true;
         }
+        any
     }
 
     pub fn get(&mut self, path: &str, size: u32) -> Option<egui::TextureId> {

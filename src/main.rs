@@ -25,6 +25,25 @@ const EXIT_START_FAILED: i32 = 2;
 /// Worker exit code: the window system could not start with a see-through main window.
 /// Restart it at once without asking for see-through (`--opaque`).
 const EXIT_RETRY_OPAQUE: i32 = 3;
+/// Worker exit code: DirectX boxes are unavailable, and the classic boxes need a see-through
+/// main window. Restart it at once with `--transparent`.
+pub const EXIT_NEED_TRANSPARENT: i32 = 4;
+
+/// How the main (invisible, 1x1) GL window is made. By default it is not see-through: that is
+/// cheaper on every pass (measured: about 40 % less CPU while the mouse moves over a box) and
+/// avoids the GL setups this PC's driver doesn't always offer. Only the classic boxes need it.
+#[derive(Clone, Copy, PartialEq)]
+enum RootMode {
+    /// Not see-through; may ask for see-through if the classic boxes are needed.
+    Default,
+    /// See-through (`--transparent`), for the classic boxes.
+    Transparent,
+    /// Not see-through and never ask again (`--opaque`): see-through failed to start.
+    OpaqueFinal,
+}
+
+/// The worker may exit with EXIT_NEED_TRANSPARENT to get a see-through main window.
+pub static MAY_ASK_TRANSPARENT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// The safety net, like the original's launcher (0x140012300 in the original launcher, which checks
 /// every 2000 ms and restarts the organizer): runs the real app as a child process and starts
@@ -37,15 +56,21 @@ fn supervise(boot: bool) {
     let Ok(exe) = std::env::current_exe() else { return };
     let mut failures_in_a_row = 0usize;
     let mut first = true;
-    let mut opaque = false;
+    let mut mode = RootMode::Default;
     loop {
         let mut cmd = std::process::Command::new(&exe);
         cmd.arg("--worker");
         if boot && first {
             cmd.arg("--boot");
         }
-        if opaque {
-            cmd.arg("--opaque");
+        match mode {
+            RootMode::Default => {}
+            RootMode::Transparent => {
+                cmd.arg("--transparent");
+            }
+            RootMode::OpaqueFinal => {
+                cmd.arg("--opaque");
+            }
         }
         first = false;
         let started = Instant::now();
@@ -57,9 +82,14 @@ fn supervise(boot: bool) {
         }
         match status {
             Ok(s) if s.success() => return,
-            Ok(s) if s.code() == Some(EXIT_RETRY_OPAQUE) && !opaque => {
+            Ok(s) if s.code() == Some(EXIT_NEED_TRANSPARENT) && mode == RootMode::Default => {
+                storage::log_line("DirectX boxes unavailable; restarting with a see-through main window for the classic boxes");
+                mode = RootMode::Transparent;
+                continue;
+            }
+            Ok(s) if s.code() == Some(EXIT_RETRY_OPAQUE) && mode == RootMode::Transparent => {
                 storage::log_line("app could not start with a see-through main window; retrying without");
-                opaque = true;
+                mode = RootMode::OpaqueFinal;
                 continue;
             }
             Ok(s) => storage::log_line(&format!("app stopped unexpectedly ({s}); restarting")),
@@ -117,7 +147,9 @@ fn main() {
     }
     let worker = args.iter().any(|a| a == "--worker");
     let boot = args.iter().any(|a| a == "--boot");
-    let opaque = args.iter().any(|a| a == "--opaque");
+    let transparent = args.iter().any(|a| a == "--transparent");
+    let opaque_final = args.iter().any(|a| a == "--opaque");
+    MAY_ASK_TRANSPARENT.store(worker && !transparent && !opaque_final, std::sync::atomic::Ordering::SeqCst);
 
     if screenshot.is_none() && !worker {
         // Only one copy runs at a time (a check picture may run beside it: it saves nothing).
@@ -158,10 +190,9 @@ fn main() {
             .with_inner_size([1.0, 1.0])
             .with_position([0.0, 0.0])
             .with_decorations(false)
-            // See-through needs a GL setup this PC's driver doesn't always offer; without it
-            // (--opaque, chosen by the supervisor after a failed start) the 1x1 window still
-            // sits invisible below the desktop.
-            .with_transparent(!opaque)
+            // Not see-through unless the classic boxes need it (see RootMode); the 1x1 window
+            // sits invisible below the desktop either way.
+            .with_transparent(transparent)
             .with_taskbar(false)
             .with_resizable(false)
             .with_mouse_passthrough(true)
@@ -173,7 +204,9 @@ fn main() {
     let options = eframe::NativeOptions {
         viewport,
         renderer: eframe::Renderer::Glow,
-        vsync: true,
+        // Off: the main GL window is invisible (1x1) and DirectX boxes present on their own;
+        // waiting for the screen refresh in GL made the driver spin on every pass.
+        vsync: false,
         // No colour noise: it would skew the exact see-through copy used while dragging.
         dithering: false,
         persist_window: false,
@@ -190,7 +223,7 @@ fn main() {
         desktop::restore_desktop_icons();
         // Never report a failed start as a clean quit, or the supervisor would stop for good.
         let msg = e.to_string();
-        let code = if !opaque && msg.contains("glutin config") { EXIT_RETRY_OPAQUE } else { EXIT_START_FAILED };
+        let code = if transparent && msg.contains("glutin config") { EXIT_RETRY_OPAQUE } else { EXIT_START_FAILED };
         std::process::exit(code);
     }
     desktop::restore_desktop_icons();

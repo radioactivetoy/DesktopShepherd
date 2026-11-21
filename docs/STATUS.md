@@ -8,6 +8,14 @@
 | worker `deskboxes.exe --worker` | ~156 MB | ~157 MB | ~0.01 % |
 
 History: classic GL glass path 194–240 MB → DirectX composition path ~156–158 MB.
+
+Mouse moving over a box (`tools\measure_hover_cpu.ps1`, 10 s): 8.0 s CPU before phase A →
+1.45 s after (2026-11-21). Phase A = each DirectX box draws only for its own reasons (input,
+move/resize, look change, its egui timer) or when shared data changes (`redraw_all`); passes
+started by box input are grouped (at most one per 16 ms, `host::MIN_PASS_GAP`); the invisible
+GL main window is no longer see-through (`--transparent` only for the classic path) and has
+vsync off. What is left per pass is mostly eframe's GL main window (phase C removes it).
+`DESKBOXES_DEBUG_DRAWS=1` logs box frames drawn and time spent per 300 passes.
 Dragging a box: the box follows the cursor within ~1 step; dragged icons track within 1 px.
 
 **Original app for comparison**: only its 11–12 MB launcher was running here (the
@@ -38,7 +46,8 @@ driver (~90 MB baseline even for a 1×1 window), then D3D11 device + composition
 - RDP / very old GPUs fall back to the classic path, which is heavier (~200 MB) and uses
   fake glass from a wallpaper capture.
 - Names: exe/data folder still `DeskBoxes`.
-- Unused `mut` warnings in `app.rs` (~lines 1582/1602).
+- Synthetic drags (SetCursorPos + mouse_event) don't start a drag on a *rolled-up* box's title
+  (same before and after phase A); untested by hand.
 
 ## Improvement ideas (ordered by value)
 

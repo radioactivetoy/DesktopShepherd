@@ -19,6 +19,7 @@ use crate::d3d::Renderer;
 use eframe::egui::{self, Pos2, Rect, Vec2, ViewportCommand, ViewportId};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Duration;
 use windows::core::{w, Interface, Result, HSTRING};
 use windows::Foundation::Numerics::Vector2;
 use windows::Win32::Foundation::{BOOL, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
@@ -53,13 +54,20 @@ struct Shared {
     dropped: Vec<std::path::PathBuf>,
     cursor: egui::CursorIcon,
     no_activate: bool,
+    /// Something happened to the window (input, move, resize, DPI): draw it on the next pass.
+    dirty: bool,
 }
 
 static WAKE: OnceLock<egui::Context> = OnceLock::new();
 
+/// Shortest time between two passes started by box input. Mouse messages arrive up to ~1000 a
+/// second; grouping them into at most one pass per 10 ms keeps boxes smooth (100 per second)
+/// while each pass of the GL main window costs far more than the box drawing itself.
+pub const MIN_PASS_GAP: Duration = Duration::from_millis(16);
+
 fn wake() {
     if let Some(c) = WAKE.get() {
-        c.request_repaint();
+        c.request_repaint_after(MIN_PASS_GAP);
     }
 }
 
@@ -114,6 +122,7 @@ unsafe extern "system" fn wndproc(h: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LR
     let push = |e: egui::Event| {
         if let Ok(mut s) = shared.lock() {
             s.events.push(e);
+            s.dirty = true;
         }
         wake();
     };
@@ -239,6 +248,7 @@ unsafe extern "system" fn wndproc(h: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LR
             DragFinish(drop);
             if let Ok(mut s) = shared.lock() {
                 s.dropped.extend(files);
+                s.dirty = true;
             }
             wake();
             LRESULT(0)
@@ -246,6 +256,9 @@ unsafe extern "system" fn wndproc(h: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LR
         WM_ERASEBKGND => LRESULT(1),
         WM_CLOSE => LRESULT(0), // never closed by Alt+F4
         WM_DPICHANGED | WM_SIZE | WM_MOVE => {
+            if let Ok(mut s) = shared.lock() {
+                s.dirty = true;
+            }
             wake();
             DefWindowProcW(h, m, wp, lp)
         }
@@ -266,6 +279,10 @@ pub struct Host {
     tint_brush: CompositionColorBrush,
     content: SpriteVisual,
     geo: CompositionRoundedRectangleGeometry,
+    /// When egui asked to draw this box again (a timer, an animation), if it did.
+    next: Option<std::time::Instant>,
+    /// The look and size last given to the composition layers (set again only on change).
+    applied: Option<([u8; 4], u32, u32, [u32; 2])>,
 }
 
 impl Drop for Host {
@@ -324,7 +341,7 @@ impl HostSystem {
             {
                 let root = root_ctx.clone();
                 ctx.set_request_repaint_callback(move |info| {
-                    root.request_repaint_after(info.delay);
+                    root.request_repaint_after(info.delay.max(MIN_PASS_GAP));
                 });
             }
             Ok(Self { _controller: controller, compositor, renderer, ctx, hosts: HashMap::new(), start: std::time::Instant::now(), lost: false, logged_error: false })
@@ -395,6 +412,8 @@ impl HostSystem {
                 tint_brush,
                 content,
                 geo,
+                next: None,
+                applied: None,
             })
         }
     }
@@ -408,7 +427,7 @@ impl HostSystem {
                 self.renderer = r;
                 let ctx = egui::Context::default();
                 let root = root_ctx.clone();
-                ctx.set_request_repaint_callback(move |info| root.request_repaint_after(info.delay));
+                ctx.set_request_repaint_callback(move |info| root.request_repaint_after(info.delay.max(MIN_PASS_GAP)));
                 self.ctx = ctx;
                 self.lost = false;
                 self.logged_error = false;
@@ -417,6 +436,13 @@ impl HostSystem {
             }
             Err(_) => false,
         }
+    }
+
+    /// The earliest time any box asked to be drawn again (a clock, a tooltip, an animation).
+    /// The app re-arms its own wake-up with it after every pass: egui forgets a pending wake-up
+    /// when another pass runs in between, and skipped boxes would not ask again.
+    pub fn next_due(&self) -> Option<std::time::Instant> {
+        self.hosts.values().filter_map(|h| h.next).min()
     }
 
     /// Removes the windows of boxes that no longer exist.
@@ -450,8 +476,11 @@ impl HostSystem {
         }
     }
 
-    /// Runs one egui frame for a box (creating its window if needed) and draws it.
-    pub fn frame(&mut self, id: u64, rect_points: [f32; 4], look: &Look, mut ui: impl FnMut(&egui::Context)) {
+    /// Runs one egui frame for a box (creating its window if needed) and draws it — but only
+    /// when the box has a reason to: `force` (shared data changed), input or a move/resize, a
+    /// look change, or a redraw time egui asked for. Otherwise nothing runs and nothing is
+    /// presented. Returns true when the box was drawn.
+    pub fn frame(&mut self, id: u64, rect_points: [f32; 4], look: &Look, force: bool, mut ui: impl FnMut(&egui::Context)) -> bool {
         if !self.hosts.contains_key(&id) {
             let s = crate::desktop::system_scale();
             let r = [
@@ -466,38 +495,51 @@ impl HostSystem {
                 }
                 Err(e) => {
                     crate::storage::log_line(&format!("could not create box window: {e:?}"));
-                    return;
+                    return false;
                 }
             }
         }
         let vid = ViewportId::from_hash_of(("deskboxes-fence", id));
         let time = self.start.elapsed().as_secs_f64();
-        let Some(h) = self.hosts.get_mut(&id) else { return };
+        let Some(h) = self.hosts.get_mut(&id) else { return false };
         unsafe {
             let ppp = ppp_of(h.hwnd);
             let mut wr = RECT::default();
             let _ = GetWindowRect(h.hwnd, &mut wr);
             let (w, ht) = ((wr.right - wr.left).max(1) as u32, (wr.bottom - wr.top).max(1) as u32);
+            let now = std::time::Instant::now();
+            let applied = (look.tint, (look.corner_points * ppp).to_bits(), look.blur.to_bits(), [w, ht]);
+            let has_input = h.shared.lock().map(|s| s.dirty).unwrap_or(true);
+            let due = h.next.map(|t| t <= now).unwrap_or(false);
+            let changed = h.applied != Some(applied);
+            if !(force || has_input || due || changed) {
+                return false;
+            }
             if [w, ht] != h.size {
                 if self.renderer.resize(&h.swapchain, w, ht).is_ok() {
                     h.size = [w, ht];
                 }
             }
-            let size = Vector2 { X: w as f32, Y: ht as f32 };
-            let _ = h.container.SetSize(size);
-            let _ = h.backdrop.SetSize(size);
-            let _ = h.tint.SetSize(size);
-            let _ = h.content.SetSize(size);
-            let _ = h.geo.SetSize(size);
-            let r = look.corner_points * ppp;
-            let _ = h.geo.SetCornerRadius(Vector2 { X: r, Y: r });
-            let _ = h.tint_brush.SetColor(Color { A: look.tint[3], R: look.tint[0], G: look.tint[1], B: look.tint[2] });
-            let _ = h.backdrop.SetOpacity(look.blur.clamp(0.0, 1.0));
-            let _ = h.backdrop.SetIsVisible(look.blur > 0.0);
+            if changed {
+                // Each change makes Windows recompose the box: only send what changed.
+                let size = Vector2 { X: w as f32, Y: ht as f32 };
+                let _ = h.container.SetSize(size);
+                let _ = h.backdrop.SetSize(size);
+                let _ = h.tint.SetSize(size);
+                let _ = h.content.SetSize(size);
+                let _ = h.geo.SetSize(size);
+                let r = look.corner_points * ppp;
+                let _ = h.geo.SetCornerRadius(Vector2 { X: r, Y: r });
+                let _ = h.tint_brush.SetColor(Color { A: look.tint[3], R: look.tint[0], G: look.tint[1], B: look.tint[2] });
+                let _ = h.backdrop.SetOpacity(look.blur.clamp(0.0, 1.0));
+                let _ = h.backdrop.SetIsVisible(look.blur > 0.0);
+                h.applied = Some(applied);
+            }
 
             let (events, focused, dropped) = match h.shared.lock() {
                 Ok(mut s) => {
                     s.no_activate = look.no_activate;
+                    s.dirty = false;
                     (std::mem::take(&mut s.events), s.focused, std::mem::take(&mut s.dropped))
                 }
                 Err(_) => (Vec::new(), false, Vec::new()),
@@ -537,6 +579,11 @@ impl HostSystem {
                 s.cursor = out.platform_output.cursor_icon;
             }
             let cmds: Vec<ViewportCommand> = out.viewport_output.get(&vid).map(|v| v.commands.clone()).unwrap_or_default();
+            // egui's own "draw me again in …" for this box (tooltips, animations, a clock).
+            let delay = out.viewport_output.get(&vid).map(|v| v.repaint_delay).unwrap_or(Duration::MAX);
+            if let Some(h) = self.hosts.get_mut(&id) {
+                h.next = if delay < Duration::from_secs(86_400) { Some(now + delay) } else { None };
+            }
             self.renderer.update_textures(&out.textures_delta);
             let prims = self.ctx.tessellate(out.shapes, out.pixels_per_point);
             let size_px = self.hosts.get(&id).map(|h| h.size).unwrap_or([w, ht]);
@@ -556,6 +603,7 @@ impl HostSystem {
                 self.apply(id, c);
             }
         }
+        true
     }
 }
 

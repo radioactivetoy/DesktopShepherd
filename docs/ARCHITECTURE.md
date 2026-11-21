@@ -19,7 +19,10 @@ deskboxes.exe            supervisor (main.rs: supervise)
 
 ## Windows inside the worker
 
-- **Root window**: eframe/glow, 1×1, invisible, click-through, bottom-most. It owns the single
+- **Root window**: eframe/glow, 1×1, invisible, click-through, bottom-most, vsync off, not
+  see-through by default. If DirectX boxes can't start, the worker exits with code 4 and the
+  supervisor restarts it with `--transparent` (classic boxes need a see-through GL setup); if
+  that GL setup is missing it falls back to `--opaque`. It owns the single
   update loop (`DeskApp::update` in `app.rs`). The settings/menu page is an egui immediate
   viewport.
 - **Boxes – DirectX path (default, `host.rs` + `d3d.rs`)**: one plain Win32 window per box
@@ -32,8 +35,13 @@ deskboxes.exe            supervisor (main.rs: supervise)
     with our own small D3D11 renderer (`d3d.rs`, HLSL compiled at start-up with D3DCompile,
     premultiplied alpha).
   - All box windows share one egui `Context` (`HostSystem::ctx`), one viewport id per box.
-    The wndproc turns Win32 mouse/keyboard messages into egui events and wakes the root
-    context; every root update runs every box frame (only boxes with changes repaint).
+    The wndproc turns Win32 mouse/keyboard messages into egui events, marks the box dirty
+    and wakes the root context (grouped: at most one pass per `host::MIN_PASS_GAP`). On each
+    root update `HostSystem::frame` draws a box only if it is dirty (input, move, resize),
+    its look changed, its egui timer is due, or the app forces it (`DeskApp::redraw_all`:
+    desktop files, icons, layout or shared selection changed; every pass during an icon
+    drag). Skipped boxes run no egui pass and present nothing. After each pass the root
+    re-arms its wake-up with `HostSystem::next_due()`.
   - Moving a box: `host::move_with_mouse` runs a helper thread that follows the cursor with
     `SetWindowPos(…SWP_ASYNCWINDOWPOS)`; DWM moves the composed content, so the frosted
     backdrop never flickers.

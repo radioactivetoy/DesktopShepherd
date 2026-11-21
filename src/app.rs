@@ -148,6 +148,31 @@ pub struct DeskApp {
     hosts: Option<crate::host::HostSystem>,
     /// Icons for the layout preview when boxes are composition windows.
     preview_icons: Option<IconCache>,
+    /// Shared data changed (files, icons, layout, selection): every box draws on the next pass.
+    /// Otherwise a DirectX box draws only for its own reasons (see `HostSystem::frame`).
+    redraw_all: bool,
+}
+
+/// Passes and box frames drawn (for DESKBOXES_DEBUG_DRAWS).
+static DRAW_STATS: (std::sync::atomic::AtomicU64, std::sync::atomic::AtomicU64) =
+    (std::sync::atomic::AtomicU64::new(0), std::sync::atomic::AtomicU64::new(0));
+static DRAW_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static UPDATE_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// A cheap fingerprint of the UI state that several boxes show (selection, renaming, an icon
+/// drag): when it changes in one box, the others draw again too.
+fn shared_ui_fingerprint(st: &UiState) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    // Order-independent sum over the selection set.
+    let mut sel: u64 = 0;
+    for p in &st.selection {
+        let mut ph = std::collections::hash_map::DefaultHasher::new();
+        p.hash(&mut ph);
+        sel = sel.wrapping_add(ph.finish());
+    }
+    (sel, st.selection.len(), &st.selected, st.renaming.as_ref().map(|r| (r.0, r.1)), st.item_drag.is_some()).hash(&mut h);
+    h.finish()
 }
 
 fn clean_paths(layout: &Layout) -> Vec<String> {
@@ -249,6 +274,12 @@ impl DeskApp {
                 }
                 Err(e) => {
                     storage::log_line(&format!("DirectX boxes unavailable, using the previous drawing: {e:?}"));
+                    // The classic boxes need a see-through main window: ask the supervisor for a
+                    // restart with one (it does this only once).
+                    if crate::MAY_ASK_TRANSPARENT.load(std::sync::atomic::Ordering::SeqCst) {
+                        desktop::restore_desktop_icons();
+                        std::process::exit(crate::EXIT_NEED_TRANSPARENT);
+                    }
                     None
                 }
             }
@@ -294,6 +325,7 @@ impl DeskApp {
             #[cfg(windows)]
             hosts,
             preview_icons: None,
+            redraw_all: true,
             layout,
         };
         if app.persist {
@@ -305,6 +337,8 @@ impl DeskApp {
     }
 
     fn mark_dirty(&mut self) {
+        // The layout changed: boxes show it right away (saving waits until changes settle).
+        self.redraw_all = true;
         if self.dirty_at.is_none() {
             self.dirty_at = Some(Instant::now());
         }
@@ -480,6 +514,23 @@ impl eframe::App for DeskApp {
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        let update_start = Instant::now();
+        self.update_inner(ctx);
+        UPDATE_US.fetch_add(update_start.elapsed().as_micros() as u64, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        if self.dirty_at.is_some() {
+            self.save_now();
+        }
+        if self.icons_hidden {
+            desktop::set_desktop_icons_visible(true);
+        }
+    }
+}
+
+impl DeskApp {
+    fn update_inner(&mut self, ctx: &egui::Context) {
         if let Ok(mut c) = CTX.lock() {
             if c.is_none() {
                 *c = Some(ctx.clone());
@@ -518,14 +569,18 @@ impl eframe::App for DeskApp {
         if changed_files {
             let keep: HashSet<String> = self.items.keys().cloned().collect();
             self.icons.forget_missing(&keep);
+            self.redraw_all = true;
         }
         #[cfg(windows)]
-        match self.hosts.as_ref() {
+        let icons_arrived = match self.hosts.as_ref() {
             Some(h) => self.icons.poll(&h.ctx),
             None => self.icons.poll(ctx),
-        }
+        };
         #[cfg(not(windows))]
-        self.icons.poll(ctx);
+        let icons_arrived = self.icons.poll(ctx);
+        if icons_arrived {
+            self.redraw_all = true;
+        }
         if let Some(p) = self.preview_icons.as_mut() {
             p.poll(ctx);
         }
@@ -573,7 +628,14 @@ impl eframe::App for DeskApp {
             self.show_manager(ctx);
         }
 
+        if !self.actions.is_empty() {
+            self.redraw_all = true;
+        }
         self.process_actions();
+        // Something shared changed during this pass: draw every box once more, right away.
+        if self.redraw_all && self.persist {
+            ctx.request_repaint();
+        }
 
         // ---- saving, once changes settle
         if let Some(t) = self.dirty_at {
@@ -583,15 +645,6 @@ impl eframe::App for DeskApp {
             } else {
                 ctx.request_repaint_after(left + Duration::from_millis(20));
             }
-        }
-    }
-
-    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
-        if self.dirty_at.is_some() {
-            self.save_now();
-        }
-        if self.icons_hidden {
-            desktop::set_desktop_icons_visible(true);
         }
     }
 }
@@ -637,6 +690,10 @@ impl DeskApp {
                 ctx.request_repaint_after(Duration::from_secs(2));
             }
         }
+        // Every box draws when shared data changed, and during an icon drag (the box under the
+        // mouse shows where the icons will land).
+        let force_all = std::mem::take(&mut self.redraw_all) || self.ui.item_drag.is_some();
+        let fingerprint = shared_ui_fingerprint(&self.ui);
         #[cfg(windows)]
         if let Some(hosts) = self.hosts.as_mut().filter(|h| !h.lost) {
             self.ui.composited = true;
@@ -656,12 +713,32 @@ impl DeskApp {
                 let icons = &mut self.icons;
                 let actions = &mut self.actions;
                 let wallpaper = &mut self.wallpaper;
-                hosts.frame(id, rect, &look, |ctx| {
+                let t0 = Instant::now();
+                let drew = hosts.frame(id, rect, &look, force_all, |ctx| {
                     let r = fence_window(ctx, fence, &desk, icons, wallpaper, ui_state, actions, expand_on_hover);
                     dirty |= r.0;
                     wake_scan |= r.1;
                 });
+                if drew {
+                    DRAW_STATS.1.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    DRAW_US.fetch_add(t0.elapsed().as_micros() as u64, std::sync::atomic::Ordering::Relaxed);
+                }
             }
+            // Wake up again when the earliest box timer is due (see HostSystem::next_due).
+            if let Some(t) = hosts.next_due() {
+                ctx.request_repaint_after(t.saturating_duration_since(Instant::now()).max(crate::host::MIN_PASS_GAP));
+            }
+        }
+        if shared_ui_fingerprint(&self.ui) != fingerprint {
+            self.redraw_all = true;
+        }
+        // DESKBOXES_DEBUG_DRAWS: log how many box frames each pass draws (measuring only).
+        let passes = DRAW_STATS.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        if passes % 300 == 0 && std::env::var_os("DESKBOXES_DEBUG_DRAWS").is_some() {
+            let draws = DRAW_STATS.1.swap(0, std::sync::atomic::Ordering::Relaxed);
+            let us = DRAW_US.swap(0, std::sync::atomic::Ordering::Relaxed);
+            let upd = UPDATE_US.swap(0, std::sync::atomic::Ordering::Relaxed);
+            storage::log_line(&format!("last 300 passes: {draws} box frames drawn in {} ms; update() total {} ms (force_all now: {force_all})", us / 1000, upd / 1000));
         }
         #[cfg(windows)]
         let classic = self.hosts.is_none();
@@ -1621,7 +1698,7 @@ fn fence_menu(ui: &mut egui::Ui, fence: &mut Fence, st: &mut UiState, page: &mut
             sep(ui);
             // Aligned rows: name, slider, value.
             let _ = (&blur, &blur_shared);
-            let mut row = |ui: &mut egui::Ui, label: &str, value: String, slider: &mut dyn FnMut(&mut egui::Ui) -> bool| -> bool {
+            let row = |ui: &mut egui::Ui, label: &str, value: String, slider: &mut dyn FnMut(&mut egui::Ui) -> bool| -> bool {
                 let mut changed = false;
                 ui.horizontal(|ui| {
                     ui.add_space(14.0);
@@ -1641,7 +1718,7 @@ fn fence_menu(ui: &mut egui::Ui, fence: &mut Fence, st: &mut UiState, page: &mut
             dirty |= row(ui, "Blur", blur_txt, &mut |ui| ui.add(egui::Slider::new(&mut fence.blur, 0..=40).show_value(false)).changed());
             sep(ui);
             // Two-way switches for where the title and the tabs go.
-            let mut switch = |ui: &mut egui::Ui, label: &str, first: &str, second: &str, is_first: bool| -> Option<bool> {
+            let switch = |ui: &mut egui::Ui, label: &str, first: &str, second: &str, is_first: bool| -> Option<bool> {
                 let mut pick = None;
                 ui.horizontal(|ui| {
                     ui.add_space(14.0);

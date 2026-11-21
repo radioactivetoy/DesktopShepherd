@@ -67,7 +67,7 @@ snapshots) and the classic viewport code in `app.rs` are deleted. The flying-ico
 
 | Phase | Change | eframe still there? | Check |
 |---|---|---|---|
-| A | Per-surface schedule for boxes (section 2) inside today's loop | yes | CPU with mouse moving over a box; drag, resize, roll-up, widgets, clock |
+| A ✅ | Per-surface schedule for boxes (section 2) inside today's loop. **Done 2026-11-21**: hover CPU 8.0 → 1.45 s per 10 s. The main window re-arms its wake-up from `HostSystem::next_due()` after every pass, because egui forgets a pending wake-up when another pass runs in between (the clock stopped without this). | yes | CPU with mouse moving over a box; drag, resize, roll-up, widgets, clock |
 | B | Menus and Settings become D3D surfaces (section 1) | yes (root only) | every menu page, settings pages, typing, copy/paste, layout preview |
 | C | Own loop (section 3); eframe, glow and the classic path removed | no | idle CPU, memory, tray, quit, crash → supervisor, sleep/resume, device lost, multi-monitor |
 | D | WARP and no-composition fallbacks (section 4) | no | force each fallback with a debug switch |
