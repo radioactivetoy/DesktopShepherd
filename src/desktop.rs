@@ -258,8 +258,8 @@ pub fn primary_screen_points() -> [f32; 2] {
 }
 
 /// The usable area (without the taskbar) of the monitor under a point, in screen points.
-pub fn work_area_at(p: eframe::egui::Pos2, ppp: f32) -> eframe::egui::Rect {
-    use eframe::egui::{Pos2, Rect};
+pub fn work_area_at(p: egui::Pos2, ppp: f32) -> egui::Rect {
+    use egui::{Pos2, Rect};
     #[cfg(windows)]
     unsafe {
         use windows::Win32::Foundation::POINT;
@@ -322,13 +322,13 @@ pub fn prepare_box(title: &str, no_activate: bool) -> Option<isize> {
 pub struct Monitor {
     pub name: String,
     pub primary: bool,
-    pub rect: eframe::egui::Rect,
+    pub rect: egui::Rect,
 }
 
 /// All displays, ordered by role: the main monitor first, then the others left to right
 /// (then top to bottom). Index = role (0 main, 1 second, ...).
 pub fn monitors() -> Vec<Monitor> {
-    use eframe::egui::{Pos2, Rect};
+    use egui::{Pos2, Rect};
     #[allow(unused_mut)]
     let mut out: Vec<Monitor> = Vec::new();
     #[cfg(windows)]
@@ -363,7 +363,7 @@ pub fn monitors() -> Vec<Monitor> {
     }
     if out.is_empty() {
         let [w, h] = primary_screen_points();
-        out.push(Monitor { name: "main".into(), primary: true, rect: Rect::from_min_size(Pos2::ZERO, eframe::egui::Vec2::new(w, h)) });
+        out.push(Monitor { name: "main".into(), primary: true, rect: Rect::from_min_size(Pos2::ZERO, egui::Vec2::new(w, h)) });
     }
     out.sort_by(|a, b| {
         (!a.primary, a.rect.min.x as i64, a.rect.min.y as i64).cmp(&(!b.primary, b.rect.min.x as i64, b.rect.min.y as i64))
@@ -384,98 +384,15 @@ pub fn system_scale() -> f32 {
     }
 }
 
-/// Whether Windows' own desktop icons are showing right now.
-pub fn desktop_icons_visible() -> bool {
-    #[cfg(windows)]
-    unsafe {
-        use windows::Win32::UI::WindowsAndMessaging::IsWindowVisible;
-        icons_view::list_view().map(|h| IsWindowVisible(h).as_bool()).unwrap_or(false)
-    }
-    #[cfg(not(windows))]
-    {
-        false
-    }
-}
-
-/// The desktop exactly as Windows draws it (wallpaper on every monitor, plus icons if they are
-/// showing), and its top-left corner in screen pixels. Asked from Explorer's desktop window,
-/// so it matches what shows through truly transparent windows.
-pub fn capture_desktop() -> Option<(eframe::egui::Pos2, eframe::egui::ColorImage)> {
-    #[cfg(windows)]
-    unsafe {
-        use windows::core::w;
-        use windows::Win32::Foundation::RECT;
-        use windows::Win32::Graphics::Gdi::{
-            CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, GetDC, ReleaseDC, SelectObject, BITMAPINFO,
-            BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HGDIOBJ,
-        };
-        use windows::Win32::Storage::Xps::{PrintWindow, PRINT_WINDOW_FLAGS};
-        use windows::Win32::UI::WindowsAndMessaging::{FindWindowW, GetWindowRect};
-        let progman = FindWindowW(w!("Progman"), None).ok()?;
-        let mut r = RECT::default();
-        GetWindowRect(progman, &mut r).ok()?;
-        let (wd, ht) = ((r.right - r.left) as usize, (r.bottom - r.top) as usize);
-        if wd == 0 || ht == 0 || wd > 16384 || ht > 16384 {
-            return None;
-        }
-        let screen = GetDC(None);
-        let dc = CreateCompatibleDC(screen);
-        let mut info = BITMAPINFO {
-            bmiHeader: BITMAPINFOHEADER {
-                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
-                biWidth: wd as i32,
-                biHeight: -(ht as i32),
-                biPlanes: 1,
-                biBitCount: 32,
-                biCompression: BI_RGB.0,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        let mut bits: *mut core::ffi::c_void = std::ptr::null_mut();
-        let mut out = None;
-        if let Ok(bmp) = CreateDIBSection(dc, &mut info, DIB_RGB_COLORS, &mut bits, None, 0) {
-            let old = SelectObject(dc, HGDIOBJ(bmp.0));
-            if PrintWindow(progman, dc, PRINT_WINDOW_FLAGS(2)).as_bool() && !bits.is_null() {
-                let raw = std::slice::from_raw_parts(bits as *const u8, wd * ht * 4);
-                // A failed capture comes back black: check a spread of pixels.
-                let lit = (0..64).any(|k| {
-                    let i = ((k * 7919) % (wd * ht)) * 4;
-                    raw[i] > 8 || raw[i + 1] > 8 || raw[i + 2] > 8
-                });
-                if lit {
-                    let pixels = raw
-                        .chunks_exact(4)
-                        .map(|p| eframe::egui::Color32::from_rgb(p[2], p[1], p[0]))
-                        .collect();
-                    out = Some((
-                        eframe::egui::Pos2::new(r.left as f32, r.top as f32),
-                        eframe::egui::ColorImage { size: [wd, ht], pixels },
-                    ));
-                }
-            }
-            SelectObject(dc, old);
-            let _ = DeleteObject(HGDIOBJ(bmp.0));
-        }
-        let _ = DeleteDC(dc);
-        ReleaseDC(None, screen);
-        out
-    }
-    #[cfg(not(windows))]
-    {
-        None
-    }
-}
-
 /// The mouse position on screen, in points.
-pub fn cursor_points(ppp: f32) -> Option<eframe::egui::Pos2> {
+pub fn cursor_points(ppp: f32) -> Option<egui::Pos2> {
     #[cfg(windows)]
     unsafe {
         use windows::Win32::Foundation::POINT;
         use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
         let mut p = POINT::default();
         GetCursorPos(&mut p).ok()?;
-        Some(eframe::egui::Pos2::new(p.x as f32 / ppp, p.y as f32 / ppp))
+        Some(egui::Pos2::new(p.x as f32 / ppp, p.y as f32 / ppp))
     }
     #[cfg(not(windows))]
     {
@@ -682,8 +599,8 @@ fn storage_log(msg: &str) {
 
 /// Where a box's drawing area really is on screen right now (points). Asked from Windows
 /// directly so the glass wallpaper stays lined up while the box is being dragged.
-pub fn client_rect_points(hwnd: isize, ppp: f32) -> Option<eframe::egui::Rect> {
-    use eframe::egui::{Pos2, Rect};
+pub fn client_rect_points(hwnd: isize, ppp: f32) -> Option<egui::Rect> {
+    use egui::{Pos2, Rect};
     #[cfg(windows)]
     unsafe {
         use windows::Win32::Foundation::{HWND, POINT, RECT};
@@ -698,7 +615,7 @@ pub fn client_rect_points(hwnd: isize, ppp: f32) -> Option<eframe::egui::Rect> {
         }
         return Some(Rect::from_min_size(
             Pos2::new(p.x as f32 / ppp, p.y as f32 / ppp),
-            eframe::egui::Vec2::new((r.right - r.left) as f32 / ppp, (r.bottom - r.top) as f32 / ppp),
+            egui::Vec2::new((r.right - r.left) as f32 / ppp, (r.bottom - r.top) as f32 / ppp),
         ));
     }
     #[cfg(not(windows))]

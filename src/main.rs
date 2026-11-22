@@ -13,37 +13,16 @@ mod ghost;
 mod icons;
 mod import_original;
 mod model;
+#[cfg(windows)]
+mod runloop;
 mod storage;
-mod wallpaper;
 mod widgets;
 
-use eframe::egui;
 use std::path::PathBuf;
 
-/// Worker exit code: the window system could not start (the app never ran). Restart it later.
-const EXIT_START_FAILED: i32 = 2;
-/// Worker exit code: the window system could not start with a see-through main window.
-/// Restart it at once without asking for see-through (`--opaque`).
-const EXIT_RETRY_OPAQUE: i32 = 3;
-/// Worker exit code: DirectX boxes are unavailable, and the classic boxes need a see-through
-/// main window. Restart it at once with `--transparent`.
-pub const EXIT_NEED_TRANSPARENT: i32 = 4;
-
-/// How the main (invisible, 1x1) GL window is made. By default it is not see-through: that is
-/// cheaper on every pass (measured: about 40 % less CPU while the mouse moves over a box) and
-/// avoids the GL setups this PC's driver doesn't always offer. Only the classic boxes need it.
-#[derive(Clone, Copy, PartialEq)]
-enum RootMode {
-    /// Not see-through; may ask for see-through if the classic boxes are needed.
-    Default,
-    /// See-through (`--transparent`), for the classic boxes.
-    Transparent,
-    /// Not see-through and never ask again (`--opaque`): see-through failed to start.
-    OpaqueFinal,
-}
-
-/// The worker may exit with EXIT_NEED_TRANSPARENT to get a see-through main window.
-pub static MAY_ASK_TRANSPARENT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Worker exit code: the app could not start (no graphics device, no window). The supervisor
+/// tries again later.
+pub const EXIT_START_FAILED: i32 = 2;
 
 /// The safety net, like the original's launcher (0x140012300 in the original launcher, which checks
 /// every 2000 ms and restarts the organizer): runs the real app as a child process and starts
@@ -56,21 +35,11 @@ fn supervise(boot: bool) {
     let Ok(exe) = std::env::current_exe() else { return };
     let mut failures_in_a_row = 0usize;
     let mut first = true;
-    let mut mode = RootMode::Default;
     loop {
         let mut cmd = std::process::Command::new(&exe);
         cmd.arg("--worker");
         if boot && first {
             cmd.arg("--boot");
-        }
-        match mode {
-            RootMode::Default => {}
-            RootMode::Transparent => {
-                cmd.arg("--transparent");
-            }
-            RootMode::OpaqueFinal => {
-                cmd.arg("--opaque");
-            }
         }
         first = false;
         let started = Instant::now();
@@ -82,16 +51,6 @@ fn supervise(boot: bool) {
         }
         match status {
             Ok(s) if s.success() => return,
-            Ok(s) if s.code() == Some(EXIT_NEED_TRANSPARENT) && mode == RootMode::Default => {
-                storage::log_line("DirectX boxes unavailable; restarting with a see-through main window for the classic boxes");
-                mode = RootMode::Transparent;
-                continue;
-            }
-            Ok(s) if s.code() == Some(EXIT_RETRY_OPAQUE) && mode == RootMode::Transparent => {
-                storage::log_line("app could not start with a see-through main window; retrying without");
-                mode = RootMode::OpaqueFinal;
-                continue;
-            }
             Ok(s) => storage::log_line(&format!("app stopped unexpectedly ({s}); restarting")),
             Err(e) => storage::log_line(&format!("could not start the app: {e}")),
         }
@@ -147,9 +106,6 @@ fn main() {
     }
     let worker = args.iter().any(|a| a == "--worker");
     let boot = args.iter().any(|a| a == "--boot");
-    let transparent = args.iter().any(|a| a == "--transparent");
-    let opaque_final = args.iter().any(|a| a == "--opaque");
-    MAY_ASK_TRANSPARENT.store(worker && !transparent && !opaque_final, std::sync::atomic::Ordering::SeqCst);
 
     if screenshot.is_none() && !worker {
         // Only one copy runs at a time (a check picture may run beside it: it saves nothing).
@@ -174,57 +130,16 @@ fn main() {
         default_hook(info);
     }));
 
-    // The main window is a 1x1 invisible, click-through window; the boxes and the settings
-    // window are its children. It keeps the program alive without showing anything.
-    let mut viewport = if screenshot.is_some() {
-        // Check picture: a normal-sized window showing the layout, opened without focus and
-        // behind other windows so it never gets in the person's way.
-        egui::ViewportBuilder::default()
-            .with_title("DeskBoxes")
-            .with_inner_size([1100.0, 680.0])
-            .with_active(false)
-            .with_window_level(egui::WindowLevel::AlwaysOnBottom)
-    } else {
-        egui::ViewportBuilder::default()
-            .with_title("DeskBoxes")
-            .with_inner_size([1.0, 1.0])
-            .with_position([0.0, 0.0])
-            .with_decorations(false)
-            // Not see-through unless the classic boxes need it (see RootMode); the 1x1 window
-            // sits invisible below the desktop either way.
-            .with_transparent(transparent)
-            .with_taskbar(false)
-            .with_resizable(false)
-            .with_mouse_passthrough(true)
-            .with_active(false)
-            .with_window_level(egui::WindowLevel::AlwaysOnBottom)
+    #[cfg(windows)]
+    let code = runloop::run(screenshot);
+    #[cfg(not(windows))]
+    let code = {
+        let _ = screenshot;
+        EXIT_START_FAILED
     };
-    viewport.app_id = Some("DeskBoxes".into());
-
-    let options = eframe::NativeOptions {
-        viewport,
-        renderer: eframe::Renderer::Glow,
-        // Off: the main GL window is invisible (1x1) and DirectX boxes present on their own;
-        // waiting for the screen refresh in GL made the driver spin on every pass.
-        vsync: false,
-        // No colour noise: it would skew the exact see-through copy used while dragging.
-        dithering: false,
-        persist_window: false,
-        ..Default::default()
-    };
-
-    let result = eframe::run_native(
-        "DeskBoxes",
-        options,
-        Box::new(move |cc| Ok(Box::new(app::DeskApp::new(cc, screenshot)))),
-    );
-    if let Err(e) = result {
-        storage::log_line(&format!("could not start: {e}"));
-        desktop::restore_desktop_icons();
+    desktop::restore_desktop_icons();
+    if code != 0 {
         // Never report a failed start as a clean quit, or the supervisor would stop for good.
-        let msg = e.to_string();
-        let code = if transparent && msg.contains("glutin config") { EXIT_RETRY_OPAQUE } else { EXIT_START_FAILED };
         std::process::exit(code);
     }
-    desktop::restore_desktop_icons();
 }

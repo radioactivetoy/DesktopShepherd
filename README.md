@@ -19,8 +19,9 @@ an original Rust program; its behaviour was modelled on an existing desktop orga
 
 - Boxes with title, tabs, roll-up (expand on hover), lock, rename, delete, auto-sort box with
   user-editable category rules (name + extensions).
-- Real frosted glass via Windows composition (DirectX path): per-box tint colour, opacity,
-  blur amount, rounded corners; boxes move smoothly with no flicker.
+- Real frosted glass via Windows composition (DirectX): per-box tint colour, opacity,
+  blur amount, rounded corners; boxes move smoothly with no flicker. On weak GPUs or Remote
+  Desktop it uses Windows' software DirectX (WARP) instead.
 - Select one/many icons (click, Ctrl/Shift, rubber band), drag them between boxes with a
   flying icon under the cursor; open, show in folder, sort (manual, name, size, type, date,
   times opened).
@@ -48,15 +49,15 @@ Stop it safely (worker first, then supervisor, so icons are restored):
 .\scripts\stop.ps1
 ```
 
-Command-line options: `--screenshot out.png` (draw ~120 frames to a normal window behind
-others, save a PNG, exit), `--worker` (internal), `--boot` (started with Windows: waits longer
+Command-line options: `--screenshot out.png` (draws the settings view off-screen, no
+window, saves a PNG, exits; ~4 s), `--worker` (internal), `--boot` (started with Windows: waits longer
 for Explorer), `--composition-trial` (diagnostic).
 
 ## Documentation
 
 | File | What |
 |---|---|
-| `docs/ARCHITECTURE.md` | Processes, threads, the two render paths, every source file |
+| `docs/ARCHITECTURE.md` | Processes, threads, the render path, every source file |
 | `docs/BUILDING.md` | Toolchain, pinned crates, linker stand-ins |
 | `docs/STATUS.md` | Measurements, final review results, known issues, ideas/todo |
 | `MECHANICS.md`, `mechanics.json` | Values recovered from the original (with addresses) |

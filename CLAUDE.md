@@ -18,7 +18,8 @@ changing anything. The owner does not code: explain results in plain words, no j
    and CPU before/after big changes (see "Measuring").
 3. **No network, no web engine.** No telemetry, no online features.
 4. **Never `cargo update`.** Pinned crates keep the GNU build working (see `docs/BUILDING.md`).
-5. Keep the classic (GL) fallback path compiling and working.
+5. Keep the software-DirectX (WARP) fallback working (`d3d::Renderer::new` tries the hardware
+   device first, then WARP). Never add GL, a web engine or eframe back.
 6. Saved layout (`model.rs`) must stay backward compatible: new fields use `#[serde(default)]`;
    breaking changes get a migration in `app.rs` (`version` field, see v2/v3).
 
@@ -31,8 +32,9 @@ Start-Process .\target\debug\deskboxes.exe
 ```
 
 - Quick visual check without touching the live desktop:
-  `.\target\debug\deskboxes.exe --screenshot C:\temp\shot.png` (window opens behind others,
-  no focus, exits by itself).
+  `.\target\debug\deskboxes.exe --screenshot C:\temp\shot.png` (draws the settings view
+  off-screen with the D3D renderer, no window at all, ~4 s, exits by itself; uses the default
+  layout, not your saved one).
 - Logs: `%APPDATA%\DeskBoxes\log.txt`. Layout: `%APPDATA%\DeskBoxes\layout.json` (back it up
   before experiments; backups are in `backups\`).
 - Synthetic mouse tests: add waits of ≥150 ms between press/move/release, or egui won't start
@@ -50,14 +52,20 @@ Get-CimInstance Win32_Process -Filter "Name='deskboxes.exe'" | % {
   "{0} ws={1:N0}MB cpu={2:N2}%" -f $_.CommandLine, ($p.WorkingSet64/1MB), (($b-$a)/10000/[Environment]::ProcessorCount*100) }
 ```
 
-Current baseline: worker ~156 MB, ~0.01 % CPU idle; supervisor 12 MB.
+Current baseline (after phase C): worker ~110 MB working set (~100 MB private), ~0.01 % CPU
+idle; supervisor ~2 MB private.
 
 ## Gotchas learned the hard way
 
 - PowerShell: `"$name"` immediately followed by letters expands to nothing; here-strings
   written to `.rs` files may carry CR characters (breaks doc comments) – strip `` `r ``.
-- GL transparency does not work on this PC; real glass comes only from the composition path.
-- egui child-viewport screenshots never arrive; `--screenshot` draws in the root instead.
+- History: GL transparency never worked on this PC; real glass comes only from the composition
+  path. The GL path and eframe are gone (phase C), so this no longer matters.
+- There is no main window any more. `src/runloop.rs` is the program's own message loop (hidden
+  window `DeskBoxesMain`, never shown). Other threads wake it with `runloop::wake_after` /
+  WM_APP; quit with `runloop::request_quit()`.
+- App-driven box moves (relayout, bring back on screen, restore backup) must go through
+  `DeskApp::place_box` / `place_all_boxes`, otherwise the DirectX windows don't move.
 - Moving boxes by re-rendering every frame caused jitter/flashes; boxes move themselves via
   `SetWindowPos` on a helper thread – keep it that way.
 - Right-click on empty box area is handled by the selection band (`secondary_clicked`).

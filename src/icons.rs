@@ -1,7 +1,7 @@
 //! Real file icons (and picture thumbnails) loaded on one low-priority background thread, so
 //! drawing never waits for the shell. Results are cached as textures and reused.
 
-use eframe::egui::{self, ColorImage, TextureHandle, TextureOptions};
+use egui::{self, ColorImage, TextureHandle, TextureOptions};
 use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::{channel, Receiver, Sender};
 
@@ -84,7 +84,7 @@ pub fn load_now(path: &str, size: u32) -> Option<ColorImage> {
 
 #[cfg(windows)]
 mod platform {
-    use eframe::egui::{Color32, ColorImage};
+    use egui::{Color32, ColorImage};
     use windows::core::HSTRING;
     use windows::Win32::Foundation::SIZE;
     use windows::Win32::Graphics::Gdi::{
@@ -157,7 +157,7 @@ mod platform {
 
 #[cfg(not(windows))]
 mod platform {
-    use eframe::egui::ColorImage;
+    use egui::ColorImage;
     pub fn thread_init() {}
     pub fn load(_path: &str, _size: u32) -> Option<ColorImage> {
         None

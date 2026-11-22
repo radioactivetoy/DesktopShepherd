@@ -13,12 +13,8 @@ use crate::ghost;
 use crate::icons::IconCache;
 use crate::model::{Category, DeskItem, Fence, Layout, SortKind, Tab, TabPos, TitlePos, WidgetConfig};
 use crate::storage;
-use crate::wallpaper::Wallpaper;
 use crate::widgets;
-use eframe::egui::{
-    self, Align, Color32, CursorIcon, FontId, Pos2, Rect, ScrollArea, Sense, UiBuilder, Vec2, ViewportBuilder,
-    ViewportCommand, ViewportId,
-};
+use egui::{self, Align, Color32, CursorIcon, FontId, Pos2, Rect, ScrollArea, Sense, UiBuilder, Vec2, ViewportCommand};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver, Sender};
@@ -84,20 +80,7 @@ struct UiState {
     drag: Option<(u64, u8, Pos2, Rect)>,
     /// Boxes the person just moved or resized: re-read which monitor they're on.
     rebind: HashSet<u64>,
-    /// A see-through moving copy in use: box id, copy window, box window.
-    ghost: Option<(u64, isize, isize)>,
-    /// Finishing a see-through drag: box id, copy window, box window, frames left.
-    ghost_finish: Option<(u64, isize, isize, u8)>,
-    /// Exact snapshot in progress for the moving copy: box id, step (0 = on black, 1 = on
-    /// white), frames into the step, the picture on black.
-    ghost_cap: Option<(u64, u8, u8, Option<Vec<u8>>)>,
-    /// Where each box's icons were drawn last (window points), to copy them solid.
-    icon_rects: HashMap<u64, Vec<Rect>>,
-    /// Frosted glass is on (the moving copy then asks Windows to blur behind it).
-    blur_on: bool,
-    /// Boxes are Windows composition windows (glass by Windows, contents on the GPU).
-    composited: bool,
-    /// Commands for box windows from elsewhere (menus): box id, command.
+    /// Commands for box windows from elsewhere (menus, monitor changes): box id, command.
     box_cmds: Vec<(u64, ViewportCommand)>,
     /// Boxes whose next position update comes from a move or resize by the person.
     moved_by_person: HashSet<u64>,
@@ -109,12 +92,6 @@ pub enum TrayCmd {
     Quit,
 }
 
-pub struct ScreenshotJob {
-    pub path: PathBuf,
-    frames: u32,
-    requested: bool,
-}
-
 pub struct DeskApp {
     layout: Layout,
     items: HashMap<String, DeskItem>,
@@ -122,7 +99,6 @@ pub struct DeskApp {
     scan_wake: Sender<()>,
     extra_paths: Arc<Mutex<Vec<String>>>,
     icons: IconCache,
-    wallpaper: Wallpaper,
     spacing: (f32, f32),
     ui: UiState,
     actions: Vec<Act>,
@@ -130,8 +106,8 @@ pub struct DeskApp {
     persist: bool,
     manager_open: bool,
     page: Page,
-    spawn_rects: HashMap<u64, [f32; 4]>,
-    screenshot: Option<ScreenshotJob>,
+    /// Drawing the settings view off-screen for `--screenshot` (no windows, nothing saved).
+    screenshot: bool,
     tray_cmds: Arc<Mutex<Vec<TrayCmd>>>,
     #[cfg(windows)]
     _tray: Option<tray_icon::TrayIcon>,
@@ -141,9 +117,7 @@ pub struct DeskApp {
     monitors: Vec<desktop::Monitor>,
     monitors_shared: Arc<Mutex<Vec<desktop::Monitor>>>,
     monitors_changed: Arc<std::sync::atomic::AtomicBool>,
-    /// Frosted-glass strength shared with the wallpaper thread.
-    blur_shared: Arc<std::sync::atomic::AtomicU32>,
-    /// The DirectX/composition box windows (None = previous way of drawing boxes).
+    /// The DirectX/composition box windows (None only for `--screenshot`).
     #[cfg(windows)]
     hosts: Option<crate::host::HostSystem>,
     /// This pass draws every box (`redraw_all` was set): menu and settings draw too.
@@ -182,14 +156,14 @@ fn clean_paths(layout: &Layout) -> Vec<String> {
 }
 
 impl DeskApp {
-    pub fn new(cc: &eframe::CreationContext<'_>, screenshot: Option<PathBuf>) -> Self {
-        let ctx = cc.egui_ctx.clone();
-        setup_style(&ctx);
-        {
-            let c = ctx.clone();
-            let _ = ghost::WAKE.set(Box::new(move || c.request_repaint()));
-        }
+    /// `root`: the run loop's scheduling context (see runloop.rs); in `--screenshot` mode it
+    /// also draws the settings view. Returns None when the boxes can't be shown at all.
+    pub fn new(root: &egui::Context, screenshot: Option<PathBuf>) -> Option<Self> {
+        let ctx = root.clone();
         let persist = screenshot.is_none();
+        if !persist {
+            setup_style(&ctx);
+        }
         if persist {
             // Keep the boxes visible when Show desktop (Win+D) brings the desktop forward.
             desktop::watch_show_desktop();
@@ -263,10 +237,8 @@ impl DeskApp {
             });
         }
 
-        // Blur is per box now (see Fence::blur); the shared desktop picture stays sharp.
-        let blur_shared = Arc::new(std::sync::atomic::AtomicU32::new(0));
-        // Boxes drawn by Windows' composition system with DirectX; if that can't start, the app
-        // keeps its previous way of drawing boxes.
+        // Boxes drawn by Windows' composition system with DirectX (software DirectX if the
+        // graphics card can't). Without it there is nothing to show: the supervisor retries later.
         #[cfg(windows)]
         let hosts = if persist {
             match crate::host::HostSystem::new(&ctx) {
@@ -275,23 +247,13 @@ impl DeskApp {
                     Some(h)
                 }
                 Err(e) => {
-                    storage::log_line(&format!("DirectX boxes unavailable, using the previous drawing: {e:?}"));
-                    // The classic boxes need a see-through main window: ask the supervisor for a
-                    // restart with one (it does this only once).
-                    if crate::MAY_ASK_TRANSPARENT.load(std::sync::atomic::Ordering::SeqCst) {
-                        desktop::restore_desktop_icons();
-                        std::process::exit(crate::EXIT_NEED_TRANSPARENT);
-                    }
-                    None
+                    storage::log_line(&format!("DirectX boxes unavailable: {e:?}"));
+                    return None;
                 }
             }
         } else {
             None
         };
-        #[cfg(windows)]
-        let capture_desktop = hosts.is_none();
-        #[cfg(not(windows))]
-        let capture_desktop = true;
         let tray_cmds = Arc::new(Mutex::new(Vec::new()));
         #[cfg(windows)]
         let tray = if persist { make_tray(&ctx, tray_cmds.clone()) } else { None };
@@ -305,8 +267,6 @@ impl DeskApp {
             scan_wake: wake_tx,
             extra_paths,
             icons: IconCache::new(&ctx),
-            wallpaper: Wallpaper::new(&ctx, blur_shared.clone(), capture_desktop),
-            blur_shared,
             spacing: desktop::icon_spacing(),
             ui: UiState::default(),
             actions: Vec::new(),
@@ -314,8 +274,7 @@ impl DeskApp {
             persist,
             manager_open: !persist || first_run || layout.fences.is_empty(),
             page: if persist { Page::Boxes } else { Page::Layout },
-            spawn_rects: HashMap::new(),
-            screenshot: screenshot.map(|path| ScreenshotJob { path, frames: 0, requested: false }),
+            screenshot: screenshot.is_some(),
             tray_cmds,
             #[cfg(windows)]
             _tray: tray,
@@ -336,7 +295,41 @@ impl DeskApp {
             app.relayout_monitors();
         }
         app.apply_icon_hiding();
-        app
+        Some(app)
+    }
+
+    /// Icons still loading (the screenshot waits for them).
+    pub fn icons_busy(&self) -> bool {
+        self.icons.busy()
+    }
+
+    /// Before the program ends (quit, Windows shutting down): save and give the icons back.
+    pub fn shutdown(&mut self) {
+        if self.dirty_at.is_some() {
+            self.save_now();
+        }
+        if self.icons_hidden {
+            desktop::set_desktop_icons_visible(true);
+            self.icons_hidden = false;
+        }
+    }
+
+    /// Moves a box window to where its saved rectangle says (after the app itself changed it:
+    /// monitors, "bring back on screen", a restored layout). Windows the person moves update
+    /// the rectangle the other way round, in `fence_window`.
+    fn place_box(&mut self, id: u64) {
+        if let Some(f) = self.layout.fences.iter().find(|f| f.id == id) {
+            let h = if f.expanded { f.rect[3] } else { ROLLED_HEIGHT };
+            self.ui.box_cmds.push((id, ViewportCommand::OuterPosition(Pos2::new(f.rect[0], f.rect[1]))));
+            self.ui.box_cmds.push((id, ViewportCommand::InnerSize(Vec2::new(f.rect[2], h))));
+        }
+    }
+
+    fn place_all_boxes(&mut self) {
+        let ids: Vec<u64> = self.layout.fences.iter().map(|f| f.id).collect();
+        for id in ids {
+            self.place_box(id);
+        }
     }
 
     fn mark_dirty(&mut self) {
@@ -440,7 +433,15 @@ impl DeskApp {
                 }
                 Act::DeleteFence(id) => {
                     self.layout.fences.retain(|f| f.id != id);
-                    self.spawn_rects.remove(&id);
+                    // Forget the window bookkeeping of the deleted box.
+                    for m in [&mut self.ui.burst] {
+                        m.remove(&id);
+                    }
+                    self.ui.sizes.remove(&id);
+                    self.ui.hwnds.remove(&id);
+                    self.ui.rounded.remove(&id);
+                    self.ui.focused.remove(&id);
+                    self.ui.hover_open.remove(&id);
                     self.mark_dirty();
                 }
                 Act::OpenManager => self.manager_open = true,
@@ -482,7 +483,7 @@ impl DeskApp {
                         storage::backup_now(&self.layout);
                         sanitize(&mut l);
                         self.layout = l;
-                        self.spawn_rects.clear();
+                        self.place_all_boxes();
                         self.mark_dirty();
                         self.apply_icon_hiding();
                     }
@@ -492,76 +493,33 @@ impl DeskApp {
                         storage::backup_now(&self.layout);
                         sanitize(&mut l);
                         self.layout = l;
-                        self.spawn_rects.clear();
+                        self.place_all_boxes();
                         self.mark_dirty();
                         self.apply_icon_hiding();
                     }
                 }
                 Act::Quit => {
                     self.save_now();
-                    // Closing the main (hidden) window ends the program cleanly.
-                    if let Some(ctx) = CTX.lock().ok().and_then(|c| c.clone()) {
-                        ctx.send_viewport_cmd_to(ViewportId::ROOT, ViewportCommand::Close);
-                    }
+                    // Ends the run loop cleanly (exit code 0: the supervisor stops too).
+                    #[cfg(windows)]
+                    crate::runloop::request_quit();
                 }
             }
-        }
-    }
-}
-
-static CTX: Mutex<Option<egui::Context>> = Mutex::new(None);
-
-impl eframe::App for DeskApp {
-    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
-        [0.0, 0.0, 0.0, 0.0]
-    }
-
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        let update_start = Instant::now();
-        self.update_inner(ctx);
-        UPDATE_US.fetch_add(update_start.elapsed().as_micros() as u64, std::sync::atomic::Ordering::Relaxed);
-    }
-
-    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
-        if self.dirty_at.is_some() {
-            self.save_now();
-        }
-        if self.icons_hidden {
-            desktop::set_desktop_icons_visible(true);
         }
     }
 }
 
 impl DeskApp {
+    /// One pass of the app (called by the run loop; see runloop.rs).
+    pub fn update(&mut self, ctx: &egui::Context) {
+        let update_start = Instant::now();
+        self.update_inner(ctx);
+        UPDATE_US.fetch_add(update_start.elapsed().as_micros() as u64, std::sync::atomic::Ordering::Relaxed);
+    }
+
     fn update_inner(&mut self, ctx: &egui::Context) {
-        if let Ok(mut c) = CTX.lock() {
-            if c.is_none() {
-                *c = Some(ctx.clone());
-            }
-        }
         if std::env::var_os("DESKBOXES_DEBUG_REPAINT").is_some() && ctx.cumulative_pass_nr() % 120 == 0 {
             storage::log_line(&format!("repaint causes: {:?}", ctx.repaint_causes()));
-        }
-        // ---- a box dragged by Windows' own move has been dropped: put the real box there
-        if let Some((gh, x, y)) = ghost::take_done() {
-            if std::env::var_os("DESKBOXES_DEBUG_DRAG").is_some() {
-                storage::log_line(&format!("drop at {x},{y}; ghost known: {:?}", self.ui.ghost));
-            }
-            if let Some((id, g, bh)) = self.ui.ghost {
-                if g == gh {
-                    let ppp = ctx.pixels_per_point();
-                    ctx.send_viewport_cmd_to(
-                        ViewportId::from_hash_of(("deskboxes-fence", id)),
-                        ViewportCommand::OuterPosition(Pos2::new(x as f32 / ppp, y as f32 / ppp)),
-                    );
-                    self.ui.ghost = None;
-                    self.ui.ghost_cap = None;
-                    self.ui.ghost_finish = Some((id, g, bh, 8));
-                    self.ui.drag = None;
-                    self.ui.moved_by_person.insert(id);
-                    ctx.request_repaint();
-                }
-            }
         }
         // ---- inputs from background threads and the tray icon
         let mut changed_files = false;
@@ -584,9 +542,6 @@ impl DeskApp {
         if icons_arrived {
             self.redraw_all = true;
         }
-        self.wallpaper.poll(ctx);
-        let levels: HashSet<u32> = self.layout.fences.iter().map(|f| f.blur as u32).filter(|b| *b > 0).collect();
-        self.wallpaper.keep_blur_levels(&levels);
         let cmds: Vec<TrayCmd> = self.tray_cmds.lock().map(|mut v| std::mem::take(&mut *v)).unwrap_or_default();
         for c in cmds {
             match c {
@@ -599,10 +554,6 @@ impl DeskApp {
             }
         }
 
-        if ctx.input(|i| i.viewport().close_requested()) {
-            // Windows is shutting down or the person chose Quit: save before leaving.
-            self.save_now();
-        }
 
         if self.persist {
             if self.monitors_changed.swap(false, std::sync::atomic::Ordering::SeqCst) {
@@ -678,7 +629,6 @@ impl DeskApp {
             .map(|f| (f.id, f.name.clone(), f.tabs.iter().map(|t| t.name.clone()).collect()))
             .collect();
         let expand_on_hover = self.layout.settings.expand_on_hover;
-        self.ui.blur_on = self.layout.settings.blur > 0;
         let mut dirty = false;
         let mut wake_scan = false;
         let desk = DeskState { items: &self.items, claimed: &claimed, spacing: self.spacing, rules: &self.layout.settings.categories, open_counts: &self.layout.open_counts };
@@ -705,7 +655,6 @@ impl DeskApp {
         let fingerprint = shared_ui_fingerprint(&self.ui);
         #[cfg(windows)]
         if let Some(hosts) = self.hosts.as_mut().filter(|h| !h.lost) {
-            self.ui.composited = true;
             let ids: Vec<u64> = self.layout.fences.iter().map(|f| f.id).collect();
             hosts.retain(&ids);
             for fence in self.layout.fences.iter_mut() {
@@ -721,10 +670,9 @@ impl DeskApp {
                 let ui_state = &mut self.ui;
                 let icons = &mut self.icons;
                 let actions = &mut self.actions;
-                let wallpaper = &mut self.wallpaper;
                 let t0 = Instant::now();
                 let drew = hosts.frame(id, rect, &look, force_all, |ctx| {
-                    let r = fence_window(ctx, fence, &desk, icons, wallpaper, ui_state, actions, expand_on_hover);
+                    let r = fence_window(ctx, fence, &desk, icons, ui_state, actions, expand_on_hover);
                     dirty |= r.0;
                     wake_scan |= r.1;
                 });
@@ -749,37 +697,6 @@ impl DeskApp {
             let upd = UPDATE_US.swap(0, std::sync::atomic::Ordering::Relaxed);
             storage::log_line(&format!("last 300 passes: {draws} box frames drawn in {} ms; update() total {} ms (force_all now: {force_all})", us / 1000, upd / 1000));
         }
-        #[cfg(windows)]
-        let classic = self.hosts.is_none();
-        #[cfg(not(windows))]
-        let classic = true;
-        for fence in self.layout.fences.iter_mut().filter(|_| classic) {
-            let spawn = *self.spawn_rects.entry(fence.id).or_insert_with(|| {
-                let h = if fence.expanded { fence.rect[3] } else { ROLLED_HEIGHT };
-                [fence.rect[0], fence.rect[1], fence.rect[2], h]
-            });
-            let builder = ViewportBuilder::default()
-                .with_title(format!("DeskBoxes box {}", fence.id))
-                .with_decorations(false)
-                .with_transparent(true)
-                .with_taskbar(false)
-                .with_resizable(true)
-                .with_window_level(egui::WindowLevel::AlwaysOnBottom)
-                .with_active(false)
-                .with_position(Pos2::new(spawn[0], spawn[1]))
-                .with_inner_size(Vec2::new(spawn[2], spawn[3]))
-                .with_min_inner_size(Vec2::new(120.0, ROLLED_HEIGHT));
-            let vid = ViewportId::from_hash_of(("deskboxes-fence", fence.id));
-            let ui_state = &mut self.ui;
-            let icons = &mut self.icons;
-            let actions = &mut self.actions;
-            let wallpaper = &mut self.wallpaper;
-            ctx.show_viewport_immediate(vid, builder, |ctx, _class| {
-                let r = fence_window(ctx, fence, &desk, icons, wallpaper, ui_state, actions, expand_on_hover);
-                dirty |= r.0;
-                wake_scan |= r.1;
-            });
-        }
         if self.ui.menu.is_some() {
             self.show_menu(ctx, &targets);
         } else {
@@ -794,9 +711,9 @@ impl DeskApp {
             if let Some(h) = self.hosts.as_ref() {
                 h.apply(id, &cmd);
                 h.ctx.request_repaint();
-                continue;
             }
-            ctx.send_viewport_cmd_to(ViewportId::from_hash_of(("deskboxes-fence", id)), cmd);
+            #[cfg(not(windows))]
+            let _ = (id, cmd);
         }
         if dirty {
             self.mark_dirty();
@@ -817,7 +734,6 @@ fn fence_window(
     fence: &mut Fence,
     desk: &DeskState,
     icons: &mut IconCache,
-    wallpaper: &mut Wallpaper,
     st: &mut UiState,
     actions: &mut Vec<Act>,
     expand_on_hover: bool,
@@ -834,55 +750,9 @@ fn fence_window(
             ctx.input(|i| i.viewport().inner_rect)
         ));
     }
-    // Exact snapshot steps (box invisible meanwhile): capture on black, then on white.
-    if let (Some((id, step, frames, black)), Some((gid, g, bh))) = (st.ghost_cap.take(), st.ghost) {
-        if id == fence.id && gid == fence.id {
-            let frames = frames + 1;
-            ctx.request_repaint_after(Duration::from_millis(16));
-            if frames < 3 {
-                st.ghost_cap = Some((id, step, frames, black));
-            } else if step == 0 {
-                let pic = ghost::capture(bh).map(|(_, _, p)| p);
-                st.ghost_cap = Some((id, 1, 0, pic));
-            } else if let (Some(b), Some((w, h, wpic))) = (black, ghost::capture(bh)) {
-                if let Some(px) = ghost::from_black_white(w, h, &b, &wpic) {
-                    ghost::update(g, w, h, &px);
-                }
-            }
-        } else {
-            st.ghost_cap = Some((id, step, frames, black));
-        }
-    }
-    // After a see-through drag: show the real box again, then remove the moving copy.
-    if let Some((id, g, bh, frames)) = st.ghost_finish {
-        if id == fence.id {
-            let left = frames.saturating_sub(1);
-            // The real box draws twice at its new spot, then shows; the copy stays on top a few
-            // more frames so the hand-over is seamless.
-            if left == 5 {
-                ghost::set_alpha(bh, None);
-            }
-            if left == 0 {
-                ghost::destroy(g);
-                st.ghost_finish = None;
-            } else {
-                st.ghost_finish = Some((id, g, bh, left));
-            }
-            ctx.request_repaint_after(Duration::from_millis(16));
-        }
-    }
     if std::env::var_os("DESKBOXES_DEBUG_DRAG").is_some() && ctx.input(|i| i.pointer.any_pressed() || i.pointer.any_released()) {
         storage::log_line(&format!("box {} pointer pressed={} released={} at {:?} hovered_any={} dragged={:?}", fence.id, ctx.input(|i| i.pointer.any_pressed()), ctx.input(|i| i.pointer.any_released()), ctx.input(|i| i.pointer.interact_pos()), ctx.is_pointer_over_area(), ctx.dragged_id()));
     }
-    // Never close a box by Alt+F4 by accident.
-    if ctx.input(|i| i.viewport().close_requested()) {
-        ctx.send_viewport_cmd(ViewportCommand::CancelClose);
-    }
-    // "Show desktop" minimizes windows; boxes come straight back.
-    if ctx.input(|i| i.viewport().minimized).unwrap_or(false) {
-        ctx.send_viewport_cmd(ViewportCommand::Minimized(false));
-    }
-
     // Hover-to-open for rolled-up boxes.
     let pointer_inside = ctx.input(|i| i.pointer.has_pointer());
     let any_down = ctx.input(|i| i.pointer.any_down());
@@ -918,11 +788,12 @@ fn fence_window(
             desktop::send_to_bottom(*h);
         }
     }
-    // After any size change, redraw a few frames so new areas are painted at once.
+    // After a size change, redraw a few frames so new areas are painted at once. (Moving needs
+    // no redraw: Windows moves the composed box as it is.)
     if let Some(r) = ctx.input(|i| i.viewport().inner_rect) {
-        // Moving counts too: the glass wallpaper must follow the box while it is dragged.
-        if st.sizes.get(&fence.id).map(|o| (o.min - r.min).length() > 0.5 || (o.size() - r.size()).length() > 0.5).unwrap_or(true) {
-            st.sizes.insert(fence.id, r);
+        let resized = st.sizes.get(&fence.id).map(|o| (o.size() - r.size()).length() > 0.5).unwrap_or(true);
+        st.sizes.insert(fence.id, r);
+        if resized {
             st.burst.insert(fence.id, 12);
         }
     }
@@ -977,60 +848,23 @@ fn fence_window(
     egui::CentralPanel::default().frame(egui::Frame::NONE).show(ctx, |ui| {
         let rect = ui.max_rect();
         let painter = ui.painter().clone();
-        // Glass look: the wallpaper behind the box, then the tinted box on top.
         let ppp = ctx.pixels_per_point();
+        // Where the box is on screen right now (points).
         let current = st
             .hwnds
             .get(&fence.id)
             .and_then(|h| desktop::client_rect_points(*h, ppp))
             .or_else(|| ctx.input(|i| i.viewport().inner_rect))
             .unwrap_or_else(|| Rect::from_min_size(Pos2::new(fence.rect[0], fence.rect[1]), rect.size()));
-        // While the box is being dragged, this frame is drawn for where the box is going (the
-        // move is applied right after the frame is shown), so wallpaper and box land together
-        // and the background doesn't jitter.
-        let move_target = match (st.drag, any_down) {
-            (Some((id, 0, grab, start)), true) if id == fence.id => {
-                desktop::cursor_points(ppp).map(|c| (start.min + (c - grab)).round())
-            }
-            _ => None,
-        };
-        let screen = match move_target {
-            Some(p) => Rect::from_min_size(p, current.size()),
-            None => current,
-        };
-        let cap_step = st.ghost_cap.as_ref().filter(|c| c.0 == fence.id).map(|c| c.1);
-        let composited = st.composited;
-        match (move_target, st.drag) {
-            // DirectX boxes: Windows draws the frosted glass and tint behind the contents.
-            _ if composited => {}
-            // Exact snapshot for the moving copy: a flat black or white background.
-            _ if cap_step == Some(0) => {
-                painter.rect_filled(rect, 0.0, Color32::BLACK);
-            }
-            _ if cap_step == Some(1) => {
-                painter.rect_filled(rect, 0.0, Color32::WHITE);
-            }
-            // Dragging: a smooth fill in the wallpaper's average colour where the box started,
-            // so nothing detailed can lag or jitter behind a fast move.
-            (Some(_), Some((_, _, _, start))) => {
-                let r = egui::CornerRadius::same(fence.corner.round().clamp(0.0, 40.0) as u8);
-                painter.rect_filled(rect, r, wallpaper.average(start, ppp));
-            }
-            // Each box has its own frosted-glass strength.
-            _ => wallpaper.paint_box(ctx, &painter, fence.id, rect, screen, ppp, fence.blur as u32),
-        }
-        if composited {
-            // Only the thin border; Windows draws the glass, tint and rounded corners.
-            let [br, bg, bb, ba] = fence.border_color;
-            painter.rect_stroke(
-                rect.shrink(0.5),
-                egui::CornerRadius::same(fence.corner.round().clamp(0.0, 40.0) as u8),
-                egui::Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(br, bg, bb, ba)),
-                egui::StrokeKind::Inside,
-            );
-        } else {
-            fv::paint_background(&painter, &view, rect, 1.0);
-        }
+        let screen = current;
+        // Only the thin border: Windows draws the glass, tint and rounded corners.
+        let [br, bg, bb, ba] = fence.border_color;
+        painter.rect_stroke(
+            rect.shrink(0.5),
+            egui::CornerRadius::same(fence.corner.round().clamp(0.0, 40.0) as u8),
+            egui::Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(br, bg, bb, ba)),
+            egui::StrokeKind::Inside,
+        );
         if hovering_files && !fence.auto_sort {
             painter.rect_stroke(
                 rect.shrink(2.0),
@@ -1089,79 +923,19 @@ fn fence_window(
 
         // Title: drag to move, double-click to roll up / open.
         let title = ui.interact(a.title, ui.id().with("title"), Sense::click_and_drag());
-        // Moving is done here (not by Windows' move loop, which pauses drawing): every step
-        // redraws, so the glass wallpaper stays put instead of sliding with the box.
+        // Moving: a helper thread moves the DirectX box itself with the mouse (Windows moves
+        // the composed box as it is; nothing is redrawn).
         if title.drag_started() && !fence.locked {
             if let Some(c) = desktop::cursor_points(ppp) {
                 st.drag = Some((fence.id, 0, c, screen));
-                // DirectX box: truly see-through, so the box itself simply follows the mouse.
                 #[cfg(windows)]
-                if composited {
-                    if let Some(&bh) = st.hwnds.get(&fence.id) {
-                        let grab = ((c.x - current.min.x) * ppp, (c.y - current.min.y) * ppp);
-                        crate::host::move_with_mouse(bh, (grab.0.round() as i32, grab.1.round() as i32));
-                    }
-                }
-                // See-through copy that Windows moves smoothly over the real desktop.
-                if let Some(&bh) = st.hwnds.get(&fence.id).filter(|_| !composited) {
-                    if let Some((w, h, px)) = ghost::capture(bh) {
-                        let samp = wallpaper.box_sampler(ctx, fence.id, current, ppp, fence.blur as u32);
-                        let o = current.min;
-                        let fill = Color32::from_rgba_unmultiplied(fence.color[0], fence.color[1], fence.color[2], fence.alpha);
-                        let mut pixels = ghost::to_see_through(w, h, &px, [fill.r(), fill.g(), fill.b()], fill.a(), |x, y| samp(x, y));
-                        // Icons are pictures: copy them solid rather than guessing per pixel.
-                        for r in st.icon_rects.get(&fence.id).into_iter().flatten() {
-                            let (x0, y0) = ((r.min.x * ppp).max(0.0) as usize, (r.min.y * ppp).max(0.0) as usize);
-                            let (x1, y1) = (((r.max.x * ppp) as usize).min(w), ((r.max.y * ppp) as usize).min(h));
-                            for yy in y0..y1 {
-                                for xx in x0..x1 {
-                                    let i = (yy * w + xx) * 4;
-                                    pixels[i..i + 3].copy_from_slice(&px[i..i + 3]);
-                                    pixels[i + 3] = 255;
-                                }
-                            }
-                        }
-                        let (wx, wy) = ((o.x * ppp).round() as i32, (o.y * ppp).round() as i32);
-                        // Frosted box: its helper draws the same frosted glass for every position.
-                        let bake = if fence.blur > 0 {
-                            wallpaper.frosted_picture(fence.blur as u32).map(|(pic, org, scale)| (pic, (org.x as i32, org.y as i32), scale))
-                        } else {
-                            None
-                        };
-                        let grab = ((c.x * ppp).round() as i32 - wx, (c.y * ppp).round() as i32 - wy);
-                        // The copy follows the mouse from its own fast helper (about every ms).
-                        let dbg = std::env::var_os("DESKBOXES_DEBUG_DRAG").is_some();
-                        if dbg {
-                            storage::log_line(&format!("drag start box {} at {wx},{wy} size {w}x{h} grab {:?} cursor {:?}", fence.id, grab, c));
-                        }
-                        if let Some(g) = ghost::begin_drag(w, h, pixels, wx, wy, grab, bake) {
-                            ghost::set_alpha(bh, Some(0));
-                            st.ghost = Some((fence.id, g, bh));
-                            // Next frames: draw the (now invisible) box on black, then on white,
-                            // to get exact transparency for the moving copy.
-                            st.ghost_cap = Some((fence.id, 0, 0, None));
-                            ctx.request_repaint();
-                        }
-                    }
-                }
-            }
-        }
-        let ghost_here = st.ghost.filter(|g| g.0 == fence.id);
-        if title.dragged() {
-            if let Some(p) = move_target {
-                if ghost_here.is_some() || composited {
-                    // A helper moves the copy (or the DirectX box itself); nothing to do here.
-                } else {
-                    if (p - current.min).length() > 0.1 {
-                        ctx.send_viewport_cmd(ViewportCommand::OuterPosition(p));
-                    }
-                    ctx.request_repaint();
+                if let Some(&bh) = st.hwnds.get(&fence.id) {
+                    let grab = ((c.x - current.min.x) * ppp, (c.y - current.min.y) * ppp);
+                    crate::host::move_with_mouse(bh, (grab.0.round() as i32, grab.1.round() as i32));
                 }
             }
         }
         if title.drag_stopped() {
-            // With a moving copy, its helper reports where it was dropped (handled in update).
-
             st.drag = None;
             st.moved_by_person.insert(fence.id);
         }
@@ -1288,7 +1062,7 @@ fn fence_window(
                     }
                     let pad = ((width - cols as f32 * cell.x) / 2.0).max(0.0).min(cell.x * 0.5);
                     let mut reorder: Option<(String, String)> = None;
-                    let mut icon_rects: Vec<Rect> = Vec::new();
+                    // (icon rectangles were only needed by the old see-through drag copy)
                     let clip = ui.clip_rect();
                     for (i, it) in items.iter().enumerate() {
                         let (c, r) = (i % cols, i / cols);
@@ -1306,7 +1080,6 @@ fn fence_window(
                         let selected = st.selection.contains(&key);
                         let hl = if selected { 50 } else if resp.hovered() { 22 } else { 0 };
                         fv::paint_item(ui.painter(), icons, it, cr, icon, 1.0, hl);
-                        icon_rects.push(Rect::from_center_size(Pos2::new(cr.center().x, cr.min.y + 6.0 + icon / 2.0), Vec2::splat(icon)).intersect(clip));
                         if resp.clicked() {
                             // Click: just this icon; Ctrl+click: add or remove it.
                             if ui.input(|i| i.modifiers.ctrl) {
@@ -1398,7 +1171,6 @@ fn fence_window(
                             egui::StrokeKind::Inside,
                         );
                     }
-                    st.icon_rects.insert(fence.id, icon_rects);
                     if let Some((moving, target)) = reorder {
                         // Look the items up by path in the shown list; if either is gone, do nothing.
                         let from = items.iter().position(|x| x.path.eq_ignore_ascii_case(&moving));
@@ -1581,10 +1353,9 @@ fn heading(ui: &mut egui::Ui, text: &str) {
 
 /// The box menu. Returns (layout changed, close the menu).
 #[allow(clippy::too_many_arguments)]
-fn fence_menu(ui: &mut egui::Ui, fence: &mut Fence, st: &mut UiState, page: &mut MenuPage, actions: &mut Vec<Act>, ctx_for_box: &egui::Context, blur: &mut u8, blur_shared: &std::sync::atomic::AtomicU32) -> (bool, bool) {
+fn fence_menu(ui: &mut egui::Ui, fence: &mut Fence, st: &mut UiState, page: &mut MenuPage, actions: &mut Vec<Act>, ctx_for_box: &egui::Context) -> (bool, bool) {
     let mut dirty = false;
     let mut close = false;
-    let _box_vid = ViewportId::from_hash_of(("deskboxes-fence", fence.id));
     match *page {
         MenuPage::Main => {
             if row(ui, icon::RENAME, "Rename box", None, true).clicked() {
@@ -1711,7 +1482,6 @@ fn fence_menu(ui: &mut egui::Ui, fence: &mut Fence, st: &mut UiState, page: &mut
             });
             sep(ui);
             // Aligned rows: name, slider, value.
-            let _ = (&blur, &blur_shared);
             let row = |ui: &mut egui::Ui, label: &str, value: String, slider: &mut dyn FnMut(&mut egui::Ui) -> bool| -> bool {
                 let mut changed = false;
                 ui.horizontal(|ui| {
@@ -1875,9 +1645,9 @@ fn item_menu(ui: &mut egui::Ui, from: u64, from_auto: bool, it: &DeskItem, targe
 impl DeskApp {
     fn show_menu(&mut self, ctx: &egui::Context, targets: &[(u64, String, Vec<String>)]) {
         let Some(mut m) = self.ui.menu.take() else { return };
-        // Keep the menu inside the screen: open upward/leftward near the edges.
-        let ppp = ctx.pixels_per_point();
-        let work = desktop::work_area_at(m.at, ppp);
+        // Keep the menu inside the screen: open upward/leftward near the edges. (Menu points
+        // are box points: pixels / the display scale.)
+        let work = desktop::work_area_at(m.at, desktop::system_scale());
         let mut pos = m.at + Vec2::new(2.0, 2.0);
         if pos.x + m.size.x > work.max.x {
             pos.x = (m.at.x - m.size.x).max(work.min.x);
@@ -1889,9 +1659,9 @@ impl DeskApp {
         let mut dirty = false;
         let mut measured = m.size;
         let root_ctx = ctx.clone();
-        // DirectX boxes: the menu is a DirectX window too (no GL window).
+        // The menu is a DirectX window drawn like the boxes.
         #[cfg(windows)]
-        let drawn_by_host = if let Some(mut hosts) = self.hosts.take() {
+        if let Some(mut hosts) = self.hosts.take() {
             let s = desktop::system_scale();
             let rect_px = [(pos.x * s).round() as i32, (pos.y * s).round() as i32, (m.size.x * s).round() as i32, (m.size.y * s).round() as i32];
             let force = self.panel_force;
@@ -1902,24 +1672,6 @@ impl DeskApp {
                 hosts.close_panel(MENU_PANEL);
             }
             self.hosts = Some(hosts);
-            true
-        } else {
-            false
-        };
-        #[cfg(not(windows))]
-        let drawn_by_host = false;
-        if !drawn_by_host {
-            let builder = ViewportBuilder::default()
-                .with_title("DeskBoxes menu")
-                .with_decorations(false)
-                .with_taskbar(false)
-                .with_resizable(false)
-                .with_window_level(egui::WindowLevel::AlwaysOnTop)
-                .with_position(pos)
-                .with_inner_size(m.size);
-            ctx.show_viewport_immediate(ViewportId::from_hash_of("deskboxes-menu"), builder, |vctx, _| {
-                self.menu_body(vctx, &mut m, targets, &root_ctx, &mut close, &mut dirty, &mut measured);
-            });
         }
         if (measured.y - m.size.y).abs() > 1.0 {
             m.size = measured;
@@ -1971,9 +1723,9 @@ impl DeskApp {
                 let top = ui.cursor().min.y;
                 match m.target.clone() {
                     MenuTarget::Fence(id) => {
-                        let Layout { fences, settings, .. } = &mut self.layout;
+                        let Layout { fences, .. } = &mut self.layout;
                         if let Some(f) = fences.iter_mut().find(|f| f.id == id) {
-                            let (d, c) = fence_menu(ui, f, &mut self.ui, &mut m.page, &mut self.actions, root_ctx, &mut settings.blur, &self.blur_shared);
+                            let (d, c) = fence_menu(ui, f, &mut self.ui, &mut m.page, &mut self.actions, root_ctx);
                             *dirty |= d;
                             *close |= c;
                         } else {
@@ -2017,14 +1769,13 @@ const SETTINGS_PANEL: u64 = u64::MAX - 2;
 
 impl DeskApp {
     fn show_manager(&mut self, ctx: &egui::Context) {
-        if self.screenshot.is_some() {
-            // Check picture: the main window itself shows the settings view (see main.rs).
+        if self.screenshot {
+            // Check picture: the run loop draws the root context off-screen (see runloop.rs).
             self.manager_contents(ctx);
-            self.screenshot_step(ctx);
             return;
         }
         let mut close = false;
-        // DirectX boxes: the settings window is a DirectX window too (no GL window).
+        // The settings window is a DirectX window drawn like the boxes.
         #[cfg(windows)]
         if let Some(mut hosts) = self.hosts.take() {
             let s = desktop::system_scale();
@@ -2047,51 +1798,6 @@ impl DeskApp {
                 self.manager_open = false;
             }
             self.hosts = Some(hosts);
-            return;
-        }
-        let builder = ViewportBuilder::default()
-            .with_title("DeskBoxes")
-            .with_inner_size([1100.0, 680.0])
-            .with_min_inner_size([640.0, 420.0]);
-        ctx.show_viewport_immediate(ViewportId::from_hash_of("deskboxes-manager"), builder, |ctx, _| {
-            if ctx.input(|i| i.viewport().close_requested()) {
-                close = true;
-            }
-            self.manager_contents(ctx);
-        });
-        if close {
-            self.manager_open = false;
-        }
-    }
-
-    /// Check picture: wait ~120 frames (and for icons), then save the window and quit.
-    fn screenshot_step(&mut self, ctx: &egui::Context) {
-        let mut done = false;
-        if let Some(job) = self.screenshot.as_mut() {
-            job.frames += 1;
-            let ready = job.frames >= 120 && (!self.icons.busy() || job.frames >= 600);
-            if ready && !job.requested {
-                job.requested = true;
-                ctx.send_viewport_cmd(ViewportCommand::Screenshot(egui::UserData::default()));
-            }
-            let img = ctx.input(|i| {
-                i.raw.events.iter().find_map(|e| match e {
-                    egui::Event::Screenshot { image, .. } => Some(image.clone()),
-                    _ => None,
-                })
-            });
-            if let Some(img) = img {
-                save_png(&job.path, &img);
-                done = true;
-            } else {
-                ctx.request_repaint_after(Duration::from_millis(16));
-            }
-            if job.frames > 3000 {
-                done = true; // never hang a check
-            }
-        }
-        if done {
-            ctx.send_viewport_cmd_to(ViewportId::ROOT, ViewportCommand::Close);
         }
     }
 
@@ -2110,7 +1816,10 @@ impl DeskApp {
                 match self.page {
                     Page::Boxes => self.page_boxes(ui),
                     Page::Layout => self.page_layout(ui),
-                    Page::Settings => self.page_settings(ui),
+                    Page::Settings => {
+                        // Longer than the window: scroll.
+                        ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| self.page_settings(ui));
+                    }
                 }
             });
         }
@@ -2180,7 +1889,8 @@ impl DeskApp {
                     ui.horizontal(|ui| {
                         if ui.selectable_label(!f.expanded, "Rolled up").clicked() {
                             f.expanded = !f.expanded;
-                            self.spawn_rects.remove(&f.id);
+                            let h = if f.expanded { f.rect[3] } else { ROLLED_HEIGHT };
+                            self.ui.box_cmds.push((f.id, ViewportCommand::InnerSize(Vec2::new(f.rect[2], h))));
                             dirty = true;
                         }
                         dirty |= ui.checkbox(&mut f.locked, "Locked").changed();
@@ -2219,7 +1929,7 @@ impl DeskApp {
                     f.rect[0] = f.rect[0].clamp(main.min.x, (main.max.x - f.rect[2]).max(main.min.x));
                     f.rect[1] = f.rect[1].clamp(main.min.y, (main.max.y - f.rect[3]).max(main.min.y));
                 }
-                self.spawn_rects.clear();
+                self.place_all_boxes();
                 self.mark_dirty();
             }
         });
@@ -2229,7 +1939,7 @@ impl DeskApp {
         let area = Rect::from_min_size(avail.min, screen.size() * scale);
         ui.allocate_rect(area, Sense::hover());
         let painter = ui.painter_at(area);
-        self.wallpaper.paint_preview(&painter, area, screen, scale);
+        painter.rect_filled(area, 0.0, Color32::from_rgb(20, 24, 32));
         let claimed: HashSet<String> = self
             .layout
             .fences
@@ -2251,7 +1961,6 @@ impl DeskApp {
     }
 
     fn page_settings(&mut self, ui: &mut egui::Ui) {
-        let blur_shared = self.blur_shared.clone();
         let s = &mut self.layout.settings;
         let mut dirty = false;
         let mut icons_changed = false;
@@ -2263,7 +1972,6 @@ impl DeskApp {
         ui.label(egui::RichText::new("They always come back when DeskBoxes closes, even after a crash.").color(Color32::from_gray(150)).size(12.0));
         dirty |= ui.checkbox(&mut s.expand_on_hover, "Open rolled-up boxes while the mouse is over them").changed();
         ui.label(egui::RichText::new("Frosted glass: set each box's blur in its menu (Personalize > Blur).").color(Color32::from_gray(150)).size(12.0));
-        let _ = &blur_shared;
         ui.add_space(10.0);
         ui.heading("Monitors");
         let before = s.monitor_mode;
@@ -2411,22 +2119,6 @@ impl DeskApp {
 // Helpers
 // ============================================================================================
 
-fn save_png(path: &PathBuf, img: &egui::ColorImage) {
-    let mut bytes = Vec::with_capacity(img.pixels.len() * 4);
-    for c in &img.pixels {
-        let [r, g, b, _a] = c.to_srgba_unmultiplied();
-        bytes.extend_from_slice(&[r, g, b, 255]);
-    }
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    if let Some(buf) = image::RgbaImage::from_raw(img.size[0] as u32, img.size[1] as u32, bytes) {
-        if let Err(e) = buf.save(path) {
-            storage::log_line(&format!("screenshot save failed: {e}"));
-        }
-    }
-}
-
 /// First run: one box for shortcuts/apps, one auto-sort box for everything else, and a clock.
 fn default_layout(items: &HashMap<String, DeskItem>) -> Layout {
     let mut layout = Layout { version: 1, next_id: 1, ..Default::default() };
@@ -2548,8 +2240,9 @@ impl DeskApp {
                 f.rect[0] = x;
                 f.rect[1] = y;
                 f.rect[2] = w;
-                // A new start position makes the window move there.
-                self.spawn_rects.remove(&f.id);
+                // Move the box window there.
+                self.ui.box_cmds.push((f.id, ViewportCommand::OuterPosition(Pos2::new(x, y))));
+                self.ui.box_cmds.push((f.id, ViewportCommand::InnerSize(Vec2::new(w, h))));
                 changed = true;
             }
         }

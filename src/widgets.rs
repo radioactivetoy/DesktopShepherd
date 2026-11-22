@@ -5,7 +5,7 @@
 //! file never needs a format change, and a widget only repaints when it asks to (`repaint_after`),
 //! so idle widgets cost nothing.
 
-use eframe::egui::{self, Color32, Pos2, Sense, Stroke, Ui};
+use egui::{self, Color32, Pos2, Sense, Stroke, Ui};
 use serde_json::{json, Value};
 use std::time::Duration;
 

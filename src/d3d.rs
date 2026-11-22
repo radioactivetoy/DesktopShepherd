@@ -5,12 +5,12 @@
 
 #![cfg(windows)]
 
-use eframe::egui::{self, epaint::Primitive, ClippedPrimitive, TextureId, TexturesDelta};
+use egui::{self, epaint::Primitive, ClippedPrimitive, TextureId, TexturesDelta};
 use std::collections::HashMap;
 use windows::core::{s, Interface, Result, PCSTR};
 use windows::Win32::Foundation::{HMODULE, RECT};
 use windows::Win32::Graphics::Direct3D::Fxc::D3DCompile;
-use windows::Win32::Graphics::Direct3D::{ID3DBlob, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST, D3D_DRIVER_TYPE_HARDWARE};
+use windows::Win32::Graphics::Direct3D::{ID3DBlob, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST, D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP};
 use windows::Win32::Graphics::Direct3D11::*;
 use windows::Win32::Graphics::Dxgi::Common::*;
 use windows::Win32::Graphics::Dxgi::*;
@@ -68,17 +68,29 @@ impl Renderer {
         unsafe {
             let mut device: Option<ID3D11Device> = None;
             let mut ctx: Option<ID3D11DeviceContext> = None;
-            D3D11CreateDevice(
-                None,
-                D3D_DRIVER_TYPE_HARDWARE,
-                HMODULE::default(),
-                D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-                None,
-                D3D11_SDK_VERSION,
-                Some(&mut device),
-                None,
-                Some(&mut ctx),
-            )?;
+            // The graphics card first; if it can't (old GPU, some Remote Desktop setups),
+            // Windows' software DirectX ("WARP"): same pictures, drawn by the processor.
+            let mut made = Err(windows::core::Error::from_hresult(windows::Win32::Foundation::E_FAIL));
+            for driver in [D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP] {
+                made = D3D11CreateDevice(
+                    None,
+                    driver,
+                    HMODULE::default(),
+                    D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                    None,
+                    D3D11_SDK_VERSION,
+                    Some(&mut device),
+                    None,
+                    Some(&mut ctx),
+                );
+                if made.is_ok() {
+                    if driver == D3D_DRIVER_TYPE_WARP {
+                        crate::storage::log_line("graphics card unavailable for DirectX; using software DirectX (WARP)");
+                    }
+                    break;
+                }
+            }
+            made?;
             let fail = || windows::core::Error::from_hresult(windows::Win32::Foundation::E_FAIL);
             let device = device.ok_or_else(fail)?;
             let ctx = ctx.ok_or_else(fail)?;
@@ -314,8 +326,59 @@ impl Renderer {
     pub fn render(&mut self, swapchain: &IDXGISwapChain1, size_px: [u32; 2], ppp: f32, prims: &[ClippedPrimitive]) -> Result<()> {
         unsafe {
             let back: ID3D11Texture2D = swapchain.GetBuffer(0)?;
+            self.draw(&back, size_px, ppp, prims)?;
+            drop(back);
+            swapchain.Present(1, DXGI_PRESENT(0)).ok()
+        }
+    }
+
+    /// Draws a frame into an off-screen picture and returns it as RGBA rows (opaque), for
+    /// `--screenshot`.
+    pub fn render_offscreen(&mut self, size_px: [u32; 2], ppp: f32, prims: &[ClippedPrimitive]) -> Result<Vec<u8>> {
+        unsafe {
+            let fail = || windows::core::Error::from_hresult(windows::Win32::Foundation::E_FAIL);
+            let mut desc = D3D11_TEXTURE2D_DESC {
+                Width: size_px[0].max(1),
+                Height: size_px[1].max(1),
+                MipLevels: 1,
+                ArraySize: 1,
+                Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+                Usage: D3D11_USAGE_DEFAULT,
+                BindFlags: D3D11_BIND_RENDER_TARGET.0 as u32,
+                ..Default::default()
+            };
+            let mut target = None;
+            self.device.CreateTexture2D(&desc, None, Some(&mut target))?;
+            let target = target.ok_or_else(fail)?;
+            self.draw(&target, size_px, ppp, prims)?;
+            desc.Usage = D3D11_USAGE_STAGING;
+            desc.BindFlags = 0;
+            desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ.0 as u32;
+            let mut staging = None;
+            self.device.CreateTexture2D(&desc, None, Some(&mut staging))?;
+            let staging = staging.ok_or_else(fail)?;
+            self.ctx.CopyResource(&staging, &target);
+            let mut m = D3D11_MAPPED_SUBRESOURCE::default();
+            self.ctx.Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut m))?;
+            let (w, h) = (size_px[0] as usize, size_px[1] as usize);
+            let mut out = Vec::with_capacity(w * h * 4);
+            for y in 0..h {
+                let row = std::slice::from_raw_parts((m.pData as *const u8).add(y * m.RowPitch as usize), w * 4);
+                for px in row.chunks_exact(4) {
+                    out.extend_from_slice(&[px[2], px[1], px[0], 255]);
+                }
+            }
+            self.ctx.Unmap(&staging, 0);
+            Ok(out)
+        }
+    }
+
+    /// Draws egui's triangles into a texture (a swap chain's back buffer or an off-screen one).
+    fn draw(&mut self, target: &ID3D11Texture2D, size_px: [u32; 2], ppp: f32, prims: &[ClippedPrimitive]) -> Result<()> {
+        unsafe {
             let mut rtv = None;
-            self.device.CreateRenderTargetView(&back, None, Some(&mut rtv))?;
+            self.device.CreateRenderTargetView(target, None, Some(&mut rtv))?;
             let rtv = rtv.ok_or_else(|| windows::core::Error::from_hresult(windows::Win32::Foundation::E_FAIL))?;
             let ctx = &self.ctx;
             ctx.ClearRenderTargetView(&rtv, &[0.0, 0.0, 0.0, 0.0]);
@@ -405,8 +468,7 @@ impl Renderer {
                 }
             }
             ctx.OMSetRenderTargets(None, None);
-            drop(back);
-            swapchain.Present(1, DXGI_PRESENT(0)).ok()
+            Ok(())
         }
     }
 

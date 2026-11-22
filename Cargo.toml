@@ -9,7 +9,7 @@ name = "deskboxes"
 path = "src/main.rs"
 
 [dependencies]
-eframe = { version = "0.31", default-features = false, features = ["default_fonts", "glow"] }
+egui = { version = "0.31", default-features = false, features = ["default_fonts"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }

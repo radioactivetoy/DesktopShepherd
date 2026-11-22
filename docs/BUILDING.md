@@ -11,8 +11,10 @@
   2. `lib/libshlwapi.a` is a stand-in import library (a copy of the `windows_x86_64_gnu`
      0.52.6 `libwindows.0.52.0.a`); `build.rs` adds `lib/` to the link search path.
   3. Crates that use `raw-dylib` (which needs dlltool/`as` combos that fail here) are
-     **pinned** in `Cargo.lock`: chrono 0.4.39, libloading 0.8.6, parking_lot 0.12.3,
-     parking_lot_core 0.9.10, arboard 3.4.1, webbrowser 1.0.3.
+     **pinned** in `Cargo.lock`: chrono 0.4.39, parking_lot 0.12.3, parking_lot_core 0.9.10.
+     (The old pins of libloading 0.8.6, arboard and webbrowser no longer apply: since phase C
+     the app uses plain `egui` 0.31 instead of eframe, and those crates are no longer in the
+     dependency tree at all. libloading 0.7.4 still comes in through another crate.)
 
 **Never run `cargo update`** (or add crates that pull newer versions of the above) – the build
 will break with dlltool / raw-dylib errors. When adding a dependency, check `Cargo.lock` diff

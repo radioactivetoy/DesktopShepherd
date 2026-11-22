@@ -3,7 +3,7 @@
 
 use crate::icons::IconCache;
 use crate::model::{tab_name_for, CategoryRule, DeskItem, Fence, SortKind, TabPos, TitlePos};
-use eframe::egui::{self, text::LayoutJob, Align, Color32, CornerRadius, FontId, Pos2, Rect, Stroke, Vec2};
+use egui::{self, text::LayoutJob, Align, Color32, CornerRadius, FontId, Pos2, Rect, Stroke, Vec2};
 use std::collections::HashMap;
 
 pub const TITLE_STRIP: f32 = 26.0; // width of the vertical title strip / height of a top title

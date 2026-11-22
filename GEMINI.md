@@ -8,7 +8,8 @@ Summary of the non-negotiables:
 - Stability first: no Explorer hooks/injection, no blocking calls into Explorer, no `unwrap`
   on runtime failures, never leave desktop icons hidden.
 - Idle CPU ~0 %: repaint only when something changes.
-- No network, no web engine.
+- No network, no web engine. Keep the software-DirectX (WARP) fallback working; never add
+  GL or eframe back.
 - **Never run `cargo update`** (pinned crates keep the GNU toolchain build working).
 - Stop the app with `scripts\stop.ps1` before `cargo build`.
 - Keep `layout.json` backward compatible (`#[serde(default)]`, migrations in `app.rs`).

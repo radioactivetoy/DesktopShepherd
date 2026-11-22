@@ -16,7 +16,7 @@
 #![cfg(windows)]
 
 use crate::d3d::Renderer;
-use eframe::egui::{self, Pos2, Rect, Vec2, ViewportCommand, ViewportId};
+use egui::{self, Pos2, Rect, Vec2, ViewportCommand, ViewportId};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
