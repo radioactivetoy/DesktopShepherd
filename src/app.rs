@@ -46,8 +46,9 @@ enum Act {
     ImportOriginal,
     /// Give every box the look of this one (Personalize > Apply this look to all boxes).
     ApplyLookToAll(u64),
-    /// Windows' own right-click menu for an item (and the other selected items with it).
-    ShellMenu(String),
+    /// Right-click on an item: Windows' own menu (and the other selected items with it), with
+    /// DeskBoxes' entries on top, shown by a helper process.
+    ItemMenu { from: u64, path: String },
     Quit,
 }
 
@@ -151,6 +152,8 @@ pub struct DeskApp {
     restack_at: Vec<Instant>,
     /// The quick-search window, while open.
     search: Option<SearchState>,
+    /// What an open Windows menu is for: clicked path, all paths, "Move to" box ids by position.
+    menu_ctx: Option<(String, Vec<String>, Vec<u64>)>,
     /// The quick-search shortcut registered with Windows (index into SEARCH_HOTKEYS) and
     /// whether Windows accepted it.
     hotkey_applied: usize,
@@ -323,6 +326,7 @@ impl DeskApp {
             font_names: Vec::new(),
             restack_at: Vec::new(),
             search: None,
+            menu_ctx: None,
             hotkey_applied: usize::MAX,
             hotkey_ok: true,
             ta_buf: String::new(),
@@ -537,8 +541,7 @@ impl DeskApp {
                         self.apply_icon_hiding();
                     }
                 }
-                Act::ShellMenu(path) => {
-                    // The right-clicked item, plus the other selected ones if it is part of the selection.
+                Act::ItemMenu { from, path } => {
                     let key = path.to_lowercase();
                     let mut paths = vec![path.clone()];
                     if self.ui.selection.contains(&key) {
@@ -548,10 +551,31 @@ impl DeskApp {
                             }
                         }
                     }
+                    let from_auto = self.layout.fences.iter().find(|f| f.id == from).map(|f| f.auto_sort).unwrap_or(false);
+                    let targets: Vec<(u64, String)> = self
+                        .layout
+                        .fences
+                        .iter()
+                        .filter(|f| !f.auto_sort && f.widget.is_none() && (f.id != from || from_auto))
+                        .map(|f| (f.id, f.name.clone()))
+                        .collect();
                     #[cfg(windows)]
-                    crate::shellmenu::show(crate::runloop::main_hwnd(), &paths);
-                    // The command may have renamed, deleted or added files: read the desktop again.
-                    let _ = self.scan_wake.send(());
+                    {
+                        use crate::shellmenu::Extra;
+                        let mut extras: Vec<Extra> = targets.iter().enumerate().map(|(i, (_, n))| Extra { id: 100 + i as u32, label: n.clone(), sub: true }).collect();
+                        extras.push(Extra { id: 99, label: "New box".into(), sub: true });
+                        if !from_auto {
+                            extras.push(Extra { id: 1, label: "Remove from this box".into(), sub: false });
+                        }
+                        extras.push(Extra { id: 3, label: "Open file location".into(), sub: false });
+                        if crate::shellmenu::spawn(&paths, &extras) {
+                            self.menu_ctx = Some((path.clone(), paths, targets.iter().map(|t| t.0).collect()));
+                        } else {
+                            // The helper couldn't start: DeskBoxes' own menu instead.
+                            let at = desktop::cursor_points(desktop::system_scale()).unwrap_or_default();
+                            self.ui.menu = Some(OpenMenu { target: MenuTarget::Item(from, path.clone()), page: MenuPage::Main, at, size: Vec2::new(270.0, 120.0), frames: 0, was_focused: false, rounded: false });
+                        }
+                    }
                 }
                 Act::ApplyLookToAll(id) => {
                     if let Some(src) = self.layout.fences.iter().find(|f| f.id == id).cloned() {
@@ -751,6 +775,36 @@ impl DeskApp {
             }
         }
 
+        // A DeskBoxes entry chosen in Windows' menu (helper process). Windows' own commands may
+        // also have renamed, deleted or added files: read the desktop again either way.
+        #[cfg(windows)]
+        for (id, clicked) in crate::shellmenu::take_done() {
+            if let Some((p, paths, targets)) = self.menu_ctx.clone().filter(|c| c.0 == clicked) {
+                match id {
+                    1 => {
+                        for q in &paths {
+                            self.actions.push(Act::MoveItem { path: q.clone(), to: 0, tab: 0 });
+                        }
+                    }
+                    3 => desktop::show_in_folder(&p),
+                    99 => {
+                        for q in &paths {
+                            self.actions.push(Act::MoveToNewFence { path: q.clone() });
+                        }
+                    }
+                    n if n >= 100 => {
+                        if let Some(&to) = targets.get((n - 100) as usize) {
+                            let tab = self.layout.fences.iter().find(|f| f.id == to).map(|f| f.sel_tab).unwrap_or(0);
+                            for q in &paths {
+                                self.actions.push(Act::MoveItem { path: q.clone(), to, tab });
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let _ = self.scan_wake.send(());
+        }
         if !self.actions.is_empty() {
             self.redraw_all = true;
         }
@@ -1348,7 +1402,12 @@ fn fence_window(
                         }
                         if resp.secondary_clicked() {
                             st.selected = Some(it.path.clone());
-                            open_menu(ctx, st, MenuTarget::Item(fence.id, it.path.clone()));
+                            if !st.selection.contains(&key) {
+                                st.selection.clear();
+                                st.selection.insert(key.clone());
+                            }
+                            // Windows' own menu with DeskBoxes' entries on top (falls back to ours).
+                            actions.push(Act::ItemMenu { from: fence.id, path: it.path.clone() });
                         }
                         resp.on_hover_text_at_pointer(it.name.as_str());
                     }
@@ -1929,10 +1988,6 @@ fn item_menu(ui: &mut egui::Ui, from: u64, from_auto: bool, it: &DeskItem, targe
                 desktop::show_in_folder(&it.path);
                 close = true;
             }
-            if row(ui, icon::MORE, "More options…", None, true).on_hover_text("Windows' own menu for this item (Open with, Send to, …)").clicked() {
-                actions.push(Act::ShellMenu(it.path.clone()));
-                close = true;
-            }
             sep(ui);
             if sub(ui, icon::MOVE, "Move to") {
                 *page = MenuPage::MoveTo;
@@ -1973,11 +2028,6 @@ impl DeskApp {
             hosts.panel(MENU_PANEL, crate::host::PanelKind::Menu, "DeskBoxes menu", rect_px, true, force, |pctx| {
                 self.menu_body(pctx, &mut m, targets, &root_ctx, &mut close, &mut dirty, &mut measured);
             });
-            // "More options…": Windows' menu needs its owner in front. Move the focus to our hidden
-            // window while this menu still has it (afterwards Windows would refuse).
-            if close && self.actions.iter().any(|a| matches!(a, Act::ShellMenu(_))) {
-                crate::runloop::bring_main_to_front();
-            }
             if close {
                 hosts.close_panel(MENU_PANEL);
             }
@@ -2773,7 +2823,6 @@ mod icon {
     pub const CHECK: char = '\u{E73E}';
     pub const BACK: char = '\u{E72B}';
     pub const SEARCH: char = '\u{E721}';
-    pub const MORE: char = '\u{E712}';
 }
 
 #[cfg(windows)]

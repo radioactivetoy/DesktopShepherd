@@ -79,6 +79,12 @@ fn main() {
         .and_then(|i| args.get(i + 1))
         .map(PathBuf::from);
 
+    // Windows' right-click menu, shown by a short-lived helper process (see shellmenu.rs).
+    #[cfg(windows)]
+    if args.iter().any(|a| a == "--shell-menu") {
+        std::process::exit(shellmenu::run_helper(&args));
+    }
+
     // Hidden trial of Windows' composition system (see comp_trial.rs).
     if args.iter().any(|a| a == "--composition-trial") {
         if let Err(e) = comp_trial::run(6) {

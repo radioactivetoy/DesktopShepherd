@@ -165,21 +165,6 @@ pub fn request_quit() {
     post_wake();
 }
 
-/// Gives the keyboard focus to the hidden main window (before showing Windows' menu).
-pub fn bring_main_to_front() {
-    let h = WAKE_HWND.load(Ordering::SeqCst);
-    if h != 0 {
-        unsafe {
-            let _ = SetForegroundWindow(HWND(h as *mut _));
-        }
-    }
-}
-
-/// The hidden main window (owner of Windows' right-click menu, see shellmenu.rs); 0 if none.
-pub fn main_hwnd() -> isize {
-    WAKE_HWND.load(Ordering::SeqCst)
-}
-
 unsafe extern "system" fn main_wndproc(h: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     // Windows' right-click menu, while open, draws its submenus through its owner (us).
     if let Some(r) = crate::shellmenu::handle_menu_msg(m, wp, lp) {

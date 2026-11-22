@@ -1,25 +1,24 @@
-//! Windows' own right-click menu for desktop items ("More options…" in the icon menu): the same
-//! menu Explorer shows, with "Open with", "Send to", and what other programs add (7-Zip, the
-//! antivirus, …).
+//! Windows' own right-click menu for desktop items: the same menu Explorer shows ("Open with",
+//! "Send to", and what other programs add: 7-Zip, the antivirus, …), drawn dark, with
+//! DeskBoxes' own entries ("Move to ▸", "Remove from this box") at the top.
 //!
-//! It runs inside this program, not inside Explorer: if another program's menu add-on
-//! misbehaves, only DeskBoxes is affected (the supervisor restarts it), never Explorer.
-//! The menu is modal: it runs its own message loop until a choice is made or it is dismissed.
+//! It runs in a short-lived helper process (`deskboxes.exe --shell-menu …`), not in the main
+//! app: other programs' menu add-ons are loaded there and leave with it, so they can neither
+//! crash DeskBoxes nor stay in its memory. The helper's exit code is the DeskBoxes entry chosen
+//! (0 = none, or a Windows command that the helper ran itself).
 
 #![cfg(windows)]
 
 use std::cell::RefCell;
-use windows::core::{Interface, HSTRING, PCSTR};
+use windows::core::{w, Interface, HSTRING, PCSTR, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
-use windows::Win32::System::Com::CoTaskMemFree;
+use windows::Win32::System::Com::{CoInitializeEx, CoTaskMemFree, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE};
+use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Shell::Common::ITEMIDLIST;
 use windows::Win32::UI::Shell::{
     IContextMenu, IContextMenu2, IContextMenu3, IShellFolder, SHBindToParent, SHParseDisplayName, CMF_NORMAL, CMINVOKECOMMANDINFO,
 };
-use windows::Win32::UI::WindowsAndMessaging::{
-    CreatePopupMenu, DestroyMenu, GetCursorPos, PostMessageW, SetForegroundWindow, TrackPopupMenuEx, SW_SHOWNORMAL, TPM_RETURNCMD,
-    TPM_RIGHTBUTTON, WM_DRAWITEM, WM_INITMENUPOPUP, WM_MEASUREITEM, WM_MENUCHAR, WM_NULL,
-};
+use windows::Win32::UI::WindowsAndMessaging::*;
 
 thread_local! {
     /// The menu being shown: its owner window forwards drawing messages to it, so submenus like
@@ -27,7 +26,7 @@ thread_local! {
     static OPEN: RefCell<Option<IContextMenu>> = const { RefCell::new(None) };
 }
 
-/// Called by the owner window's procedure: lets the open menu handle its own messages.
+/// Lets the open menu handle its own drawing messages (called by the owner window).
 pub fn handle_menu_msg(msg: u32, wp: WPARAM, lp: LPARAM) -> Option<LRESULT> {
     if !matches!(msg, WM_INITMENUPOPUP | WM_DRAWITEM | WM_MEASUREITEM | WM_MENUCHAR) {
         return None;
@@ -51,47 +50,193 @@ pub fn handle_menu_msg(msg: u32, wp: WPARAM, lp: LPARAM) -> Option<LRESULT> {
     })
 }
 
-/// A desktop item's shell identity: its parent folder and its own last ID (freed on drop).
-struct Item {
-    full: *mut ITEMIDLIST,
+/// One DeskBoxes entry at the top of the menu: its number (returned when chosen) and label.
+/// `sub` = put it in the "Move to" submenu.
+pub struct Extra {
+    pub id: u32,
+    pub label: String,
+    pub sub: bool,
 }
 
-impl Drop for Item {
+/// Results of helpers that finished (exit code, the item the menu was for), for the app.
+static DONE: std::sync::Mutex<Vec<(u32, String)>> = std::sync::Mutex::new(Vec::new());
+
+/// Entries chosen in helper menus since the last call: (entry number, item path).
+pub fn take_done() -> Vec<(u32, String)> {
+    DONE.lock().map(|mut d| std::mem::take(&mut *d)).unwrap_or_default()
+}
+
+/// Starts the helper for `paths` (the first is the clicked item) with `extras` on top.
+/// Returns false if it couldn't start (the caller then shows its own menu).
+pub fn spawn(paths: &[String], extras: &[Extra]) -> bool {
+    let Ok(exe) = std::env::current_exe() else { return false };
+    let mut cmd = std::process::Command::new(exe);
+    cmd.arg("--shell-menu");
+    for p in paths {
+        cmd.arg("--path").arg(p);
+    }
+    for e in extras {
+        cmd.arg(if e.sub { "--sub" } else { "--item" }).arg(format!("{}|{}", e.id, e.label));
+    }
+    // The person just clicked in DeskBoxes: let the helper take the focus (its menu needs it).
+    unsafe {
+        let _ = AllowSetForegroundWindow(ASFW_ANY);
+    }
+    let Ok(mut child) = cmd.spawn() else { return false };
+    let clicked = paths.first().cloned().unwrap_or_default();
+    let _ = std::thread::Builder::new().name("menu-helper-wait".into()).spawn(move || {
+        if let Ok(status) = child.wait() {
+            let code = status.code().unwrap_or(0).max(0) as u32;
+            if code > 0 {
+                if let Ok(mut d) = DONE.lock() {
+                    d.push((code, clicked));
+                }
+                crate::runloop::wake_after(std::time::Duration::ZERO);
+            }
+        }
+    });
+    true
+}
+
+unsafe extern "system" fn owner_proc(h: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    if let Some(r) = handle_menu_msg(m, wp, lp) {
+        return r;
+    }
+    DefWindowProcW(h, m, wp, lp)
+}
+
+/// Dark menus like the rest of DeskBoxes (uxtheme's SetPreferredAppMode / FlushMenuThemes,
+/// found by number; silently skipped if this Windows doesn't have them).
+unsafe fn dark_menus() {
+    use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
+    let Ok(ux) = LoadLibraryW(w!("uxtheme.dll")) else { return };
+    if let Some(set_mode) = GetProcAddress(ux, PCSTR(135usize as *const u8)) {
+        let set_mode: extern "system" fn(i32) -> i32 = std::mem::transmute(set_mode);
+        set_mode(2); // ForceDark
+    }
+    if let Some(flush) = GetProcAddress(ux, PCSTR(136usize as *const u8)) {
+        let flush: extern "system" fn() = std::mem::transmute(flush);
+        flush();
+    }
+}
+
+/// The helper process (`--shell-menu`): shows the menu at the mouse, runs a Windows command
+/// itself or returns the DeskBoxes entry chosen as its exit code.
+pub fn run_helper(args: &[String]) -> i32 {
+    let mut paths = Vec::new();
+    let mut extras = Vec::new();
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--path" => paths.extend(it.next().cloned()),
+            "--item" | "--sub" => {
+                if let Some((id, label)) = it.next().and_then(|v| v.split_once('|')) {
+                    if let Ok(id) = id.parse::<u32>() {
+                        extras.push(Extra { id, label: label.to_string(), sub: a == "--sub" });
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    unsafe {
+        use windows::Win32::UI::HiDpi::{SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2};
+        let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+        dark_menus();
+        let Ok(inst) = GetModuleHandleW(None) else { return 0 };
+        let wc = WNDCLASSW { lpfnWndProc: Some(owner_proc), hInstance: inst.into(), lpszClassName: w!("DeskBoxesMenuOwner"), ..Default::default() };
+        RegisterClassW(&wc);
+        let Ok(owner) = CreateWindowExW(WS_EX_TOOLWINDOW, w!("DeskBoxesMenuOwner"), w!("DeskBoxes menu"), WS_POPUP, 0, 0, 0, 0, None, None, inst, None) else {
+            return 0;
+        };
+        let chosen = match show_inner(owner, &paths, &extras) {
+            Ok(c) => c,
+            Err(e) => {
+                crate::storage::log_line(&format!("Windows menu could not be shown: {e:?}"));
+                0
+            }
+        };
+        if chosen == 0 {
+            // A Windows command may have opened a window of this process (Properties, Open
+            // with…): stay until those are closed.
+            wait_for_own_windows(owner);
+        }
+        let _ = DestroyWindow(owner);
+        chosen as i32
+    }
+}
+
+/// Keeps the helper alive (pumping messages) while it shows windows of its own.
+unsafe fn wait_for_own_windows(owner: HWND) {
+    let start = std::time::Instant::now();
+    let mut idle_checks = 0;
+    while start.elapsed() < std::time::Duration::from_secs(3600) {
+        let mut msg = MSG::default();
+        while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
+            let _ = TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+        if own_visible_windows(owner) == 0 {
+            idle_checks += 1;
+            // Give a command a moment to open its window before deciding there is none.
+            if idle_checks >= 8 {
+                return;
+            }
+        } else {
+            idle_checks = 0;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+}
+
+unsafe fn own_visible_windows(owner: HWND) -> usize {
+    use windows::Win32::Foundation::BOOL;
+    unsafe extern "system" fn cb(h: HWND, lp: LPARAM) -> BOOL {
+        let st = &mut *(lp.0 as *mut (u32, HWND, usize));
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(h, Some(&mut pid));
+        if pid == st.0 && h != st.1 && IsWindowVisible(h).as_bool() {
+            st.2 += 1;
+        }
+        BOOL(1)
+    }
+    let mut st = (windows::Win32::System::Threading::GetCurrentProcessId(), owner, 0usize);
+    let _ = EnumWindows(Some(cb), LPARAM(&mut st as *mut _ as isize));
+    st.2
+}
+
+/// A shell ID allocated by Windows (freed on drop).
+struct Pidl(*mut ITEMIDLIST);
+
+impl Drop for Pidl {
     fn drop(&mut self) {
-        if !self.full.is_null() {
-            unsafe { CoTaskMemFree(Some(self.full as *const _)) };
+        if !self.0.is_null() {
+            unsafe { CoTaskMemFree(Some(self.0 as *const _)) };
         }
     }
 }
 
-/// Shows Windows' menu for `paths` (items of one folder; others are left out) at the mouse,
-/// owned by `owner` (a window of this program), and runs the chosen command. Never panics: any
-/// failure is logged and the menu simply doesn't show.
-pub fn show(owner: isize, paths: &[String]) {
-    if let Err(e) = unsafe { show_inner(HWND(owner as *mut _), paths) } {
-        crate::storage::log_line(&format!("Windows menu could not be shown: {e:?}"));
-    }
-}
-
-unsafe fn show_inner(owner: HWND, paths: &[String]) -> windows::core::Result<()> {
-    // Parse every path to a shell ID; keep those in the same folder as the first one.
-    let mut items: Vec<Item> = Vec::new();
+/// Builds the menu (DeskBoxes entries, then Windows' items for `paths` that share the first
+/// one's folder), shows it at the mouse and handles the choice. Returns the DeskBoxes entry
+/// chosen, or 0.
+unsafe fn show_inner(owner: HWND, paths: &[String], extras: &[Extra]) -> windows::core::Result<u32> {
+    let mut items: Vec<(Pidl, String)> = Vec::new();
     for p in paths {
         let mut pidl: *mut ITEMIDLIST = std::ptr::null_mut();
         if SHParseDisplayName(&HSTRING::from(p.as_str()), None, &mut pidl, 0, None).is_ok() && !pidl.is_null() {
-            items.push(Item { full: pidl });
+            items.push((Pidl(pidl), p.clone()));
         }
     }
-    let Some(first) = items.first() else { return Ok(()) };
+    let Some((first, first_path)) = items.first() else { return Ok(0) };
+    let parent = |p: &str| std::path::Path::new(p).parent().map(|x| x.to_string_lossy().to_lowercase());
     let mut last: *mut ITEMIDLIST = std::ptr::null_mut();
-    let folder: IShellFolder = SHBindToParent(first.full, Some(&mut last))?;
-    let parent_of = |p: &std::path::Path| p.parent().map(|x| x.to_string_lossy().to_lowercase());
-    let first_parent = parent_of(std::path::Path::new(&paths[0]));
+    let folder: IShellFolder = SHBindToParent(first.0, Some(&mut last))?;
     let mut children: Vec<*const ITEMIDLIST> = vec![last as *const _];
-    for (i, it) in items.iter().enumerate().skip(1) {
-        if paths.get(i).map(|p| parent_of(std::path::Path::new(p))) == Some(first_parent.clone()) {
+    for (pidl, p) in items.iter().skip(1) {
+        if parent(p) == parent(first_path) {
             let mut l: *mut ITEMIDLIST = std::ptr::null_mut();
-            if SHBindToParent::<IShellFolder>(it.full, Some(&mut l)).is_ok() && !l.is_null() {
+            if SHBindToParent::<IShellFolder>(pidl.0, Some(&mut l)).is_ok() && !l.is_null() {
                 children.push(l as *const _);
             }
         }
@@ -100,8 +245,28 @@ unsafe fn show_inner(owner: HWND, paths: &[String]) -> windows::core::Result<()>
     let menu = CreatePopupMenu()?;
     const FIRST: u32 = 1;
     const LAST: u32 = 0x7FFF;
-    let shown = (|| -> windows::core::Result<()> {
-        cm.QueryContextMenu(menu, 0, FIRST, LAST, CMF_NORMAL)?;
+    const OURS: u32 = 0x8000;
+    let result = (|| -> windows::core::Result<u32> {
+        // DeskBoxes' entries first.
+        let mut count = 0u32;
+        let subs: Vec<&Extra> = extras.iter().filter(|e| e.sub).collect();
+        if !subs.is_empty() {
+            let sub = CreatePopupMenu()?;
+            for e in &subs {
+                let _ = AppendMenuW(sub, MF_STRING, (OURS + e.id) as usize, &HSTRING::from(e.label.as_str()));
+            }
+            let _ = AppendMenuW(menu, MF_POPUP, sub.0 as usize, w!("Move to"));
+            count += 1;
+        }
+        for e in extras.iter().filter(|e| !e.sub) {
+            let _ = AppendMenuW(menu, MF_STRING, (OURS + e.id) as usize, &HSTRING::from(e.label.as_str()));
+            count += 1;
+        }
+        if count > 0 {
+            let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
+            count += 1;
+        }
+        cm.QueryContextMenu(menu, count, FIRST, LAST, CMF_NORMAL)?;
         let mut at = POINT::default();
         let _ = GetCursorPos(&mut at);
         OPEN.with(|o| *o.borrow_mut() = Some(cm.clone()));
@@ -110,6 +275,9 @@ unsafe fn show_inner(owner: HWND, paths: &[String]) -> windows::core::Result<()>
         let cmd = TrackPopupMenuEx(menu, (TPM_RETURNCMD | TPM_RIGHTBUTTON).0, at.x, at.y, owner, None).0 as u32;
         let _ = PostMessageW(owner, WM_NULL, WPARAM(0), LPARAM(0));
         OPEN.with(|o| *o.borrow_mut() = None);
+        if cmd >= OURS {
+            return Ok(cmd - OURS);
+        }
         if cmd >= FIRST {
             let info = CMINVOKECOMMANDINFO {
                 cbSize: std::mem::size_of::<CMINVOKECOMMANDINFO>() as u32,
@@ -120,8 +288,8 @@ unsafe fn show_inner(owner: HWND, paths: &[String]) -> windows::core::Result<()>
             };
             cm.InvokeCommand(&info)?;
         }
-        Ok(())
+        Ok(0)
     })();
     let _ = DestroyMenu(menu);
-    shown
+    result
 }
