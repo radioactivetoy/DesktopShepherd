@@ -44,6 +44,8 @@ Start-Process .\target\debug\desktopshepherd.exe
 - Synthetic mouse tests: add waits of ≥150 ms between press/move/release, or egui won't start
   a drag. Display scale is 125 %: from a (DPI-unaware) PowerShell, `SetCursorPos` and
   `GetWindowRect` use scaled coordinates, but `CopyFromScreen` captures real pixels (×1.25).
+  That mapping proved unreliable: call `SetProcessDPIAware()` first, then use real pixels
+  everywhere (screenshot pixel = cursor position), and check with `GetCursorPos`.
 - CPU while hovering: `tools\measure_hover_cpu.ps1`; Win+D: `tools\measure_show_desktop_gap.ps1`
   (start with the desktop not shown).
 
