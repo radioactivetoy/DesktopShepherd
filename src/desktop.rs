@@ -642,16 +642,30 @@ pub fn watch_show_desktop() {
             let _ = std::thread::Builder::new().name("show-desktop-guard".into()).spawn(move || {
                 use std::time::{Duration, Instant};
                 while rx.recv().is_ok() {
-                    let mut until = Instant::now() + Duration::from_millis(GUARD_WINDOW_MS);
+                    let mut start = Instant::now();
+                    let mut until = start + Duration::from_millis(GUARD_WINDOW_MS);
+                    // Since when the boxes have been seen above the desktop without help.
+                    let mut fine_since: Option<Instant> = None;
                     while Instant::now() < until {
                         // Another desktop click meanwhile: keep watching a little longer.
                         while rx.try_recv().is_ok() {
-                            until = Instant::now() + Duration::from_millis(GUARD_WINDOW_MS);
+                            start = Instant::now();
+                            until = start + Duration::from_millis(GUARD_WINDOW_MS);
+                            fine_since = None;
                         }
                         let boxes: Vec<isize> = BOX_HWNDS.lock().map(|v| v.clone()).unwrap_or_default();
                         if boxes.first().map(|h| box_below_desktop(*h)).unwrap_or(false) {
                             for h in &boxes {
                                 send_to_bottom(*h);
+                            }
+                            fine_since = None;
+                        } else {
+                            // Explorer lifts the desktop 30-100 ms after it takes focus: once at least
+                            // 400 ms have passed and the boxes stayed up for 300 ms, stop early.
+                            let now = Instant::now();
+                            let since = *fine_since.get_or_insert(now);
+                            if now - start >= Duration::from_millis(400) && now - since >= Duration::from_millis(300) {
+                                break;
                             }
                         }
                         std::thread::sleep(Duration::from_millis(2));
@@ -1045,5 +1059,91 @@ pub fn focus_desktop() {
         if let Ok(p) = FindWindowW(w!("Progman"), PCWSTR::null()) {
             let _ = SetForegroundWindow(p);
         }
+    }
+}
+
+/// Watches folders for changes on its own thread: `dirs()` lists them (looked at again every 4 s,
+/// e.g. after a folder box was added), `changed()` is called (at most about 3 times a second)
+/// when one of them changes and returns false to stop. In between the thread sleeps inside
+/// Windows (change notifications), so watching costs no CPU. Every 4 s it also re-hides
+/// Windows' own desktop icons if Explorer showed them again.
+pub fn watch_folders(dirs: impl Fn() -> Vec<PathBuf> + Send + 'static, changed: impl Fn() -> bool + Send + 'static) {
+    #[cfg(windows)]
+    {
+        let spawned = std::thread::Builder::new().name("folder-watch".into()).spawn(move || unsafe {
+            use windows::core::HSTRING;
+            use windows::Win32::Foundation::{BOOL, HANDLE, WAIT_TIMEOUT};
+            use windows::Win32::Storage::FileSystem::{
+                FindCloseChangeNotification, FindFirstChangeNotificationW, FindNextChangeNotification, FILE_NOTIFY_CHANGE,
+                FILE_NOTIFY_CHANGE_DIR_NAME, FILE_NOTIFY_CHANGE_FILE_NAME, FILE_NOTIFY_CHANGE_LAST_WRITE, FILE_NOTIFY_CHANGE_SIZE,
+            };
+            use windows::Win32::System::Threading::WaitForMultipleObjects;
+            let filter = FILE_NOTIFY_CHANGE(
+                FILE_NOTIFY_CHANGE_FILE_NAME.0 | FILE_NOTIFY_CHANGE_DIR_NAME.0 | FILE_NOTIFY_CHANGE_LAST_WRITE.0 | FILE_NOTIFY_CHANGE_SIZE.0,
+            );
+            let mut watched: Vec<PathBuf> = Vec::new();
+            let mut handles: Vec<HANDLE> = Vec::new();
+            let close_all = |hs: &mut Vec<HANDLE>| {
+                for h in hs.drain(..) {
+                    let _ = FindCloseChangeNotification(h);
+                }
+            };
+            loop {
+                reapply_icon_hiding();
+                let mut want = dirs();
+                want.sort();
+                want.dedup();
+                if want != watched {
+                    close_all(&mut handles);
+                    for d in &want {
+                        // A folder that doesn't exist (yet) is just not watched; the scanner's
+                        // once-a-minute read still covers it.
+                        if let Ok(h) = FindFirstChangeNotificationW(&HSTRING::from(d.as_os_str()), BOOL(0), filter) {
+                            if !h.is_invalid() {
+                                handles.push(h);
+                            }
+                        }
+                    }
+                    watched = want;
+                }
+                if handles.is_empty() {
+                    std::thread::sleep(std::time::Duration::from_secs(4));
+                    continue;
+                }
+                // At most 64 handles can be waited on at once (far more than needed here).
+                let n = handles.len().min(64);
+                let r = WaitForMultipleObjects(&handles[..n], BOOL(0), 4000);
+                if r == WAIT_TIMEOUT {
+                    continue;
+                }
+                let i = r.0 as usize; // WAIT_OBJECT_0 + i
+                if i >= n {
+                    // A handle went bad (folder deleted): open them again next round.
+                    close_all(&mut handles);
+                    watched.clear();
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                    continue;
+                }
+                let _ = FindNextChangeNotification(handles[i]);
+                // Let a burst of changes (a copy of many files) settle, then one read.
+                std::thread::sleep(std::time::Duration::from_millis(300));
+                for h in &handles[..n] {
+                    if WaitForMultipleObjects(std::slice::from_ref(h), BOOL(0), 0) != WAIT_TIMEOUT {
+                        let _ = FindNextChangeNotification(*h);
+                    }
+                }
+                if !changed() {
+                    break;
+                }
+            }
+            close_all(&mut handles);
+        });
+        if let Err(e) = spawned {
+            storage_log(&format!("folder watcher could not start: {e}"));
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (dirs, changed);
     }
 }

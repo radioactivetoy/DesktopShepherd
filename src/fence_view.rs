@@ -365,3 +365,17 @@ pub fn paint_static(painter: &egui::Painter, icons: &mut IconCache, fence: &Fenc
     }
 }
 
+
+/// Windows' fonts folder (normally C:\Windows\Fonts).
+pub fn fonts_dir() -> std::path::PathBuf {
+    std::env::var_os("WINDIR").map(std::path::PathBuf::from).unwrap_or_else(|| std::path::PathBuf::from(r"C:\Windows")).join("Fonts")
+}
+
+/// The names in `FONTS` whose file is on this PC (checked once, not on every redraw).
+pub fn installed_fonts() -> &'static [&'static str] {
+    static LIST: std::sync::OnceLock<Vec<&'static str>> = std::sync::OnceLock::new();
+    LIST.get_or_init(|| {
+        let dir = fonts_dir();
+        FONTS.iter().filter(|(n, f)| *n == "Segoe UI" || dir.join(f).exists()).map(|(n, _)| *n).collect()
+    })
+}

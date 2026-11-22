@@ -169,6 +169,8 @@ pub struct DeskApp {
     redraw_all: bool,
     /// Icon sizes (pixels) the boxes showed last pass (see `IconCache::keep_only_sizes`).
     icon_sizes: Vec<u32>,
+    /// The quick search or the settings window was open last pass (they use extra icon sizes).
+    extra_icons_open: bool,
     /// Fonts the boxes use, loaded into the drawing context (see `setup_style`).
     font_names: Vec<String>,
     /// When to put all boxes back just above the desktop after a display change.
@@ -263,8 +265,8 @@ impl DeskApp {
             }
         }
 
-        // Background desktop watcher: re-reads the folders every few seconds (or when woken)
-        // and only reports when something actually changed.
+        // Background desktop reader: re-reads the folders when the folder watcher (below) or the app
+        // wakes it, and only reports when something actually changed.
         let extra_paths = Arc::new(Mutex::new(clean_paths(&layout)));
         let monitors_now = desktop::monitors();
         let monitors_shared = Arc::new(Mutex::new(monitors_now.clone()));
@@ -274,29 +276,19 @@ impl DeskApp {
         {
             let extra = extra_paths.clone();
             let ctx = ctx.clone();
-            let mons = monitors_shared.clone();
-            let mons_flag = monitors_changed.clone();
-            let every = Duration::from_secs(layout.settings.rescan_secs.clamp(2, 60));
             let mut last: Vec<String> = {
                 let mut k: Vec<String> = initial.iter().map(|(k, v)| format!("{k}|{}", v.name)).collect();
                 k.sort();
                 k
             };
-            let _ = std::thread::Builder::new().name("desktop-watch".into()).spawn(move || loop {
-                desktop::reapply_icon_hiding();
-                // Displays added, removed or re-arranged: tell the app to re-place the boxes.
-                let now = desktop::monitors();
-                if let Ok(mut m) = mons.lock() {
-                    if *m != now {
-                        *m = now;
-                        mons_flag.store(true, std::sync::atomic::Ordering::SeqCst);
-                        ctx.request_repaint();
-                    }
-                }
-                match wake_rx.recv_timeout(every) {
+            let _ = std::thread::Builder::new().name("desktop-scan".into()).spawn(move || loop {
+                // Woken by the folder watcher (a file was added, removed, renamed or changed) or by
+                // the app; once a minute anyway as a safety net. (Monitors: WM_DISPLAYCHANGE.)
+                match wake_rx.recv_timeout(Duration::from_secs(60)) {
                     Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
                     Err(_) => break,
                 }
+                while wake_rx.try_recv().is_ok() {} // several changes at once: one read
                 let extras = extra.lock().map(|e| e.clone()).unwrap_or_default();
                 let found = match std::panic::catch_unwind(|| desktop::scan(&extras)) {
                     Ok(f) => f,
@@ -312,6 +304,23 @@ impl DeskApp {
                     ctx.request_repaint();
                 }
             });
+        }
+        // Folder watcher: Windows tells us when something in the desktop folders (or a folder
+        // box's folder) changes; the thread sleeps otherwise. It also keeps Windows' own desktop
+        // icons hidden (Explorer can show them again) with a cheap check every 4 s.
+        {
+            let extra = extra_paths.clone();
+            let wake = wake_tx.clone();
+            desktop::watch_folders(
+                move || {
+                    let mut dirs = desktop::desktop_dirs();
+                    if let Ok(e) = extra.lock() {
+                        dirs.extend(e.iter().filter_map(|p| p.strip_prefix("dir:")).map(std::path::PathBuf::from));
+                    }
+                    dirs
+                },
+                move || wake.send(()).is_ok(),
+            );
         }
 
         // Boxes drawn by Windows' composition system with DirectX (software DirectX if the
@@ -369,6 +378,7 @@ impl DeskApp {
             personalize_tab: 0,
             redraw_all: true,
             icon_sizes: Vec::new(),
+            extra_icons_open: false,
             font_names: Vec::new(),
             restack_at: Vec::new(),
             search: None,
@@ -830,9 +840,18 @@ impl DeskApp {
             v.dedup();
             v
         };
-        if sizes != self.icon_sizes {
-            if !self.icon_sizes.is_empty() {
-                self.icons.keep_only_sizes(&sizes.iter().copied().collect());
+        // The quick-search list (22 pt) and the settings window's layout preview fetch icons in
+        // other sizes: drop those when the window closes (search boxes keep their 20 pt ones).
+        let extra_open = self.search.is_some() || self.manager_open;
+        let closed_extra = self.extra_icons_open && !extra_open;
+        self.extra_icons_open = extra_open;
+        if sizes != self.icon_sizes || closed_extra {
+            if !self.icon_sizes.is_empty() || closed_extra {
+                let mut keep: HashSet<u32> = sizes.iter().copied().collect();
+                if self.layout.fences.iter().any(|f| f.widget.as_ref().map(|w| w.kind == "search").unwrap_or(false)) {
+                    keep.insert(((20.0 * s).round() as u32).clamp(16, 256));
+                }
+                self.icons.keep_only_sizes(&keep);
             }
             self.icon_sizes = sizes;
         }
@@ -2016,10 +2035,7 @@ fn look_right(ui: &mut egui::Ui, fence: &mut Fence, actions: &mut Vec<Act>) -> b
                     ui.painter().text(Pos2::new(lr.min.x, lr.center().y), egui::Align2::LEFT_CENTER, "Font", FontId::proportional(14.0), Color32::from_gray(225));
                     let shown = if fence.font.is_empty() { "Segoe UI".to_string() } else { fence.font.clone() };
                     egui::ComboBox::from_id_salt("font-list").selected_text(shown.clone()).width(190.0).height(320.0).show_ui(ui, |ui| {
-                        for (name, file) in fv::FONTS {
-                            if !std::path::Path::new("C:/Windows/Fonts").join(file).exists() {
-                                continue;
-                            }
+                        for name in fv::installed_fonts() {
                             if ui.selectable_label(shown == *name, *name).clicked() && shown != *name {
                                 fence.font = if *name == "Segoe UI" { String::new() } else { name.to_string() };
                                 dirty = true;
@@ -2824,11 +2840,7 @@ impl DeskApp {
             }
             dirty = true;
         }
-        ui.horizontal(|ui| {
-            ui.label("Check the desktop for new files every");
-            dirty |= ui.add(egui::DragValue::new(&mut s.rescan_secs).range(2..=60).suffix(" s")).changed();
-            ui.label(egui::RichText::new("(applies after restart)").color(Color32::from_gray(150)));
-        });
+        ui.label(egui::RichText::new("New, renamed and removed desktop files show up as soon as Windows reports them.").color(Color32::from_gray(150)).size(12.0));
         ui.add_space(10.0);
         ui.heading("Saved layouts");
         ui.label(egui::RichText::new("A copy of your layout is kept each time DesktopShepherd starts (the last 10).").color(Color32::from_gray(150)).size(12.0));
@@ -3104,7 +3116,7 @@ fn setup_style(ctx: &egui::Context, extra_fonts: &[String]) {
     let fallback: Vec<String> = fonts.families.get(&egui::FontFamily::Proportional).cloned().unwrap_or_default();
     for name in extra_fonts {
         let Some((_, file)) = fv::FONTS.iter().find(|(n, _)| *n == name.as_str()) else { continue };
-        if let Ok(bytes) = std::fs::read(std::path::Path::new("C:/Windows/Fonts").join(file)) {
+        if let Ok(bytes) = std::fs::read(fv::fonts_dir().join(file)) {
             fonts.font_data.insert(name.clone(), Arc::new(egui::FontData::from_owned(bytes)));
             let mut chain = vec![name.clone()];
             chain.extend(fallback.iter().cloned());

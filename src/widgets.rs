@@ -169,6 +169,11 @@ impl DeskWidget for Sketch {
         if resp.drag_started() {
             if let Some(arr) = data["strokes"].as_array_mut() {
                 arr.push(json!({ "c": sel, "p": [] }));
+                // At most 300 strokes: the oldest go first.
+                if arr.len() > 300 {
+                    let extra = arr.len() - 300;
+                    arr.drain(..extra);
+                }
             }
         }
         if resp.dragged() {
@@ -177,7 +182,16 @@ impl DeskWidget for Sketch {
                 let ny = ((pos.y - rect.min.y) / rect.height()).clamp(0.0, 1.0);
                 if let Some(last) = data["strokes"].as_array_mut().and_then(|a| a.last_mut()) {
                     if let Some(pts) = last["p"].as_array_mut() {
-                        pts.push(json!([(nx * 1000.0).round() / 1000.0, (ny * 1000.0).round() / 1000.0]));
+                        // Keep the saved drawing small: skip points closer than ~2 px to the last
+                        // one, and at most 2000 points per stroke.
+                        let (px, py) = ((nx * 1000.0).round() / 1000.0, (ny * 1000.0).round() / 1000.0);
+                        let near = pts.last().and_then(|l| l.as_array()).map(|l| {
+                            let (lx, ly) = (l.first().and_then(|v| v.as_f64()).unwrap_or(-1.0) as f32, l.get(1).and_then(|v| v.as_f64()).unwrap_or(-1.0) as f32);
+                            ((px - lx) * rect.width()).abs() < 2.0 && ((py - ly) * rect.height()).abs() < 2.0
+                        });
+                        if !near.unwrap_or(false) && pts.len() < 2000 {
+                            pts.push(json!([px, py]));
+                        }
                     }
                 }
             }
