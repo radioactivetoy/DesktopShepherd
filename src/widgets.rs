@@ -597,102 +597,81 @@ fn agenda_urls(data: &Value) -> Vec<String> {
 
 impl DeskWidget for Agenda {
     fn ui(&self, ui: &mut Ui, data: &mut Value) -> WidgetOutput {
-        use chrono::{Duration as CDuration, NaiveTime};
         let mut out = WidgetOutput { changed: false, repaint_after: Some(Duration::from_secs(60)) };
         let urls = agenda_urls(data);
         let days = data.get("days").and_then(|v| v.as_u64()).unwrap_or(7).clamp(1, 14) as i64;
         let force = crate::agenda::take_refresh();
         let cals = crate::agenda::view(&urls, force);
-        let today = chrono::Local::now().date_naive();
-        let now = chrono::Local::now().naive_local();
-        let end = (today + CDuration::days(days)).and_time(NaiveTime::MIN);
-
         if force || cals.iter().any(|c| c.loading) {
             // Look again soon for the download's result (it also wakes the app when done).
             out.repaint_after = Some(Duration::from_secs(2));
         }
-        let resp = ui
-            .vertical(|ui| {
-                if urls.is_empty() {
-                    ui.add_space(6.0);
-                    ui.label(egui::RichText::new("Right-click here and choose \"Widget settings…\" to add a calendar link (iCal / .ics).").size(13.0).color(Color32::from_gray(220)));
-                    ui.add_space(4.0);
-                    ui.label(
-                        egui::RichText::new("Google Calendar: Settings > your calendar > \"Secret address in iCal format\". Outlook: Settings > Calendar > Shared calendars > Publish.")
-                            .size(11.5)
-                            .color(Color32::from_gray(170)),
-                    );
-                    return;
+        if urls.is_empty() {
+            ui.add_space(6.0);
+            ui.label(egui::RichText::new("Right-click here and choose \"Widget settings…\" to add a calendar link (iCal / .ics).").size(13.0).color(Color32::from_gray(220)));
+            ui.add_space(4.0);
+            ui.label(
+                egui::RichText::new("Google Calendar: Settings > your calendar > \"Secret address in iCal format\". Outlook: Settings > Calendar > Shared calendars > Publish.")
+                    .size(11.5)
+                    .color(Color32::from_gray(170)),
+            );
+            return out;
+        }
+        let names: Vec<String> = cals
+            .iter()
+            .zip(urls.iter())
+            .map(|(c, u)| c.name.clone().unwrap_or_else(|| u.split("://").nth(1).and_then(|r| r.split('/').next()).unwrap_or(u).to_string()))
+            .collect();
+        // 0 = month, 1 = week, 2 = agenda list (the dots at the bottom switch).
+        let view = data.get("view").and_then(|v| v.as_u64()).unwrap_or(2).min(2) as usize;
+        let full = ui.max_rect();
+        let content = egui::Rect::from_min_max(full.min, Pos2::new(full.max.x, full.max.y - 16.0));
+        let did = ui.make_persistent_id("agenda-details");
+        let details: Option<AgendaDetails> = ui.ctx().data(|d| d.get_temp(did));
+        let mut open: Option<AgendaDetails> = None;
+        let mut close_details = false;
+        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(content).layout(egui::Layout::top_down(egui::Align::Min)));
+        match &details {
+            Some(d) => close_details = agenda_details(&mut child, d, &names),
+            None => {
+                match view {
+                    0 => agenda_month(&mut child, &cals, &mut open),
+                    1 => agenda_week(&mut child, &cals, &mut open),
+                    _ => agenda_list(&mut child, &cals, days, &mut open),
                 }
-                // Every event of the next days, each day under its own heading.
-                let mut rows: Vec<(chrono::NaiveDate, usize, &crate::agenda::Occurrence)> = Vec::new();
-                for (ci, c) in cals.iter().enumerate() {
-                    for e in c.events.iter() {
-                        if e.end <= now && !(e.all_day && e.end.date() > today) {
-                            if !(e.end == e.start && e.start.date() == today && e.start >= now) {
-                                continue; // already over
-                            }
-                        }
-                        if e.start >= end {
-                            continue;
-                        }
-                        if e.all_day {
-                            // A trip over several days is listed on each day it covers.
-                            let mut day = e.start.date().max(today);
-                            while day < e.end.date() && day.and_time(NaiveTime::MIN) < end {
-                                rows.push((day, ci, e));
-                                day += CDuration::days(1);
-                            }
-                        } else {
-                            rows.push((e.start.date().max(today), ci, e));
-                        }
-                    }
-                }
-                rows.sort_by(|a, b| a.0.cmp(&b.0).then(b.2.all_day.cmp(&a.2.all_day)).then(a.2.start.cmp(&b.2.start)));
-                let status_h = if cals.iter().any(|c| c.error.is_some() || (c.loading && c.events.is_empty())) { 20.0 } else { 0.0 };
-                egui::ScrollArea::vertical().max_height((ui.available_height() - status_h).max(30.0)).auto_shrink([false, true]).show(ui, |ui| {
-                    if rows.is_empty() && cals.iter().all(|c| !c.loading) {
-                        ui.label(egui::RichText::new(format!("Nothing in the next {days} days.")).size(13.0).color(Color32::from_gray(190)));
-                    }
-                    let mut last_day = None;
-                    for (day, ci, e) in &rows {
-                        if last_day != Some(*day) {
-                            last_day = Some(*day);
-                            let label = match (*day - today).num_days() {
-                                0 => "Today".to_string(),
-                                1 => "Tomorrow".to_string(),
-                                _ => day.format("%A %e %B").to_string(),
-                            };
-                            ui.add_space(3.0);
-                            ui.label(egui::RichText::new(label).size(12.0).strong().color(Color32::from_gray(200)));
-                        }
-                        ui.horizontal(|ui| {
-                            let (r, _) = ui.allocate_exact_size(egui::vec2(10.0, 16.0), Sense::hover());
-                            ui.painter().circle_filled(r.center(), 3.5, CAL_COLORS[ci % CAL_COLORS.len()]);
-                            let when = if e.all_day { "all day".to_string() } else { e.start.format("%H:%M").to_string() };
-                            ui.add_sized([46.0, 16.0], egui::Label::new(egui::RichText::new(when).size(12.5).color(Color32::from_gray(185))));
-                            let happening = !e.all_day && e.start <= now && now < e.end;
-                            let col = if happening { Color32::WHITE } else { Color32::from_gray(230) };
-                            let mut t = egui::RichText::new(&e.title).size(13.0).color(col);
-                            if happening {
-                                t = t.strong();
-                            }
-                            ui.add(egui::Label::new(t).truncate());
-                        });
-                    }
-                });
                 let failed = cals.iter().filter(|c| c.error.is_some()).count();
                 if failed > 0 {
                     let first = cals.iter().find_map(|c| c.error.clone()).unwrap_or_default();
-                    ui.label(egui::RichText::new(format!("⚠ {failed} calendar(s) not updated: {first}")).size(11.0).color(Color32::from_rgb(255, 190, 130)))
-                        .on_hover_text(first);
+                    child.label(egui::RichText::new(format!("⚠ {failed} calendar(s) not updated: {first}")).size(11.0).color(Color32::from_rgb(255, 190, 130))).on_hover_text(first);
                 } else if cals.iter().any(|c| c.loading && c.events.is_empty()) {
-                    ui.label(egui::RichText::new("Loading…").size(11.5).color(Color32::from_gray(170)));
+                    child.label(egui::RichText::new("Loading…").size(11.5).color(Color32::from_gray(170)));
                 }
-            })
-            .response;
-
-        let _ = resp;
+            }
+        }
+        if close_details || (details.is_some() && ui.input(|i| i.key_pressed(egui::Key::Escape))) {
+            ui.ctx().data_mut(|d| d.remove::<AgendaDetails>(did));
+            ui.ctx().request_repaint();
+        }
+        if let Some(d) = open {
+            ui.ctx().data_mut(|m| m.insert_temp(did, d));
+            ui.ctx().request_repaint();
+        }
+        // The three dots: month, week, agenda.
+        let gap = 14.0;
+        let y = full.max.y - 7.0;
+        for (i, name) in ["Month", "Week", "Agenda"].iter().enumerate() {
+            let c = Pos2::new(full.center().x + (i as f32 - 1.0) * gap, y);
+            let r = egui::Rect::from_center_size(c, egui::vec2(gap, 14.0));
+            let resp = ui.interact(r, ui.id().with(("agenda-dot", i)), Sense::click()).on_hover_text(*name);
+            if resp.clicked() {
+                data["view"] = json!(i);
+                out.changed = true;
+                ui.ctx().data_mut(|d| d.remove::<AgendaDetails>(did));
+                ui.ctx().request_repaint();
+            }
+            let alpha = if i == view { 235 } else if resp.hovered() { 160 } else { 90 };
+            ui.painter().circle_filled(c, if i == view { 3.5 } else { 3.0 }, Color32::from_white_alpha(alpha));
+        }
         out
     }
 
@@ -939,4 +918,299 @@ impl DeskWidget for Picture {
         }
         changed
     }
+}
+
+/// What the agenda's details view shows: a heading and the events (calendar index, event).
+type AgendaDetails = (String, Vec<(usize, crate::agenda::Occurrence)>);
+
+/// The events touching a day, all-day ones first, then by start time.
+fn agenda_day_events(cals: &[crate::agenda::CalView], day: chrono::NaiveDate) -> Vec<(usize, crate::agenda::Occurrence)> {
+    use chrono::NaiveTime;
+    let (d0, d1) = (day.and_time(NaiveTime::MIN), (day + chrono::Duration::days(1)).and_time(NaiveTime::MIN));
+    let mut v: Vec<(usize, crate::agenda::Occurrence)> = Vec::new();
+    for (ci, c) in cals.iter().enumerate() {
+        for e in c.events.iter() {
+            let touches = if e.all_day {
+                e.start < d1 && e.end > d0
+            } else {
+                (e.start >= d0 && e.start < d1) || (e.start < d0 && e.end > d0)
+            };
+            if touches {
+                v.push((ci, e.clone()));
+            }
+        }
+    }
+    v.sort_by(|a, b| b.1.all_day.cmp(&a.1.all_day).then(a.1.start.cmp(&b.1.start)).then(a.1.title.cmp(&b.1.title)));
+    v
+}
+
+fn agenda_day_title(day: chrono::NaiveDate) -> String {
+    let today = chrono::Local::now().date_naive();
+    match (day - today).num_days() {
+        0 => format!("Today, {}", day.format("%e %B").to_string().trim()),
+        1 => format!("Tomorrow, {}", day.format("%e %B").to_string().trim()),
+        _ => day.format("%A %e %B").to_string(),
+    }
+}
+
+/// A small "‹ title ›" header; returns -1 / 0 / +1 for the arrows (0 also for a click on the
+/// title, meaning "back to now", returned as Some(0)).
+fn agenda_nav(ui: &mut Ui, title: &str) -> Option<i32> {
+    let mut step = None;
+    ui.horizontal(|ui| {
+        if ui.add(egui::Button::new(egui::RichText::new("‹").size(18.0).color(Color32::WHITE)).frame(false)).clicked() {
+            step = Some(-1);
+        }
+        let w = (ui.available_width() - 24.0).max(40.0);
+        if ui.add_sized([w, 20.0], egui::Button::new(egui::RichText::new(title).size(14.0).color(Color32::WHITE)).frame(false)).on_hover_text("Back to today").clicked() {
+            step = Some(0);
+        }
+        if ui.add(egui::Button::new(egui::RichText::new("›").size(18.0).color(Color32::WHITE)).frame(false)).clicked() {
+            step = Some(1);
+        }
+    });
+    step
+}
+
+/// Month view: the days of a month; dots under days with events (one per calendar, at most
+/// three); a click on a day shows its events.
+fn agenda_month(ui: &mut Ui, cals: &[crate::agenda::CalView], open: &mut Option<AgendaDetails>) {
+    use chrono::{Datelike, NaiveDate};
+    let today = chrono::Local::now().date_naive();
+    let sid = ui.make_persistent_id("agenda-month");
+    let mut shift: i32 = ui.ctx().data(|d| d.get_temp(sid)).unwrap_or(0);
+    let months = today.year() * 12 + today.month0() as i32 + shift;
+    let (y, m) = (months.div_euclid(12), months.rem_euclid(12) as u32 + 1);
+    let Some(first) = NaiveDate::from_ymd_opt(y, m, 1) else { return };
+    match agenda_nav(ui, &first.format("%B %Y").to_string()) {
+        Some(0) => shift = 0,
+        Some(s) => shift += s,
+        None => {}
+    }
+    ui.ctx().data_mut(|d| d.insert_temp(sid, shift));
+    let cw = ui.available_width() / 7.0;
+    let ch = ((ui.available_height() - 40.0) / 6.0).clamp(18.0, 44.0);
+    let (head, _) = ui.allocate_exact_size(egui::vec2(cw * 7.0, 16.0), Sense::hover());
+    for (i, n) in ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"].iter().enumerate() {
+        ui.painter().text(Pos2::new(head.min.x + cw * (i as f32 + 0.5), head.center().y), egui::Align2::CENTER_CENTER, *n, egui::FontId::proportional(11.0), Color32::from_gray(200));
+    }
+    let lead = first.weekday().num_days_from_monday() as i64;
+    let (grid, _) = ui.allocate_exact_size(egui::vec2(cw * 7.0, ch * 6.0), Sense::hover());
+    for cell in 0..42i64 {
+        let day = first + chrono::Duration::days(cell - lead);
+        if day.month() != m {
+            continue;
+        }
+        let r = egui::Rect::from_min_size(Pos2::new(grid.min.x + cw * (cell % 7) as f32, grid.min.y + ch * (cell / 7) as f32), egui::vec2(cw, ch));
+        let evs = agenda_day_events(cals, day);
+        let resp = ui.interact(r, ui.id().with(("agenda-day", day)), Sense::click());
+        if resp.hovered() && !evs.is_empty() {
+            ui.painter().rect_filled(r.shrink(1.0), 4.0, Color32::from_white_alpha(22));
+        }
+        let num_c = Pos2::new(r.center().x, r.min.y + (ch * 0.42).min(14.0));
+        if day == today {
+            ui.painter().circle_filled(num_c, 9.5, Color32::from_rgb(70, 140, 230));
+        }
+        ui.painter().text(num_c, egui::Align2::CENTER_CENTER, day.day().to_string(), egui::FontId::proportional(12.5), Color32::from_gray(if day == today { 255 } else { 230 }));
+        // One dot per calendar with events that day (at most three).
+        let mut seen: Vec<usize> = Vec::new();
+        for (ci, _) in &evs {
+            if !seen.contains(ci) && seen.len() < 3 {
+                seen.push(*ci);
+            }
+        }
+        let dy = (num_c.y + 11.0).min(r.max.y - 3.0);
+        for (k, ci) in seen.iter().enumerate() {
+            let x = r.center().x + (k as f32 - (seen.len() as f32 - 1.0) / 2.0) * 6.0;
+            ui.painter().circle_filled(Pos2::new(x, dy), 2.2, CAL_COLORS[ci % CAL_COLORS.len()]);
+        }
+        if resp.clicked() && !evs.is_empty() {
+            *open = Some((agenda_day_title(day), evs));
+        }
+    }
+}
+
+/// Week view: seven columns, each day's events as small coloured chips; a click on a chip shows
+/// that event, a click on a day's name shows the whole day.
+fn agenda_week(ui: &mut Ui, cals: &[crate::agenda::CalView], open: &mut Option<AgendaDetails>) {
+    use chrono::Datelike;
+    let today = chrono::Local::now().date_naive();
+    let sid = ui.make_persistent_id("agenda-week");
+    let mut shift: i64 = ui.ctx().data(|d| d.get_temp(sid)).unwrap_or(0);
+    let monday = today - chrono::Duration::days(today.weekday().num_days_from_monday() as i64) + chrono::Duration::weeks(shift);
+    let sunday = monday + chrono::Duration::days(6);
+    let title = if monday.month() == sunday.month() {
+        format!("{} – {}", monday.format("%e"), sunday.format("%e %B")).trim().to_string()
+    } else {
+        format!("{} – {}", monday.format("%e %b"), sunday.format("%e %b")).trim().to_string()
+    };
+    match agenda_nav(ui, &title) {
+        Some(0) => shift = 0,
+        Some(s) => shift += s as i64,
+        None => {}
+    }
+    ui.ctx().data_mut(|d| d.insert_temp(sid, shift));
+    let cw = ui.available_width() / 7.0;
+    let top = ui.cursor().min.y;
+    let height = (ui.available_height() - 4.0).max(40.0);
+    let (area, _) = ui.allocate_exact_size(egui::vec2(cw * 7.0, height), Sense::hover());
+    let chip_h = 17.0;
+    for i in 0..7 {
+        let day = monday + chrono::Duration::days(i);
+        let col = egui::Rect::from_min_size(Pos2::new(area.min.x + cw * i as f32, top), egui::vec2(cw, height));
+        if i > 0 {
+            ui.painter().line_segment([col.left_top(), col.left_bottom()], egui::Stroke::new(1.0_f32, Color32::from_white_alpha(18)));
+        }
+        let evs = agenda_day_events(cals, day);
+        // Day name and number (today highlighted); click = the whole day.
+        let head = egui::Rect::from_min_size(col.min, egui::vec2(cw, 30.0));
+        let hresp = ui.interact(head, ui.id().with(("agenda-wday", day)), Sense::click());
+        if day == today {
+            ui.painter().rect_filled(head.shrink(2.0), 4.0, Color32::from_rgb(70, 140, 230).linear_multiply(0.6));
+        } else if hresp.hovered() && !evs.is_empty() {
+            ui.painter().rect_filled(head.shrink(2.0), 4.0, Color32::from_white_alpha(22));
+        }
+        ui.painter().text(Pos2::new(head.center().x, head.min.y + 8.0), egui::Align2::CENTER_CENTER, day.format("%a").to_string(), egui::FontId::proportional(10.5), Color32::from_gray(205));
+        ui.painter().text(Pos2::new(head.center().x, head.min.y + 21.0), egui::Align2::CENTER_CENTER, day.day().to_string(), egui::FontId::proportional(13.0), Color32::WHITE);
+        if hresp.clicked() && !evs.is_empty() {
+            *open = Some((agenda_day_title(day), evs.clone()));
+        }
+        // The events, as many as fit; then "+n".
+        let fit = (((height - 34.0) / (chip_h + 2.0)).floor() as usize).max(1);
+        let shown = if evs.len() > fit { fit.saturating_sub(1) } else { evs.len() };
+        for (k, (ci, e)) in evs.iter().take(shown).enumerate() {
+            let r = egui::Rect::from_min_size(Pos2::new(col.min.x + 2.0, col.min.y + 34.0 + k as f32 * (chip_h + 2.0)), egui::vec2(cw - 4.0, chip_h));
+            let color = CAL_COLORS[ci % CAL_COLORS.len()];
+            let resp = ui.interact(r, ui.id().with(("agenda-chip", day, k)), Sense::click());
+            ui.painter().rect_filled(r, 3.0, color.linear_multiply(if resp.hovered() { 0.75 } else { 0.5 }));
+            let text = if e.all_day || e.start.date() != day { e.title.clone() } else { format!("{} {}", e.start.format("%H:%M"), e.title) };
+            let g = ui.painter().layout_no_wrap(text, egui::FontId::proportional(11.0), Color32::WHITE);
+            ui.painter().with_clip_rect(r.shrink(2.0)).galley(Pos2::new(r.min.x + 3.0, r.center().y - g.size().y / 2.0), g, Color32::WHITE);
+            if resp.clicked() {
+                *open = Some((agenda_day_title(day), vec![(*ci, e.clone())]));
+            }
+            resp.on_hover_text(&e.title);
+        }
+        if evs.len() > shown {
+            let r = egui::Rect::from_min_size(Pos2::new(col.min.x + 2.0, col.min.y + 34.0 + shown as f32 * (chip_h + 2.0)), egui::vec2(cw - 4.0, chip_h));
+            let resp = ui.interact(r, ui.id().with(("agenda-more", day)), Sense::click());
+            ui.painter().text(r.center(), egui::Align2::CENTER_CENTER, format!("+{}", evs.len() - shown), egui::FontId::proportional(11.5), Color32::from_gray(if resp.hovered() { 255 } else { 200 }));
+            if resp.clicked() {
+                *open = Some((agenda_day_title(day), evs.clone()));
+            }
+        }
+    }
+}
+
+/// Agenda view: the coming days as a list, each day under its heading; a click on an event shows it.
+fn agenda_list(ui: &mut Ui, cals: &[crate::agenda::CalView], days: i64, open: &mut Option<AgendaDetails>) {
+    use chrono::{Duration as CDuration, NaiveTime};
+    let today = chrono::Local::now().date_naive();
+    let now = chrono::Local::now().naive_local();
+    let end = (today + CDuration::days(days)).and_time(NaiveTime::MIN);
+    let mut rows: Vec<(chrono::NaiveDate, usize, &crate::agenda::Occurrence)> = Vec::new();
+    for (ci, c) in cals.iter().enumerate() {
+        for e in c.events.iter() {
+            let over = e.end <= now && !(e.end == e.start && e.start >= now);
+            if over || e.start >= end {
+                continue;
+            }
+            if e.all_day {
+                // A trip over several days is listed on each day it covers.
+                let mut day = e.start.date().max(today);
+                while day < e.end.date() && day.and_time(NaiveTime::MIN) < end {
+                    rows.push((day, ci, e));
+                    day += CDuration::days(1);
+                }
+            } else {
+                rows.push((e.start.date().max(today), ci, e));
+            }
+        }
+    }
+    rows.sort_by(|a, b| a.0.cmp(&b.0).then(b.2.all_day.cmp(&a.2.all_day)).then(a.2.start.cmp(&b.2.start)));
+    let status_h = if cals.iter().any(|c| c.error.is_some() || (c.loading && c.events.is_empty())) { 20.0 } else { 0.0 };
+    egui::ScrollArea::vertical().max_height((ui.available_height() - status_h).max(30.0)).auto_shrink([false, true]).show(ui, |ui| {
+        if rows.is_empty() && cals.iter().all(|c| !c.loading) {
+            ui.label(egui::RichText::new(format!("Nothing in the next {days} days.")).size(13.0).color(Color32::from_gray(190)));
+        }
+        let mut last_day = None;
+        for (k, (day, ci, e)) in rows.iter().enumerate() {
+            if last_day != Some(*day) {
+                last_day = Some(*day);
+                let label = match (*day - today).num_days() {
+                    0 => "Today".to_string(),
+                    1 => "Tomorrow".to_string(),
+                    _ => day.format("%A %e %B").to_string(),
+                };
+                ui.add_space(3.0);
+                ui.label(egui::RichText::new(label).size(12.0).strong().color(Color32::from_gray(200)));
+            }
+            let (r, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 19.0), Sense::click());
+            let resp = ui.interact(r, ui.id().with(("agenda-row", k)), Sense::click()).union(resp);
+            if resp.hovered() {
+                ui.painter().rect_filled(r, 3.0, Color32::from_white_alpha(22));
+            }
+            ui.painter().circle_filled(Pos2::new(r.min.x + 5.0, r.center().y), 3.5, CAL_COLORS[ci % CAL_COLORS.len()]);
+            let when = if e.all_day { "all day".to_string() } else { e.start.format("%H:%M").to_string() };
+            ui.painter().text(Pos2::new(r.min.x + 14.0, r.center().y), egui::Align2::LEFT_CENTER, when, egui::FontId::proportional(12.5), Color32::from_gray(185));
+            let happening = !e.all_day && e.start <= now && now < e.end;
+            let g = ui.painter().layout_no_wrap(e.title.clone(), egui::FontId::proportional(13.0), if happening { Color32::WHITE } else { Color32::from_gray(230) });
+            let text_r = egui::Rect::from_min_max(Pos2::new(r.min.x + 62.0, r.min.y), r.max);
+            ui.painter().with_clip_rect(text_r).galley(Pos2::new(text_r.min.x, r.center().y - g.size().y / 2.0), g, Color32::WHITE);
+            if resp.clicked() {
+                *open = Some((agenda_day_title(*day), vec![(*ci, (*e).clone())]));
+            }
+        }
+    });
+}
+
+/// The details of one or more events. Returns true when "‹ Back" was clicked.
+fn agenda_details(ui: &mut Ui, (heading, evs): &AgendaDetails, names: &[String]) -> bool {
+    let mut back = false;
+    ui.horizontal(|ui| {
+        if ui.add(egui::Button::new(egui::RichText::new("‹ Back").size(13.0).color(Color32::from_gray(220))).frame(false)).clicked() {
+            back = true;
+        }
+        ui.label(egui::RichText::new(heading).size(13.0).strong().color(Color32::WHITE));
+    });
+    ui.add_space(2.0);
+    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+        for (i, (ci, e)) in evs.iter().enumerate() {
+            if i > 0 {
+                ui.add_space(4.0);
+                ui.separator();
+            }
+            ui.horizontal(|ui| {
+                let (r, _) = ui.allocate_exact_size(egui::vec2(10.0, 18.0), Sense::hover());
+                ui.painter().circle_filled(r.center(), 4.0, CAL_COLORS[ci % CAL_COLORS.len()]);
+                ui.add(egui::Label::new(egui::RichText::new(&e.title).size(14.5).strong().color(Color32::WHITE)).wrap());
+            });
+            let when = if e.all_day {
+                let last = e.end.date() - chrono::Duration::days(1);
+                if last > e.start.date() {
+                    format!("All day, {} to {}", e.start.format("%a %e %b"), last.format("%a %e %b"))
+                } else {
+                    format!("All day, {}", e.start.format("%A %e %B"))
+                }
+            } else if e.end.date() != e.start.date() {
+                format!("{} to {}", e.start.format("%a %e %b, %H:%M"), e.end.format("%a %e %b, %H:%M"))
+            } else if e.end > e.start {
+                format!("{}, {} – {}", e.start.format("%a %e %b"), e.start.format("%H:%M"), e.end.format("%H:%M"))
+            } else {
+                e.start.format("%a %e %b, %H:%M").to_string()
+            };
+            ui.label(egui::RichText::new(when).size(12.5).color(Color32::from_gray(215)));
+            if let Some(n) = names.get(*ci) {
+                ui.label(egui::RichText::new(n).size(11.5).color(Color32::from_gray(165)));
+            }
+            if !e.location.is_empty() {
+                ui.add(egui::Label::new(egui::RichText::new(format!("Where: {}", e.location)).size(12.5).color(Color32::from_gray(225))).wrap());
+            }
+            if !e.description.is_empty() {
+                ui.add_space(2.0);
+                ui.add(egui::Label::new(egui::RichText::new(&*e.description).size(12.5).color(Color32::from_gray(205))).wrap());
+            }
+        }
+    });
+    back
 }

@@ -26,6 +26,9 @@ pub struct Occurrence {
     pub end: NaiveDateTime,
     pub all_day: bool,
     pub title: String,
+    /// Where and what (shared by every repeat of the same event).
+    pub location: std::sync::Arc<str>,
+    pub description: std::sync::Arc<str>,
 }
 
 #[derive(Default)]
@@ -60,8 +63,10 @@ pub fn take_refresh() -> bool {
 
 const REFRESH: Duration = Duration::from_secs(30 * 60);
 const RETRY: Duration = Duration::from_secs(5 * 60);
-/// How far ahead events are read (the widget shows up to 14 days).
-const AHEAD_DAYS: i64 = 60;
+/// Which events are read: from about six weeks back (the month view can show last month) to a
+/// year ahead.
+const BACK_DAYS: i64 = 45;
+const AHEAD_DAYS: i64 = 366;
 
 /// What the widget shows for one link.
 pub struct CalView {
@@ -105,7 +110,7 @@ fn start_download(url: String) {
                     return Err("that link isn't an iCal calendar (.ics)".to_string());
                 }
                 let today = chrono::Local::now().date_naive();
-                Ok(parse(&text, today, today + CDuration::days(AHEAD_DAYS)))
+                Ok(parse(&text, today - CDuration::days(BACK_DAYS), today + CDuration::days(AHEAD_DAYS)))
             })
         })
         .unwrap_or_else(|_| Err("that calendar has something DesktopShepherd can't read".to_string()));
@@ -279,12 +284,17 @@ fn parse_line(line: &str) -> Option<Prop> {
 }
 
 fn unescape(s: &str) -> String {
+    unescape_text(s, false)
+}
+
+/// iCal text -> plain text; `lines` keeps line breaks (descriptions), else they become spaces.
+fn unescape_text(s: &str, lines: bool) -> String {
     let mut out = String::with_capacity(s.len());
     let mut it = s.chars();
     while let Some(c) = it.next() {
         if c == '\\' {
             match it.next() {
-                Some('n') | Some('N') => out.push(' '),
+                Some('n') | Some('N') => out.push(if lines { '\n' } else { ' ' }),
                 Some(o) => out.push(o),
                 None => {}
             }
@@ -700,6 +710,8 @@ pub fn parse(text: &str, from: NaiveDate, to: NaiveDate) -> (Option<String>, Vec
             },
         };
         let title = get("SUMMARY").map(|p| unescape(&p.value)).filter(|s| !s.trim().is_empty()).unwrap_or_else(|| "(no title)".into());
+        let location: std::sync::Arc<str> = get("LOCATION").map(|p| unescape(&p.value)).unwrap_or_default().trim().into();
+        let description: std::sync::Arc<str> = get("DESCRIPTION").map(|p| unescape_text(&p.value, true)).unwrap_or_default().trim().into();
         let uid = get("UID").map(|p| p.value.clone()).unwrap_or_default();
         let starts = match (get("RRULE").and_then(|p| parse_rule(&p.value)), get("RECURRENCE-ID")) {
             (Some(rule), None) => {
@@ -723,7 +735,7 @@ pub fn parse(text: &str, from: NaiveDate, to: NaiveDate) -> (Option<String>, Vec
             let Some(end) = s.checked_add_signed(length) else { continue };
             // Touches the window (an event of zero length counts at its start).
             if s < to_t && (end > from_t || (end == s && s >= from_t)) {
-                out.push(Occurrence { start: s, end, all_day, title: title.clone() });
+                out.push(Occurrence { start: s, end, all_day, title: title.clone(), location: location.clone(), description: description.clone() });
             }
         }
     }
@@ -800,6 +812,14 @@ mod tests {
         let summer = ev.iter().find(|e| e.title == "Summer call").unwrap();
         assert_eq!(summer.start, local(2026, 7, 15, 13)); // 09:00 New York (summer) = 13:00 UTC
         assert_eq!(parse_offset("+0530"), Some(19800));
+    }
+
+    #[test]
+    fn place_and_description() {
+        let cal = "BEGIN:VCALENDAR\nBEGIN:VEVENT\nDTSTART:20261124T090000\nSUMMARY:Dentist\nLOCATION:Calle Mayor 5\\, Madrid\nDESCRIPTION:Bring the card.\\nAsk about the bill.\nEND:VEVENT\nEND:VCALENDAR\n";
+        let (_, ev) = parse(cal, d(2026, 11, 1), d(2026, 11, 30));
+        assert_eq!(&*ev[0].location, "Calle Mayor 5, Madrid");
+        assert_eq!(&*ev[0].description, "Bring the card.\nAsk about the bill.");
     }
 
     #[test]

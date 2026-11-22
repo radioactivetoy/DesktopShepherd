@@ -67,7 +67,8 @@ an original Rust program; its behaviour was modelled on an existing desktop orga
 - Widgets: clock, sticky note, drawing pad, picture frame (PNG/JPEG, fit or fill), system monitor
   (CPU, RAM, drives), calendar, to-do
   list, search box, agenda (online calendars: iCal / .ics links from Google, Outlook…; repeating
-  events supported). Widget options: box menu > "Widget settings…". Each redraws only when needed (clock: each minute, monitor: every 2 s,
+  events supported). Three views (month, week, agenda list) switched with the dots at the
+  bottom; a click on an event or a day shows its details (time, calendar, place, description). Widget options: box menu > "Widget settings…". Each redraws only when needed (clock: each minute, monitor: every 2 s,
   calendar: at midnight, the others only on input).
 - Multi-monitor: boxes follow a monitor **role** (main/second…) or stay on a **fixed** monitor.
 - Tray icon, Windows 11 style menus and settings page, start with Windows, low CPU priority,
