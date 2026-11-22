@@ -170,6 +170,7 @@ a second) or a wake-up posted by another thread.
 | `snap.rs` | box snapping arithmetic (pure, 7 unit tests: `cargo test snap`) |
 | `search.rs` | quick-search ranking (pure, 4 unit tests): name starts with text, then a word starts with it, then contains it (or file type), then letters in order; 12 results |
 | `model.rs` | saved data types: `Layout`, `Fence`, `Tab`, `Settings`, `CategoryRule`, widgets config. Look fields on `Fence` (all with defaults; `sanitize()` repairs odd values): `border_width`, `text_color`, `text_shadow`, `font`, `title_size`, `caption_size`, `show_captions`, `icon_spacing`; `Fence::copy_look_from` backs "Apply this look to all boxes" (`Act::ApplyLookToAll`) |
+| `agenda.rs` | the agenda widget's data: WinHTTP download of iCal links (the only network use, background thread, every 30 min while shown), iCal reading incl. repeating events (4 unit tests) |
 | `storage.rs` | load/save/backups/log; `data_dir()` moves the old `%APPDATA%DeskBoxes` folder to `%APPDATA%DesktopShepherd` once |
 | `widgets.rs` | widget registry (clock, note, drawing pad, system monitor, calendar, to-do list; the search box is drawn by `search_widget` in `app.rs`) – add new widgets here. The system monitor shares one reading for all monitors (CPU/RAM every 2 s, drives every 60 s) and reads only while shown |
 

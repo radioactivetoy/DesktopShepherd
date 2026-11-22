@@ -112,6 +112,15 @@ egui font atlases, and the icon textures.
   desktop, "s" jumped to the next s-item and "s" again to the one after; a text box in another
   window received "abc1" normally; typing "xyz" right after switching from the desktop to another
   window arrived intact 3 times out of 3.
+- New (2026-11-22): agenda widget (`src/agenda.rs`, 4 unit tests). The owner approved this one
+  network use. Downloads with WinHTTP on a short-lived thread every 30 min (5 after a failure),
+  only while shown; reads single, all-day and repeating events (daily/weekly/monthly incl. "last
+  Friday"/yearly, COUNT/UNTIL, EXDATE, moved instances, cancelled). Named time zones (TZID) are
+  taken as local time (wrong for calendars in another zone). Checked live with Google's public US
+  holidays calendar (Thanksgiving and Black Friday shown); CPU with it shown 0.016 %.
+- New (2026-11-22): Personalize is its own window (two columns, font from a list); widget options
+  (agenda links, clock 24-hour, calendar week start) are its "Widget settings" tab, opened from the
+  box menu ("Widget settings…").
 - New (2026-11-22): renamed DeskBoxes -> **DesktopShepherd** (exe `desktopshepherd.exe`, window
   classes, mutex `Local\DesktopShepherd.SingleInstance`, quit event `Local\DesktopShepherd.Quit`,
   Run value, env vars `DESKTOPSHEPHERD_*`). The data folder `%APPDATA%\DeskBoxes` is moved to
@@ -131,7 +140,7 @@ egui font atlases, and the icon textures.
 - New (2026-11-22): review 2 R1-R3 (Windows menu in a helper process, Properties etc. now work),
   keyboard in boxes incl. copy/cut/paste, rename (F2), folder boxes, rules by name/age, hide/show
   all, per-monitor-setup positions. **Per-setup positions are untested** (needs a laptop).
-- Tests: all 13 unit tests pass (`cargo test`). Worker memory after start ~87 MB.
+- Tests: all 17 unit tests pass (`cargo test`). Worker memory after start ~87 MB.
 - Synthetic drags (SetCursorPos + mouse_event) don't start a drag on a *rolled-up* box's title
   (same before and after phase C); untested by hand.
 - Still untested: mixed display scaling and real input-method (IME) use.

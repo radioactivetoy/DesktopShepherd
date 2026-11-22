@@ -1,6 +1,7 @@
 #![windows_subsystem = "windows"]
 //! DesktopShepherd — a lightweight desktop icon organizer (boxes on the desktop) with widgets.
 
+mod agenda;
 mod app;
 mod comp_trial;
 #[cfg(windows)]

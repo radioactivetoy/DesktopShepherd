@@ -48,6 +48,8 @@ enum Act {
     ApplyLookToAll(u64),
     /// Open the Personalize window for this box.
     Personalize(u64),
+    /// Open the settings window of this widget box on its "Widget settings" tab.
+    WidgetSettings(u64),
     /// Pick a folder (Windows' folder picker, on its own thread) and make a folder box for it.
     NewFolderBox,
     /// Right-click on an item: Windows' own menu (and the other selected items with it), with
@@ -160,6 +162,8 @@ pub struct DeskApp {
     /// The box whose Personalize window is open, and whether to bring that window forward.
     personalize: Option<u64>,
     focus_personalize: bool,
+    /// Which tab of that window: 0 = look, 1 = widget settings.
+    personalize_tab: u8,
     /// Shared data changed (files, icons, layout, selection): every box draws on the next pass.
     /// Otherwise a DirectX box draws only for its own reasons (see `HostSystem::frame`).
     redraw_all: bool,
@@ -362,6 +366,7 @@ impl DeskApp {
             focus_settings: false,
             personalize: None,
             focus_personalize: false,
+            personalize_tab: 0,
             redraw_all: true,
             icon_sizes: Vec::new(),
             font_names: Vec::new(),
@@ -654,6 +659,12 @@ impl DeskApp {
                 }
                 Act::Personalize(id) => {
                     self.personalize = Some(id);
+                    self.personalize_tab = 0;
+                    self.focus_personalize = true;
+                }
+                Act::WidgetSettings(id) => {
+                    self.personalize = Some(id);
+                    self.personalize_tab = 1;
                     self.focus_personalize = true;
                 }
                 Act::ApplyLookToAll(id) => {
@@ -2096,6 +2107,11 @@ fn fence_menu(ui: &mut egui::Ui, fence: &mut Fence, st: &mut UiState, page: &mut
             }
             if row(ui, icon::COLOR, "Personalize…", None, true).clicked() {
                 actions.push(Act::Personalize(fence.id));
+                close = true;
+            }
+            let has_settings = fence.widget.as_ref().and_then(|w| widgets::find(&w.kind)).map(|k| (k.make)().has_settings()).unwrap_or(false);
+            if has_settings && row(ui, icon::SETTINGS, "Widget settings…", None, true).clicked() {
+                actions.push(Act::WidgetSettings(fence.id));
                 close = true;
             }
             sep(ui);
@@ -3831,15 +3847,24 @@ impl DeskApp {
             let mut dirty = false;
             let fences = &mut self.layout.fences;
             let actions = &mut self.actions;
+            let mut tab = self.personalize_tab;
             hosts.panel(PERSONALIZE_PANEL, crate::host::PanelKind::Settings, "Personalize", rect_px, false, force, |pctx| {
                 if pctx.input(|i| i.viewport().close_requested() || i.key_pressed(egui::Key::Escape)) {
                     close = true;
                 }
                 let Some(fence) = fences.iter_mut().find(|f| f.id == id) else { return };
+                let widget_kind = fence.widget.as_ref().and_then(|w| widgets::find(&w.kind));
                 egui::TopBottomPanel::top("look-top").frame(egui::Frame::new().fill(Color32::from_rgb(24, 25, 28)).inner_margin(10.0)).show(pctx, |ui| {
                     ui.horizontal(|ui| {
                         ui.label(egui::RichText::new("Personalize").size(20.0).strong().color(Color32::WHITE));
                         ui.label(egui::RichText::new(format!("  {}", fence.name)).size(15.0).color(Color32::from_gray(170)));
+                        if widget_kind.map(|k| (k.make)().has_settings()).unwrap_or(false) {
+                            ui.add_space(24.0);
+                            ui.selectable_value(&mut tab, 0, egui::RichText::new("Look").size(14.0));
+                            ui.selectable_value(&mut tab, 1, egui::RichText::new("Widget settings").size(14.0));
+                        } else {
+                            tab = 0;
+                        }
                         ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
                             if ui.button("Done").clicked() {
                                 close = true;
@@ -3849,13 +3874,22 @@ impl DeskApp {
                 });
                 egui::CentralPanel::default().frame(egui::Frame::new().fill(Color32::from_rgb(32, 33, 36)).inner_margin(10.0)).show(pctx, |ui| {
                     ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-                        ui.columns(2, |cols| {
-                            dirty |= look_left(&mut cols[0], fence);
-                            dirty |= look_right(&mut cols[1], fence, actions);
-                        });
+                        match (tab, widget_kind, fence.widget.as_mut()) {
+                            (1, Some(kind), Some(wc)) => {
+                                ui.spacing_mut().item_spacing.y = 8.0;
+                                dirty |= (kind.make)().settings(ui, &mut wc.data);
+                            }
+                            _ => {
+                                ui.columns(2, |cols| {
+                                    dirty |= look_left(&mut cols[0], fence);
+                                    dirty |= look_right(&mut cols[1], fence, actions);
+                                });
+                            }
+                        }
                     });
                 });
             });
+            self.personalize_tab = tab;
             if std::mem::take(&mut self.focus_personalize) {
                 hosts.apply(PERSONALIZE_PANEL, &ViewportCommand::Focus);
             }

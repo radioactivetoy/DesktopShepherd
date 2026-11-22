@@ -19,6 +19,14 @@ pub struct WidgetOutput {
 
 pub trait DeskWidget {
     fn ui(&self, ui: &mut Ui, data: &mut Value) -> WidgetOutput;
+    /// Whether the widget has options for the settings window (Personalize > Widget settings).
+    fn has_settings(&self) -> bool {
+        false
+    }
+    /// The widget's options, drawn in the settings window. Returns true if `data` changed.
+    fn settings(&self, _ui: &mut Ui, _data: &mut Value) -> bool {
+        false
+    }
 }
 
 pub struct WidgetKind {
@@ -37,6 +45,7 @@ pub const REGISTRY: &[WidgetKind] = &[
     WidgetKind { id: "sysmon", label: "System monitor", icon: '\u{E9D9}', default_size: [310.0, 270.0], make: || Box::new(SysMon) },
     WidgetKind { id: "calendar", label: "Calendar", icon: '\u{E787}', default_size: [290.0, 270.0], make: || Box::new(Calendar) },
     WidgetKind { id: "todo", label: "To-do list", icon: '\u{E73A}', default_size: [290.0, 280.0], make: || Box::new(Todo) },
+    WidgetKind { id: "agenda", label: "Agenda (online calendars)", icon: '\u{E8BF}', default_size: [320.0, 300.0], make: || Box::new(Agenda) },
     // Drawn by the box itself (it needs the desktop's icons): see `search_widget` in app.rs.
     WidgetKind { id: "search", label: "Search box", icon: '\u{E721}', default_size: [380.0, 280.0], make: || Box::new(Nothing) },
 ];
@@ -73,6 +82,19 @@ impl DeskWidget for Clock {
         // Wake up exactly when the minute changes; nothing in between.
         let secs_left = 60 - (now.timestamp() % 60) as u64;
         WidgetOutput { changed, repaint_after: Some(Duration::from_millis(secs_left * 1000 + 50)) }
+    }
+
+    fn has_settings(&self) -> bool {
+        true
+    }
+
+    fn settings(&self, ui: &mut Ui, data: &mut Value) -> bool {
+        let mut h24 = data_bool(data, "h24", true);
+        if ui.checkbox(&mut h24, "24-hour clock").changed() {
+            data["h24"] = json!(h24);
+            return true;
+        }
+        false
     }
 }
 
@@ -442,6 +464,19 @@ impl DeskWidget for Calendar {
         out.repaint_after = Some((next - now).to_std().unwrap_or(Duration::from_secs(3600)));
         out
     }
+
+    fn has_settings(&self) -> bool {
+        true
+    }
+
+    fn settings(&self, ui: &mut Ui, data: &mut Value) -> bool {
+        let mut sunday = data_bool(data, "sunday", false);
+        if ui.checkbox(&mut sunday, "Week starts on Sunday").changed() {
+            data["sunday"] = json!(sunday);
+            return true;
+        }
+        false
+    }
 }
 
 // ---- To-do list ---------------------------------------------------------------------------
@@ -516,4 +551,207 @@ impl DeskWidget for Todo {
         }
         out
     }
+}
+
+// ---- Agenda (online calendars) --------------------------------------------------------------
+
+/// A colour per calendar link (dots in the list).
+const CAL_COLORS: [Color32; 6] = [
+    Color32::from_rgb(90, 170, 255),
+    Color32::from_rgb(110, 220, 120),
+    Color32::from_rgb(255, 170, 80),
+    Color32::from_rgb(240, 110, 170),
+    Color32::from_rgb(180, 140, 255),
+    Color32::from_rgb(255, 220, 90),
+];
+
+struct Agenda;
+
+fn agenda_urls(data: &Value) -> Vec<String> {
+    data.get("urls").and_then(|v| v.as_array()).map(|a| a.iter().filter_map(|u| u.as_str().map(str::to_string)).collect()).unwrap_or_default()
+}
+
+impl DeskWidget for Agenda {
+    fn ui(&self, ui: &mut Ui, data: &mut Value) -> WidgetOutput {
+        use chrono::{Duration as CDuration, NaiveTime};
+        let mut out = WidgetOutput { changed: false, repaint_after: Some(Duration::from_secs(60)) };
+        let urls = agenda_urls(data);
+        let days = data.get("days").and_then(|v| v.as_u64()).unwrap_or(7).clamp(1, 14) as i64;
+        let force = crate::agenda::take_refresh();
+        let cals = crate::agenda::view(&urls, force);
+        let today = chrono::Local::now().date_naive();
+        let now = chrono::Local::now().naive_local();
+        let end = (today + CDuration::days(days)).and_time(NaiveTime::MIN);
+
+        if force || cals.iter().any(|c| c.loading) {
+            // Look again soon for the download's result (it also wakes the app when done).
+            out.repaint_after = Some(Duration::from_secs(2));
+        }
+        let resp = ui
+            .vertical(|ui| {
+                if urls.is_empty() {
+                    ui.add_space(6.0);
+                    ui.label(egui::RichText::new("Right-click here and choose \"Widget settings…\" to add a calendar link (iCal / .ics).").size(13.0).color(Color32::from_gray(220)));
+                    ui.add_space(4.0);
+                    ui.label(
+                        egui::RichText::new("Google Calendar: Settings > your calendar > \"Secret address in iCal format\". Outlook: Settings > Calendar > Shared calendars > Publish.")
+                            .size(11.5)
+                            .color(Color32::from_gray(170)),
+                    );
+                    return;
+                }
+                // Every event of the next days, each day under its own heading.
+                let mut rows: Vec<(chrono::NaiveDate, usize, &crate::agenda::Occurrence)> = Vec::new();
+                for (ci, c) in cals.iter().enumerate() {
+                    for e in &c.events {
+                        if e.end <= now && !(e.all_day && e.end.date() > today) {
+                            if !(e.end == e.start && e.start.date() == today && e.start >= now) {
+                                continue; // already over
+                            }
+                        }
+                        if e.start >= end {
+                            continue;
+                        }
+                        if e.all_day {
+                            // A trip over several days is listed on each day it covers.
+                            let mut day = e.start.date().max(today);
+                            while day < e.end.date() && day.and_time(NaiveTime::MIN) < end {
+                                rows.push((day, ci, e));
+                                day += CDuration::days(1);
+                            }
+                        } else {
+                            rows.push((e.start.date().max(today), ci, e));
+                        }
+                    }
+                }
+                rows.sort_by(|a, b| a.0.cmp(&b.0).then(b.2.all_day.cmp(&a.2.all_day)).then(a.2.start.cmp(&b.2.start)));
+                let status_h = if cals.iter().any(|c| c.error.is_some() || (c.loading && c.events.is_empty())) { 20.0 } else { 0.0 };
+                egui::ScrollArea::vertical().max_height((ui.available_height() - status_h).max(30.0)).auto_shrink([false, true]).show(ui, |ui| {
+                    if rows.is_empty() && cals.iter().all(|c| !c.loading) {
+                        ui.label(egui::RichText::new(format!("Nothing in the next {days} days.")).size(13.0).color(Color32::from_gray(190)));
+                    }
+                    let mut last_day = None;
+                    for (day, ci, e) in &rows {
+                        if last_day != Some(*day) {
+                            last_day = Some(*day);
+                            let label = match (*day - today).num_days() {
+                                0 => "Today".to_string(),
+                                1 => "Tomorrow".to_string(),
+                                _ => day.format("%A %e %B").to_string(),
+                            };
+                            ui.add_space(3.0);
+                            ui.label(egui::RichText::new(label).size(12.0).strong().color(Color32::from_gray(200)));
+                        }
+                        ui.horizontal(|ui| {
+                            let (r, _) = ui.allocate_exact_size(egui::vec2(10.0, 16.0), Sense::hover());
+                            ui.painter().circle_filled(r.center(), 3.5, CAL_COLORS[ci % CAL_COLORS.len()]);
+                            let when = if e.all_day { "all day".to_string() } else { e.start.format("%H:%M").to_string() };
+                            ui.add_sized([46.0, 16.0], egui::Label::new(egui::RichText::new(when).size(12.5).color(Color32::from_gray(185))));
+                            let happening = !e.all_day && e.start <= now && now < e.end;
+                            let col = if happening { Color32::WHITE } else { Color32::from_gray(230) };
+                            let mut t = egui::RichText::new(&e.title).size(13.0).color(col);
+                            if happening {
+                                t = t.strong();
+                            }
+                            ui.add(egui::Label::new(t).truncate());
+                        });
+                    }
+                });
+                let failed = cals.iter().filter(|c| c.error.is_some()).count();
+                if failed > 0 {
+                    let first = cals.iter().find_map(|c| c.error.clone()).unwrap_or_default();
+                    ui.label(egui::RichText::new(format!("⚠ {failed} calendar(s) not updated: {first}")).size(11.0).color(Color32::from_rgb(255, 190, 130)))
+                        .on_hover_text(first);
+                } else if cals.iter().any(|c| c.loading && c.events.is_empty()) {
+                    ui.label(egui::RichText::new("Loading…").size(11.5).color(Color32::from_gray(170)));
+                }
+            })
+            .response;
+
+        let _ = resp;
+        out
+    }
+
+    fn has_settings(&self) -> bool {
+        true
+    }
+
+    fn settings(&self, ui: &mut Ui, data: &mut Value) -> bool {
+        let urls = agenda_urls(data);
+        let days = data.get("days").and_then(|v| v.as_u64()).unwrap_or(7).clamp(1, 14) as i64;
+        let cals = crate::agenda::view(&urls, false);
+        agenda_edit(ui, data, &urls, &cals, days)
+    }
+}
+
+/// The agenda's settings (in the settings window): calendar links and options. Returns true if
+/// the saved data changed.
+fn agenda_edit(ui: &mut Ui, data: &mut Value, urls: &[String], cals: &[crate::agenda::CalView], days: i64) -> bool {
+    let mut out = WidgetOutput::default();
+    egui::ScrollArea::vertical().auto_shrink([false, true]).show(ui, |ui| {
+            ui.label(egui::RichText::new("Calendar links (iCal / .ics)").strong());
+            let mut remove = None;
+            for (i, u) in urls.iter().enumerate() {
+                ui.horizontal(|ui| {
+                    let (r, _) = ui.allocate_exact_size(egui::vec2(10.0, 16.0), Sense::hover());
+                    ui.painter().circle_filled(r.center(), 3.5, CAL_COLORS[i % CAL_COLORS.len()]);
+                    let name = cals.get(i).and_then(|c| c.name.clone()).unwrap_or_else(|| {
+                        // The server name is enough to tell links apart (the rest is a secret).
+                        u.split("://").nth(1).and_then(|r| r.split('/').next()).unwrap_or(u).to_string()
+                    });
+                    ui.add(egui::Label::new(name).truncate()).on_hover_text("The full link is kept private in your layout file.");
+                    if ui.small_button("Remove").clicked() {
+                        remove = Some(i);
+                    }
+                });
+            }
+            if let Some(i) = remove {
+                if let Some(a) = data.get_mut("urls").and_then(|v| v.as_array_mut()) {
+                    if i < a.len() {
+                        a.remove(i);
+                        out.changed = true;
+                    }
+                }
+            }
+            let nid = ui.make_persistent_id("agenda-new");
+            let mut new: String = ui.ctx().data(|d| d.get_temp(nid)).unwrap_or_default();
+            let mut add = false;
+            ui.horizontal(|ui| {
+                let r = ui.add(egui::TextEdit::singleline(&mut new).hint_text("Paste a link: https://… or webcal://…").desired_width(420.0));
+                add |= r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                add |= ui.button("Add").clicked();
+            });
+            let link = new.trim().to_string();
+            if add && !link.is_empty() {
+                let ok = ["https://", "http://", "webcal://", "webcals://"].iter().any(|p| link.to_ascii_lowercase().starts_with(p));
+                if ok {
+                    if !data.get("urls").map(|v| v.is_array()).unwrap_or(false) {
+                        data["urls"] = json!([]);
+                    }
+                    if let Some(a) = data["urls"].as_array_mut() {
+                        if !a.iter().any(|x| x.as_str() == Some(link.as_str())) {
+                            a.push(json!(link));
+                            out.changed = true;
+                        }
+                    }
+                    new.clear();
+                }
+            }
+            ui.ctx().data_mut(|d| d.insert_temp(nid, new));
+            ui.separator();
+            ui.horizontal(|ui| {
+                ui.label("Show the next");
+                for n in [3u64, 7, 14] {
+                    if ui.selectable_label(days as u64 == n, format!("{n} days")).clicked() {
+                        data["days"] = json!(n);
+                        out.changed = true;
+                    }
+                }
+            });
+            if ui.button("Refresh now").clicked() {
+                crate::agenda::request_refresh();
+            }
+            ui.label(egui::RichText::new("Calendars are downloaded every 30 minutes while this widget is shown. This is the only part of DesktopShepherd that uses the internet.").size(11.0).color(Color32::from_gray(150)));
+    });
+    out.changed
 }

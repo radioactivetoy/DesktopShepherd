@@ -61,12 +61,14 @@ an original Rust program; its behaviour was modelled on an existing desktop orga
   or the dots flip pages.
 - Remember box positions per monitor setup (laptop alone / docked), Settings > Monitors.
 - Widgets: clock, sticky note, drawing pad, system monitor (CPU, RAM, drives), calendar, to-do
-  list, search box. Each redraws only when needed (clock: each minute, monitor: every 2 s,
+  list, search box, agenda (online calendars: iCal / .ics links from Google, Outlook…; repeating
+  events supported). Widget options: box menu > "Widget settings…". Each redraws only when needed (clock: each minute, monitor: every 2 s,
   calendar: at midnight, the others only on input).
 - Multi-monitor: boxes follow a monitor **role** (main/second…) or stay on a **fixed** monitor.
 - Tray icon, Windows 11 style menus and settings page, start with Windows, low CPU priority,
   layout backups.
-- No network, no web engine, no Explorer hooks.
+- No network (except the agenda widget, which downloads only the calendar links you add to it),
+  no web engine, no Explorer hooks.
 
 ## Build and run
 

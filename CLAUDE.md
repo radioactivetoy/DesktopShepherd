@@ -16,7 +16,9 @@ changing anything. The owner does not code: explain results in plain words, no j
 2. **Performance.** Idle CPU must stay ~0 %. Don't add per-frame polling or continuous
    repaints; repaint only on input, data changes or a widget's `repaint_after`. Measure memory
    and CPU before/after big changes (see "Measuring").
-3. **No network, no web engine.** No telemetry, no online features.
+3. **No network, no web engine.** No telemetry, no online features. One exception, approved by the
+   owner (2026-11-22): the agenda widget downloads the iCal links the person adds to it
+   (`src/agenda.rs`, WinHTTP, every 30 min, only while shown). Nothing else may use the network.
 4. **Never `cargo update`.** Pinned crates keep the GNU build working (see `docs/BUILDING.md`).
 5. Keep the fallback chain working: hardware DirectX + glass, then software DirectX (WARP) +
    glass (`d3d::Renderer::new`), then no glass (plain windows, solid dark background; test with
@@ -87,7 +89,10 @@ for daily use.)
 
 ## Where to start for common tasks
 
-- New widget → `src/widgets.rs` (`REGISTRY`). Widgets that need the desktop's items (search box) are
+- New widget → `src/widgets.rs` (`REGISTRY`). Widget options go in `DeskWidget::settings` (shown in the
+  Personalize window's "Widget settings" tab, opened from the box menu): **no buttons or edit
+  views on the widgets themselves**, and no right-click menus inside them (the box menu takes the
+  right-click). Widgets that need the desktop's items (search box) are
   drawn in `app.rs` (`search_widget`).
 - Box look (tint/blur/corners) → `host.rs` `Look` + `HostSystem::apply`; settings UI in
   `app.rs` (Personalize window, `show_personalize`).
