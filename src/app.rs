@@ -96,6 +96,8 @@ struct UiState {
     snap_grid: f32,
     /// Open the quick-search window on the next pass (box menu, tray, shortcut).
     open_search: bool,
+    /// Hide or show all boxes on the next pass (tray).
+    toggle_hidden: bool,
     /// Scroll this icon (lower-case path) into view in its box (type to jump).
     scroll_to: Option<String>,
     /// Each box's icons as last drawn (paths, in order) and how many fit in a row, for the arrow
@@ -111,6 +113,7 @@ pub enum TrayCmd {
     Open,
     NewBox,
     Search,
+    HideShow,
     Quit,
 }
 
@@ -170,6 +173,11 @@ pub struct DeskApp {
     /// whether Windows accepted it.
     hotkey_applied: usize,
     hotkey_ok: bool,
+    /// The hide/show shortcut registered (index), whether Windows accepted it, and whether the
+    /// boxes are hidden right now.
+    hide_hotkey_applied: usize,
+    hide_hotkey_ok: bool,
+    boxes_hidden: bool,
     /// Type to jump: what was typed recently on the desktop and when (a pause starts over).
     ta_buf: String,
     ta_last: Option<Instant>,
@@ -347,6 +355,9 @@ impl DeskApp {
             pasted: Arc::new(Mutex::new(Vec::new())),
             hotkey_applied: usize::MAX,
             hotkey_ok: true,
+            hide_hotkey_applied: usize::MAX,
+            hide_hotkey_ok: true,
+            boxes_hidden: false,
             ta_buf: String::new(),
             ta_last: None,
             layout,
@@ -699,6 +710,18 @@ impl DeskApp {
                 }
             }
         }
+        // Hide/show all boxes (shortcut or tray).
+        #[cfg(windows)]
+        if self.persist {
+            let want = self.layout.settings.hide_hotkey;
+            if self.hide_hotkey_applied != want {
+                self.hide_hotkey_ok = crate::runloop::set_hide_hotkey(want);
+                self.hide_hotkey_applied = want;
+            }
+            if crate::runloop::take_hide_request() || std::mem::take(&mut self.ui.toggle_hidden) {
+                self.set_boxes_hidden(!self.boxes_hidden);
+            }
+        }
         // The quick-search shortcut: (re)register it when the setting changes; a press toggles
         // the search window.
         #[cfg(windows)]
@@ -765,6 +788,7 @@ impl DeskApp {
                 }
                 TrayCmd::NewBox => self.actions.push(Act::NewFence { auto: false }),
                 TrayCmd::Search => self.ui.open_search = true,
+                TrayCmd::HideShow => self.ui.toggle_hidden = true,
                 TrayCmd::Quit => self.actions.push(Act::Quit),
             }
         }
@@ -2440,6 +2464,20 @@ impl DeskApp {
         }
         #[cfg(windows)]
         ui.horizontal_wrapped(|ui| {
+            ui.label("Hide / show all boxes:");
+            for (i, (label, _, _)) in crate::runloop::SEARCH_HOTKEYS.iter().enumerate() {
+                if ui.selectable_label(s.hide_hotkey == i, *label).clicked() && s.hide_hotkey != i {
+                    s.hide_hotkey = i;
+                    dirty = true;
+                }
+            }
+        });
+        #[cfg(windows)]
+        if !self.hide_hotkey_ok {
+            ui.label(egui::RichText::new("That shortcut is already used by another program: pick another one.").color(Color32::from_rgb(255, 160, 120)).size(12.0));
+        }
+        #[cfg(windows)]
+        ui.horizontal_wrapped(|ui| {
             ui.label("Typing on the desktop:");
             for (i, label) in ["Does nothing", "Jumps to the icon that starts with it", "Starts a quick search"].iter().enumerate() {
                 if ui.selectable_label(s.desktop_typing as usize == i, *label).clicked() && s.desktop_typing as usize != i {
@@ -2936,9 +2974,10 @@ fn make_tray(ctx: &egui::Context, cmds: Arc<Mutex<Vec<TrayCmd>>>) -> Option<tray
     let open = MenuItem::new("Open DeskBoxes", true, None);
     let new_box = MenuItem::new("New box", true, None);
     let search = MenuItem::new("Search desktop", true, None);
+    let hide = MenuItem::new("Hide / show boxes", true, None);
     let quit = MenuItem::new("Quit", true, None);
-    let _ = menu.append_items(&[&open, &search, &new_box, &PredefinedMenuItem::separator(), &quit]);
-    let (open_id, new_id, quit_id, search_id) = (open.id().clone(), new_box.id().clone(), quit.id().clone(), search.id().clone());
+    let _ = menu.append_items(&[&open, &search, &hide, &new_box, &PredefinedMenuItem::separator(), &quit]);
+    let (open_id, new_id, quit_id, search_id, hide_id) = (open.id().clone(), new_box.id().clone(), quit.id().clone(), search.id().clone(), hide.id().clone());
     {
         let cmds = cmds.clone();
         let ctx = ctx.clone();
@@ -2949,6 +2988,8 @@ fn make_tray(ctx: &egui::Context, cmds: Arc<Mutex<Vec<TrayCmd>>>) -> Option<tray
                 Some(TrayCmd::NewBox)
             } else if e.id == search_id {
                 Some(TrayCmd::Search)
+            } else if e.id == hide_id {
+                Some(TrayCmd::HideShow)
             } else if e.id == quit_id {
                 Some(TrayCmd::Quit)
             } else {
@@ -3439,5 +3480,17 @@ impl DeskApp {
         } else if !close {
             self.rename = Some(r);
         }
+    }
+}
+
+impl DeskApp {
+    /// Hides every box (a clean desktop) or shows them again, just above the desktop.
+    fn set_boxes_hidden(&mut self, hidden: bool) {
+        self.boxes_hidden = hidden;
+        #[cfg(windows)]
+        for h in self.ui.hwnds.values() {
+            desktop::show_box_window(*h, !hidden);
+        }
+        self.redraw_all = true;
     }
 }

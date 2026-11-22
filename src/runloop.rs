@@ -46,11 +46,30 @@ pub const SEARCH_HOTKEYS: &[(&str, u32, u32)] = &[
     ("Ctrl+Alt+Space", 0x0002 | 0x0001, 0x20),
     ("Win+Shift+Space", 0x0008 | 0x0004, 0x20),
     ("Ctrl+Alt+F", 0x0002 | 0x0001, 0x46),
+    ("Ctrl+Alt+D", 0x0002 | 0x0001, 0x44),
+    ("Ctrl+Shift+H", 0x0002 | 0x0004, 0x48),
 ];
+
+/// The hide/show-all-boxes shortcut was pressed.
+static HIDE_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+/// True once after each press of the hide/show-all-boxes shortcut.
+pub fn take_hide_request() -> bool {
+    HIDE_REQUESTED.swap(false, Ordering::SeqCst)
+}
 
 /// (Re)registers the quick-search shortcut with Windows (an ordinary hotkey, no hook). Returns
 /// false if another program already uses it. Call from the app's thread.
 pub fn set_search_hotkey(index: usize) -> bool {
+    set_hotkey(1, "quick search", index)
+}
+
+/// (Re)registers the hide/show-all-boxes shortcut (index into SEARCH_HOTKEYS, 0 = off).
+pub fn set_hide_hotkey(index: usize) -> bool {
+    set_hotkey(2, "hide boxes", index)
+}
+
+fn set_hotkey(id: i32, what: &str, index: usize) -> bool {
     use windows::Win32::UI::Input::KeyboardAndMouse::{RegisterHotKey, UnregisterHotKey, HOT_KEY_MODIFIERS};
     let h = WAKE_HWND.load(Ordering::SeqCst);
     if h == 0 {
@@ -58,12 +77,12 @@ pub fn set_search_hotkey(index: usize) -> bool {
     }
     let hwnd = HWND(h as *mut _);
     unsafe {
-        let _ = UnregisterHotKey(hwnd, 1);
+        let _ = UnregisterHotKey(hwnd, id);
         let Some(&(label, mods, vk)) = SEARCH_HOTKEYS.get(index).filter(|_| index > 0) else { return true };
         // 0x4000 = MOD_NOREPEAT: holding the keys doesn't repeat.
-        let ok = RegisterHotKey(hwnd, 1, HOT_KEY_MODIFIERS(mods | 0x4000), vk).is_ok();
+        let ok = RegisterHotKey(hwnd, id, HOT_KEY_MODIFIERS(mods | 0x4000), vk).is_ok();
         if !ok {
-            crate::storage::log_line(&format!("quick search shortcut {label} is already used by another program"));
+            crate::storage::log_line(&format!("{what} shortcut {label} is already used by another program"));
         }
         ok
     }
@@ -218,7 +237,11 @@ unsafe extern "system" fn main_wndproc(h: HWND, m: u32, wp: WPARAM, lp: LPARAM) 
                 }
                 return LRESULT(0);
             }
-            SEARCH_REQUESTED.store(true, Ordering::SeqCst);
+            if id == 2 {
+                HIDE_REQUESTED.store(true, Ordering::SeqCst);
+            } else {
+                SEARCH_REQUESTED.store(true, Ordering::SeqCst);
+            }
             wake_after(Duration::ZERO);
             LRESULT(0)
         }

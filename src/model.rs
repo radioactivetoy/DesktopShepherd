@@ -205,6 +205,8 @@ pub struct Settings {
     /// Typing on the desktop (while it has the focus and Windows' icons are hidden):
     /// 0 = nothing, 1 = jump to the icon whose name starts with what was typed, 2 = quick search.
     pub desktop_typing: u8,
+    /// Hide/show-all-boxes shortcut: index into `runloop::SEARCH_HOTKEYS` (0 = off; 5 = Ctrl+Alt+D).
+    pub hide_hotkey: usize,
 }
 
 impl Default for Settings {
@@ -225,6 +227,7 @@ impl Default for Settings {
             grid_size: 20.0,
             search_hotkey: 1,
             desktop_typing: 1,
+            hide_hotkey: 5,
         }
     }
 }

@@ -971,3 +971,16 @@ pub fn pick_folder() -> Option<String> {
         None
     }
 }
+
+/// Shows (just above the desktop, without taking the focus) or hides a box window.
+pub fn show_box_window(hwnd: isize, show: bool) {
+    #[cfg(windows)]
+    unsafe {
+        use windows::Win32::Foundation::HWND;
+        use windows::Win32::UI::WindowsAndMessaging::{ShowWindowAsync, SW_HIDE, SW_SHOWNOACTIVATE};
+        let _ = ShowWindowAsync(HWND(hwnd as *mut _), if show { SW_SHOWNOACTIVATE } else { SW_HIDE });
+    }
+    if show {
+        send_to_bottom(hwnd);
+    }
+}
