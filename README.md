@@ -43,7 +43,7 @@ an original Rust program; its behaviour was modelled on an existing desktop orga
 - Type to jump: when the desktop itself is in front, typing a letter or digit jumps to the next
   icon that starts with it (same letter again = next one), Enter opens the selected icon. Settings >
   Desktop "Typing on the desktop": does nothing / jumps to the icon (default) / starts a quick search.
-- Look options per box (box menu > Personalize): any colour with opacity, border thickness and
+- Look options per box (box menu > Personalize…, its own window; font from a list): any colour with opacity, border thickness and
   colour, text colour, text shadow, title and text size, font, names under icons on/off, icon
   size and spacing, and "Apply this look to all boxes".
 - Windows' own right-click menu for icons (Win 11 style, all shell extensions), shown by a

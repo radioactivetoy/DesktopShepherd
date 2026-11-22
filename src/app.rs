@@ -46,6 +46,8 @@ enum Act {
     ImportOriginal,
     /// Give every box the look of this one (Personalize > Apply this look to all boxes).
     ApplyLookToAll(u64),
+    /// Open the Personalize window for this box.
+    Personalize(u64),
     /// Pick a folder (Windows' folder picker, on its own thread) and make a folder box for it.
     NewFolderBox,
     /// Right-click on an item: Windows' own menu (and the other selected items with it), with
@@ -155,6 +157,9 @@ pub struct DeskApp {
     panel_force: bool,
     /// Bring the settings window to the front on its next pass (tray "Open" while it's open).
     focus_settings: bool,
+    /// The box whose Personalize window is open, and whether to bring that window forward.
+    personalize: Option<u64>,
+    focus_personalize: bool,
     /// Shared data changed (files, icons, layout, selection): every box draws on the next pass.
     /// Otherwise a DirectX box draws only for its own reasons (see `HostSystem::frame`).
     redraw_all: bool,
@@ -355,6 +360,8 @@ impl DeskApp {
             hosts,
             panel_force: true,
             focus_settings: false,
+            personalize: None,
+            focus_personalize: false,
             redraw_all: true,
             icon_sizes: Vec::new(),
             font_names: Vec::new(),
@@ -645,6 +652,10 @@ impl DeskApp {
                         });
                     }
                 }
+                Act::Personalize(id) => {
+                    self.personalize = Some(id);
+                    self.focus_personalize = true;
+                }
                 Act::ApplyLookToAll(id) => {
                     if let Some(src) = self.layout.fences.iter().find(|f| f.id == id).cloned() {
                         for f in self.layout.fences.iter_mut().filter(|f| f.id != id) {
@@ -901,6 +912,16 @@ impl DeskApp {
             #[cfg(windows)]
             if let Some(h) = self.hosts.as_mut() {
                 h.close_panel(SETTINGS_PANEL);
+            }
+        }
+
+        // ---- Personalize window
+        if self.personalize.is_some() {
+            self.show_personalize();
+        } else {
+            #[cfg(windows)]
+            if let Some(h) = self.hosts.as_mut() {
+                h.close_panel(PERSONALIZE_PANEL);
             }
         }
 
@@ -1754,7 +1775,6 @@ pub enum MenuPage {
     Main,
     View,
     Sort,
-    Look,
     New,
     MoveTo,
     MoveToTabs(u64),
@@ -1857,6 +1877,171 @@ fn heading(ui: &mut egui::Ui, text: &str) {
     });
 }
 
+
+/// One aligned row of the Personalize window: name, slider, value.
+fn slider_row(ui: &mut egui::Ui, label: &str, value: String, slider: &mut dyn FnMut(&mut egui::Ui) -> bool) -> bool {
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        ui.add_space(14.0);
+        let (lr, _) = ui.allocate_exact_size(Vec2::new(70.0, 30.0), Sense::hover());
+        ui.painter().text(Pos2::new(lr.min.x, lr.center().y), egui::Align2::LEFT_CENTER, label, FontId::proportional(14.0), Color32::from_gray(225));
+        ui.spacing_mut().slider_width = 130.0;
+        changed = slider(ui);
+        ui.add_sized([40.0, 30.0], egui::Label::new(egui::RichText::new(value).size(13.0).color(Color32::from_gray(180))).halign(Align::Max));
+    });
+    changed
+}
+
+/// Personalize window, left column: colour, glass and border. Returns true if the look changed.
+fn look_left(ui: &mut egui::Ui, fence: &mut Fence) -> bool {
+    let mut dirty = false;
+                heading(ui, "Colour");
+                // One row of swatches; the clear-glass one is drawn as see-through (a checkerboard).
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 2.0;
+                    ui.add_space(12.0);
+                    for (name, rgb, alpha) in COLORS {
+                        let (r, resp) = ui.allocate_exact_size(Vec2::new(28.0, 30.0), Sense::click());
+                        let p = ui.painter();
+                        let c = r.center();
+                        let selected = fence.color == *rgb && fence.alpha == *alpha;
+                        if *alpha < 60 {
+                            // Clear glass: checkerboard inside the circle.
+                            p.circle_filled(c, 10.0, Color32::from_gray(200));
+                            for (dx, dy) in [(-4.0, -4.0), (4.0, 4.0)] {
+                                p.rect_filled(Rect::from_center_size(c + Vec2::new(dx, dy), Vec2::splat(7.0)), 0.0, Color32::from_gray(120));
+                            }
+                        } else {
+                            p.circle_filled(c, 10.0, Color32::from_rgb(rgb[0], rgb[1], rgb[2]));
+                        }
+                        p.circle_stroke(c, 10.0, egui::Stroke::new(1.0_f32, Color32::from_white_alpha(70)));
+                        if selected {
+                            p.circle_stroke(c, 13.0, egui::Stroke::new(2.0_f32, Color32::from_rgb(76, 194, 255)));
+                        } else if resp.hovered() {
+                            p.circle_stroke(c, 13.0, egui::Stroke::new(1.0_f32, Color32::from_white_alpha(90)));
+                        }
+                        if resp.on_hover_text(*name).clicked() {
+                            fence.color = *rgb;
+                            fence.alpha = *alpha;
+                            dirty = true;
+                        }
+                    }
+                });
+                // Any colour (with its opacity), picked by hand.
+                let mut tint = Color32::from_rgba_unmultiplied(fence.color[0], fence.color[1], fence.color[2], fence.alpha);
+                if color_row(ui, "box-colour", "Any colour…", &mut tint, true) {
+                    let [r, g, b, a] = tint.to_srgba_unmultiplied();
+                    fence.color = [r, g, b];
+                    fence.alpha = a;
+                    dirty = true;
+                }
+                sep(ui);
+                let alpha_pct = format!("{}%", (fence.alpha as f32 / 2.55).round());
+                dirty |= slider_row(ui, "Opacity", alpha_pct, &mut |ui| ui.add(egui::Slider::new(&mut fence.alpha, 0..=255).show_value(false)).changed());
+                let corner_txt = format!("{}", fence.corner.round());
+                dirty |= slider_row(ui, "Corners", corner_txt, &mut |ui| ui.add(egui::Slider::new(&mut fence.corner, 0.0..=16.0).step_by(1.0).show_value(false)).changed());
+                let blur_txt = format!("{}", fence.blur);
+                dirty |= slider_row(ui, "Blur", blur_txt, &mut |ui| ui.add(egui::Slider::new(&mut fence.blur, 0..=40).show_value(false)).changed());
+                sep(ui);
+                heading(ui, "Border");
+                let bw = format!("{}", fence.border_width);
+                dirty |= slider_row(ui, "Thickness", bw, &mut |ui| ui.add(egui::Slider::new(&mut fence.border_width, 0.0..=6.0).step_by(0.5).show_value(false)).changed());
+                let [r, g, b, a] = fence.border_color;
+                let mut border = Color32::from_rgba_unmultiplied(r, g, b, a);
+                if color_row(ui, "border-colour", "Border colour…", &mut border, true) {
+                    fence.border_color = border.to_srgba_unmultiplied();
+                    dirty = true;
+                }
+    dirty
+}
+
+/// Personalize window, right column: text, icons, title and tab placement, apply to all.
+fn look_right(ui: &mut egui::Ui, fence: &mut Fence, actions: &mut Vec<Act>) -> bool {
+    let mut dirty = false;
+                heading(ui, "Text");
+                let [r, g, b] = fence.text_color;
+                let mut text = Color32::from_rgb(r, g, b);
+                if color_row(ui, "text-colour", "Text colour…", &mut text, false) {
+                    let [r, g, b, _] = text.to_srgba_unmultiplied();
+                    fence.text_color = [r, g, b];
+                    dirty = true;
+                }
+                ui.horizontal(|ui| {
+                    ui.add_space(14.0);
+                    dirty |= ui.checkbox(&mut fence.text_shadow, "Shadow behind the text").changed();
+                });
+                let ts = format!("{}", fence.title_size.round());
+                dirty |= slider_row(ui, "Title size", ts, &mut |ui| ui.add(egui::Slider::new(&mut fence.title_size, 8.0..=32.0).step_by(1.0).show_value(false)).changed());
+                let cs = format!("{}", fence.caption_size.round());
+                dirty |= slider_row(ui, "Text size", cs, &mut |ui| ui.add(egui::Slider::new(&mut fence.caption_size, 7.0..=24.0).step_by(1.0).show_value(false)).changed());
+                // Font: a drop-down list of the fonts installed on this PC.
+                ui.horizontal(|ui| {
+                    ui.add_space(14.0);
+                    let (lr, _) = ui.allocate_exact_size(Vec2::new(70.0, 30.0), Sense::hover());
+                    ui.painter().text(Pos2::new(lr.min.x, lr.center().y), egui::Align2::LEFT_CENTER, "Font", FontId::proportional(14.0), Color32::from_gray(225));
+                    let shown = if fence.font.is_empty() { "Segoe UI".to_string() } else { fence.font.clone() };
+                    egui::ComboBox::from_id_salt("font-list").selected_text(shown.clone()).width(190.0).height(320.0).show_ui(ui, |ui| {
+                        for (name, file) in fv::FONTS {
+                            if !std::path::Path::new("C:/Windows/Fonts").join(file).exists() {
+                                continue;
+                            }
+                            if ui.selectable_label(shown == *name, *name).clicked() && shown != *name {
+                                fence.font = if *name == "Segoe UI" { String::new() } else { name.to_string() };
+                                dirty = true;
+                            }
+                        }
+                    });
+                });
+                if fence.widget.is_none() {
+                    sep(ui);
+                    heading(ui, "Icons");
+                    ui.horizontal(|ui| {
+                        ui.add_space(14.0);
+                        dirty |= ui.checkbox(&mut fence.show_captions, "Show names under the icons").changed();
+                    });
+                    let is = format!("{}", fence.icon_size);
+                    dirty |= slider_row(ui, "Size", is, &mut |ui| ui.add(egui::Slider::new(&mut fence.icon_size, 16..=128).step_by(4.0).show_value(false)).changed());
+                    let sp = if fence.icon_spacing <= 0.0 { "auto".to_string() } else { format!("{}", fence.icon_spacing.round()) };
+                    dirty |= slider_row(ui, "Spacing", sp, &mut |ui| ui.add(egui::Slider::new(&mut fence.icon_spacing, 0.0..=200.0).step_by(2.0).show_value(false)).changed());
+                }
+                sep(ui);
+                // Two-way switches for where the title and the tabs go.
+                let switch = |ui: &mut egui::Ui, label: &str, first: &str, second: &str, is_first: bool| -> Option<bool> {
+                    let mut pick = None;
+                    ui.horizontal(|ui| {
+                        ui.add_space(14.0);
+                        let (lr, _) = ui.allocate_exact_size(Vec2::new(70.0, 30.0), Sense::hover());
+                        ui.painter().text(Pos2::new(lr.min.x, lr.center().y), egui::Align2::LEFT_CENTER, label, FontId::proportional(14.0), Color32::from_gray(225));
+                        ui.spacing_mut().item_spacing.x = 4.0;
+                        for (i, text) in [first, second].into_iter().enumerate() {
+                            let on = (i == 0) == is_first;
+                            let fill = if on { Color32::from_rgb(76, 194, 255).linear_multiply(0.35) } else { Color32::from_white_alpha(10) };
+                            let b = egui::Button::new(egui::RichText::new(text).size(13.0).color(if on { Color32::WHITE } else { Color32::from_gray(200) }))
+                                .fill(fill)
+                                .corner_radius(egui::CornerRadius::same(4))
+                                .min_size(Vec2::new(78.0, 26.0));
+                            if ui.add(b).clicked() {
+                                pick = Some(i == 0);
+                            }
+                        }
+                    });
+                    pick
+                };
+                if let Some(left) = switch(ui, "Title", "Left side", "Top", fence.title_pos == TitlePos::Left) {
+                    fence.title_pos = if left { TitlePos::Left } else { TitlePos::Top };
+                    dirty = true;
+                }
+                if let Some(right) = switch(ui, "Tabs", "Right side", "Top", fence.tab_pos == TabPos::Right) {
+                    fence.tab_pos = if right { TabPos::Right } else { TabPos::Top };
+                    dirty = true;
+                }
+                sep(ui);
+                if row(ui, icon::COLOR, "Apply this look to all boxes", None, true).clicked() {
+                    actions.push(Act::ApplyLookToAll(fence.id));
+                }
+                ui.add_space(4.0);    dirty
+}
+
 /// The box menu. Returns (layout changed, close the menu).
 #[allow(clippy::too_many_arguments)]
 fn fence_menu(ui: &mut egui::Ui, fence: &mut Fence, st: &mut UiState, page: &mut MenuPage, actions: &mut Vec<Act>, ctx_for_box: &egui::Context) -> (bool, bool) {
@@ -1909,8 +2094,9 @@ fn fence_menu(ui: &mut egui::Ui, fence: &mut Fence, st: &mut UiState, page: &mut
                     close = true;
                 }
             }
-            if sub(ui, icon::COLOR, "Personalize") {
-                *page = MenuPage::Look;
+            if row(ui, icon::COLOR, "Personalize…", None, true).clicked() {
+                actions.push(Act::Personalize(fence.id));
+                close = true;
             }
             sep(ui);
             if sub(ui, icon::ADD, "New") {
@@ -1966,168 +2152,6 @@ fn fence_menu(ui: &mut egui::Ui, fence: &mut Fence, st: &mut UiState, page: &mut
                     close = true;
                 }
             }
-        }
-        MenuPage::Look => {
-            back(ui, page, "Personalize");
-            // Taller than a menu should be: it scrolls.
-            ScrollArea::vertical().max_height(540.0).auto_shrink([false, true]).show(ui, |ui| {
-                heading(ui, "Colour");
-                // One row of swatches; the clear-glass one is drawn as see-through (a checkerboard).
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 2.0;
-                    ui.add_space(12.0);
-                    for (name, rgb, alpha) in COLORS {
-                        let (r, resp) = ui.allocate_exact_size(Vec2::new(28.0, 30.0), Sense::click());
-                        let p = ui.painter();
-                        let c = r.center();
-                        let selected = fence.color == *rgb && fence.alpha == *alpha;
-                        if *alpha < 60 {
-                            // Clear glass: checkerboard inside the circle.
-                            p.circle_filled(c, 10.0, Color32::from_gray(200));
-                            for (dx, dy) in [(-4.0, -4.0), (4.0, 4.0)] {
-                                p.rect_filled(Rect::from_center_size(c + Vec2::new(dx, dy), Vec2::splat(7.0)), 0.0, Color32::from_gray(120));
-                            }
-                        } else {
-                            p.circle_filled(c, 10.0, Color32::from_rgb(rgb[0], rgb[1], rgb[2]));
-                        }
-                        p.circle_stroke(c, 10.0, egui::Stroke::new(1.0_f32, Color32::from_white_alpha(70)));
-                        if selected {
-                            p.circle_stroke(c, 13.0, egui::Stroke::new(2.0_f32, Color32::from_rgb(76, 194, 255)));
-                        } else if resp.hovered() {
-                            p.circle_stroke(c, 13.0, egui::Stroke::new(1.0_f32, Color32::from_white_alpha(90)));
-                        }
-                        if resp.on_hover_text(*name).clicked() {
-                            fence.color = *rgb;
-                            fence.alpha = *alpha;
-                            dirty = true;
-                        }
-                    }
-                });
-                // Any colour (with its opacity), picked by hand.
-                let mut tint = Color32::from_rgba_unmultiplied(fence.color[0], fence.color[1], fence.color[2], fence.alpha);
-                if color_row(ui, "box-colour", "Any colour…", &mut tint, true) {
-                    let [r, g, b, a] = tint.to_srgba_unmultiplied();
-                    fence.color = [r, g, b];
-                    fence.alpha = a;
-                    dirty = true;
-                }
-                sep(ui);
-                // Aligned rows: name, slider, value.
-                let slider_row = |ui: &mut egui::Ui, label: &str, value: String, slider: &mut dyn FnMut(&mut egui::Ui) -> bool| -> bool {
-                    let mut changed = false;
-                    ui.horizontal(|ui| {
-                        ui.add_space(14.0);
-                        let (lr, _) = ui.allocate_exact_size(Vec2::new(70.0, 30.0), Sense::hover());
-                        ui.painter().text(Pos2::new(lr.min.x, lr.center().y), egui::Align2::LEFT_CENTER, label, FontId::proportional(14.0), Color32::from_gray(225));
-                        ui.spacing_mut().slider_width = 120.0;
-                        changed = slider(ui);
-                        ui.add_sized([36.0, 30.0], egui::Label::new(egui::RichText::new(value).size(13.0).color(Color32::from_gray(180))).halign(Align::Max));
-                    });
-                    changed
-                };
-                let alpha_pct = format!("{}%", (fence.alpha as f32 / 2.55).round());
-                dirty |= slider_row(ui, "Opacity", alpha_pct, &mut |ui| ui.add(egui::Slider::new(&mut fence.alpha, 0..=255).show_value(false)).changed());
-                let corner_txt = format!("{}", fence.corner.round());
-                dirty |= slider_row(ui, "Corners", corner_txt, &mut |ui| ui.add(egui::Slider::new(&mut fence.corner, 0.0..=16.0).step_by(1.0).show_value(false)).changed());
-                let blur_txt = format!("{}", fence.blur);
-                dirty |= slider_row(ui, "Blur", blur_txt, &mut |ui| ui.add(egui::Slider::new(&mut fence.blur, 0..=40).show_value(false)).changed());
-                sep(ui);
-                heading(ui, "Border");
-                let bw = format!("{}", fence.border_width);
-                dirty |= slider_row(ui, "Thickness", bw, &mut |ui| ui.add(egui::Slider::new(&mut fence.border_width, 0.0..=6.0).step_by(0.5).show_value(false)).changed());
-                let [r, g, b, a] = fence.border_color;
-                let mut border = Color32::from_rgba_unmultiplied(r, g, b, a);
-                if color_row(ui, "border-colour", "Border colour…", &mut border, true) {
-                    fence.border_color = border.to_srgba_unmultiplied();
-                    dirty = true;
-                }
-                sep(ui);
-                heading(ui, "Text");
-                let [r, g, b] = fence.text_color;
-                let mut text = Color32::from_rgb(r, g, b);
-                if color_row(ui, "text-colour", "Text colour…", &mut text, false) {
-                    let [r, g, b, _] = text.to_srgba_unmultiplied();
-                    fence.text_color = [r, g, b];
-                    dirty = true;
-                }
-                ui.horizontal(|ui| {
-                    ui.add_space(14.0);
-                    dirty |= ui.checkbox(&mut fence.text_shadow, "Shadow behind the text").changed();
-                });
-                let ts = format!("{}", fence.title_size.round());
-                dirty |= slider_row(ui, "Title size", ts, &mut |ui| ui.add(egui::Slider::new(&mut fence.title_size, 8.0..=32.0).step_by(1.0).show_value(false)).changed());
-                let cs = format!("{}", fence.caption_size.round());
-                dirty |= slider_row(ui, "Text size", cs, &mut |ui| ui.add(egui::Slider::new(&mut fence.caption_size, 7.0..=24.0).step_by(1.0).show_value(false)).changed());
-                // Fonts: only those installed on this PC are offered.
-                ui.horizontal(|ui| {
-                    ui.add_space(14.0);
-                    ui.label(egui::RichText::new("Font").size(14.0).color(Color32::from_gray(225)));
-                });
-                ui.horizontal_wrapped(|ui| {
-                    ui.add_space(14.0);
-                    ui.spacing_mut().item_spacing = Vec2::new(4.0, 4.0);
-                    for (name, file) in fv::FONTS {
-                        if !std::path::Path::new("C:/Windows/Fonts").join(file).exists() {
-                            continue;
-                        }
-                        let is_default = *name == "Segoe UI";
-                        let on = if is_default { fence.font.is_empty() } else { fence.font == *name };
-                        if ui.selectable_label(on, egui::RichText::new(*name).size(12.5)).clicked() && !on {
-                            fence.font = if is_default { String::new() } else { name.to_string() };
-                            dirty = true;
-                        }
-                    }
-                });
-                if fence.widget.is_none() {
-                    sep(ui);
-                    heading(ui, "Icons");
-                    ui.horizontal(|ui| {
-                        ui.add_space(14.0);
-                        dirty |= ui.checkbox(&mut fence.show_captions, "Show names under the icons").changed();
-                    });
-                    let is = format!("{}", fence.icon_size);
-                    dirty |= slider_row(ui, "Size", is, &mut |ui| ui.add(egui::Slider::new(&mut fence.icon_size, 16..=128).step_by(4.0).show_value(false)).changed());
-                    let sp = if fence.icon_spacing <= 0.0 { "auto".to_string() } else { format!("{}", fence.icon_spacing.round()) };
-                    dirty |= slider_row(ui, "Spacing", sp, &mut |ui| ui.add(egui::Slider::new(&mut fence.icon_spacing, 0.0..=200.0).step_by(2.0).show_value(false)).changed());
-                }
-                sep(ui);
-                // Two-way switches for where the title and the tabs go.
-                let switch = |ui: &mut egui::Ui, label: &str, first: &str, second: &str, is_first: bool| -> Option<bool> {
-                    let mut pick = None;
-                    ui.horizontal(|ui| {
-                        ui.add_space(14.0);
-                        let (lr, _) = ui.allocate_exact_size(Vec2::new(70.0, 30.0), Sense::hover());
-                        ui.painter().text(Pos2::new(lr.min.x, lr.center().y), egui::Align2::LEFT_CENTER, label, FontId::proportional(14.0), Color32::from_gray(225));
-                        ui.spacing_mut().item_spacing.x = 4.0;
-                        for (i, text) in [first, second].into_iter().enumerate() {
-                            let on = (i == 0) == is_first;
-                            let fill = if on { Color32::from_rgb(76, 194, 255).linear_multiply(0.35) } else { Color32::from_white_alpha(10) };
-                            let b = egui::Button::new(egui::RichText::new(text).size(13.0).color(if on { Color32::WHITE } else { Color32::from_gray(200) }))
-                                .fill(fill)
-                                .corner_radius(egui::CornerRadius::same(4))
-                                .min_size(Vec2::new(78.0, 26.0));
-                            if ui.add(b).clicked() {
-                                pick = Some(i == 0);
-                            }
-                        }
-                    });
-                    pick
-                };
-                if let Some(left) = switch(ui, "Title", "Left side", "Top", fence.title_pos == TitlePos::Left) {
-                    fence.title_pos = if left { TitlePos::Left } else { TitlePos::Top };
-                    dirty = true;
-                }
-                if let Some(right) = switch(ui, "Tabs", "Right side", "Top", fence.tab_pos == TabPos::Right) {
-                    fence.tab_pos = if right { TabPos::Right } else { TabPos::Top };
-                    dirty = true;
-                }
-                sep(ui);
-                if row(ui, icon::COLOR, "Apply this look to all boxes", None, true).clicked() {
-                    actions.push(Act::ApplyLookToAll(fence.id));
-                    close = true;
-                }
-                ui.add_space(4.0);
-            });
         }
         MenuPage::Pages => {
             back(ui, page, "Move to page");
@@ -3783,4 +3807,67 @@ fn search_widget(ui: &mut egui::Ui, id: u64, desk: &DeskState, icons: &mut IconC
         d.insert_temp(qid, q);
         d.insert_temp(qid.with("sel"), sel);
     });
+}
+
+const PERSONALIZE_PANEL: u64 = u64::MAX - 5;
+
+impl DeskApp {
+    /// The Personalize window of one box: two columns, changes show on the box at once.
+    fn show_personalize(&mut self) {
+        let Some(id) = self.personalize else { return };
+        if !self.layout.fences.iter().any(|f| f.id == id) {
+            self.personalize = None; // the box was deleted
+            return;
+        }
+        #[cfg(windows)]
+        if let Some(mut hosts) = self.hosts.take() {
+            let s = desktop::system_scale();
+            let [sw, sh] = desktop::primary_screen_points();
+            let (w, h) = (820.0_f32.min(sw - 40.0), 640.0_f32.min(sh - 80.0));
+            let (x, y) = (((sw - w) / 2.0).max(0.0), ((sh - h) / 2.0).max(0.0));
+            let rect_px = [(x * s) as i32, (y * s) as i32, (w * s) as i32, (h * s) as i32];
+            let force = self.panel_force;
+            let mut close = false;
+            let mut dirty = false;
+            let fences = &mut self.layout.fences;
+            let actions = &mut self.actions;
+            hosts.panel(PERSONALIZE_PANEL, crate::host::PanelKind::Settings, "Personalize", rect_px, false, force, |pctx| {
+                if pctx.input(|i| i.viewport().close_requested() || i.key_pressed(egui::Key::Escape)) {
+                    close = true;
+                }
+                let Some(fence) = fences.iter_mut().find(|f| f.id == id) else { return };
+                egui::TopBottomPanel::top("look-top").frame(egui::Frame::new().fill(Color32::from_rgb(24, 25, 28)).inner_margin(10.0)).show(pctx, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new("Personalize").size(20.0).strong().color(Color32::WHITE));
+                        ui.label(egui::RichText::new(format!("  {}", fence.name)).size(15.0).color(Color32::from_gray(170)));
+                        ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                            if ui.button("Done").clicked() {
+                                close = true;
+                            }
+                        });
+                    });
+                });
+                egui::CentralPanel::default().frame(egui::Frame::new().fill(Color32::from_rgb(32, 33, 36)).inner_margin(10.0)).show(pctx, |ui| {
+                    ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                        ui.columns(2, |cols| {
+                            dirty |= look_left(&mut cols[0], fence);
+                            dirty |= look_right(&mut cols[1], fence, actions);
+                        });
+                    });
+                });
+            });
+            if std::mem::take(&mut self.focus_personalize) {
+                hosts.apply(PERSONALIZE_PANEL, &ViewportCommand::Focus);
+            }
+            if close {
+                hosts.close_panel(PERSONALIZE_PANEL);
+                self.personalize = None;
+            }
+            self.hosts = Some(hosts);
+            if dirty {
+                self.mark_dirty();
+                self.redraw_all = true;
+            }
+        }
+    }
 }

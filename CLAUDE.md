@@ -90,10 +90,9 @@ for daily use.)
 - New widget → `src/widgets.rs` (`REGISTRY`). Widgets that need the desktop's items (search box) are
   drawn in `app.rs` (`search_widget`).
 - Box look (tint/blur/corners) → `host.rs` `Look` + `HostSystem::apply`; settings UI in
-  `app.rs` (Personalize page).
+  `app.rs` (Personalize window, `show_personalize`).
 - Box look options (colour, border, fonts, text, icon size/spacing) → `Fence` fields in
-  `model.rs`, drawing in `fence_view.rs`, Personalize page in `app.rs` (`fence_menu`,
-  `MenuPage::Look`).
+  `model.rs`, drawing in `fence_view.rs`, Personalize window in `app.rs` (`show_personalize`, columns `look_left` / `look_right`).
 - Quick search → `src/search.rs` (ranking, unit tests) + `show_search` in `app.rs`; the shortcut
   is in `runloop.rs` (`SEARCH_HOTKEYS`, `take_search_request`).
 - Windows' right-click menu → `src/shellmenu.rs`.
