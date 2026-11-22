@@ -48,9 +48,11 @@ impl IconCache {
         any
     }
 
-    pub fn get(&mut self, path: &str, size: u32) -> Option<egui::TextureId> {
-        // Ask the shell for a sharper icon than shown, so high-DPI screens look crisp.
-        let size = (size * 2).clamp(32, 256);
+    /// `px`: the size the icon is shown at, in real pixels (points × display scale). It is
+    /// loaded at exactly that size: sharp on any display, and no bigger in memory than needed
+    /// (it used to be twice the size, four times the memory).
+    pub fn get(&mut self, path: &str, px: u32) -> Option<egui::TextureId> {
+        let size = px.clamp(16, 256);
         let key = (path.to_string(), size);
         if let Some(t) = self.textures.get(&key) {
             return t.as_ref().map(|t| t.id());
@@ -69,6 +71,14 @@ impl IconCache {
 
     pub fn busy(&self) -> bool {
         !self.pending.is_empty()
+    }
+
+    /// Drops icons of sizes no box shows any more (after a View size change). Only call it when
+    /// the set of sizes in use changes, so icons of boxes that just weren't redrawn stay.
+    pub fn keep_only_sizes(&mut self, sizes: &HashSet<u32>) {
+        let keep = |s: &u32| sizes.contains(&(*s).clamp(16, 256));
+        self.textures.retain(|(_, s), _| keep(s));
+        self.pending.retain(|(_, s)| keep(s));
     }
 
     /// Forget an icon so it is fetched again (e.g. after a file changed).

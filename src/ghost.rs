@@ -100,27 +100,43 @@ mod imp {
         ok
     }
 
-    /// Shows the picture under the mouse and moves it from its own helper thread (about every
-    /// millisecond) until the mouse button is released. grab = mouse position minus the
-    /// picture's top-left (pixels). Returns the picture's window handle.
-    pub fn begin_icon_drag(w: usize, h: usize, bgra: Vec<u8>, grab: (i32, i32)) -> Option<isize> {
-        let (tx, rx) = std::sync::mpsc::channel::<Option<isize>>();
-        std::thread::Builder::new()
+    /// Loads the icon of `path` at `px` pixels on its own helper thread (so a slow shell never
+    /// freezes the boxes), shows it under the mouse and moves it about every millisecond until
+    /// the mouse button is released. `state` holds the window handle once it exists (0 before,
+    /// -1 = cancelled by the app).
+    pub fn begin_icon_drag(path: String, px: u32, state: std::sync::Arc<std::sync::atomic::AtomicIsize>) {
+        use std::sync::atomic::Ordering;
+        let _ = std::thread::Builder::new()
             .name("icon-drag".into())
             .spawn(move || unsafe {
+                use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE};
                 use windows::Win32::UI::WindowsAndMessaging::{
                     DispatchMessageW, GetCursorPos, IsWindow, PeekMessageW, TranslateMessage, HWND_TOPMOST, MSG, PM_REMOVE,
                     SWP_NOMOVE, SWP_NOZORDER,
                 };
+                let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+                let Some(img) = crate::icons::load_now(&path, px) else { return };
+                let (w, h) = (img.size[0], img.size[1]);
+                let mut bgra = Vec::with_capacity(w * h * 4);
+                for c in &img.pixels {
+                    // 80 % opaque, premultiplied.
+                    let f = |v: u8| ((v as u32 * 204) / 255) as u8;
+                    bgra.extend_from_slice(&[f(c.b()), f(c.g()), f(c.r()), f(c.a())]);
+                }
+                let grab = ((w / 2) as i32, (h / 2) as i32);
+                // The drag may already be over (slow icon): don't show anything then.
+                if state.load(Ordering::SeqCst) != 0 || !super::primary_button_down() {
+                    return;
+                }
                 let mut p = POINT::default();
                 let _ = GetCursorPos(&mut p);
-                let Some(hwnd) = create(w, h, &bgra, p.x - grab.0, p.y - grab.1) else {
-                    let _ = tx.send(None);
-                    return;
-                };
+                let Some(hwnd) = create(w, h, &bgra, p.x - grab.0, p.y - grab.1) else { return };
                 let hw = HWND(hwnd as *mut _);
+                if state.compare_exchange(0, hwnd, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+                    let _ = DestroyWindow(hw);
+                    return;
+                }
                 let _ = SetWindowPos(hw, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOMOVE);
-                let _ = tx.send(Some(hwnd));
                 let mut last = (p.x, p.y);
                 loop {
                     let mut msg = MSG::default();
@@ -144,9 +160,7 @@ mod imp {
                     }
                     std::thread::sleep(std::time::Duration::from_millis(1));
                 }
-            })
-            .ok()?;
-        rx.recv_timeout(std::time::Duration::from_secs(2)).ok().flatten()
+            });
     }
 
     /// Removes the picture (it lives on its own thread: ask it to close).
@@ -160,13 +174,30 @@ mod imp {
 
 #[cfg(not(windows))]
 mod imp {
-    pub fn begin_icon_drag(_: usize, _: usize, _: Vec<u8>, _: (i32, i32)) -> Option<isize> {
-        None
-    }
+    pub fn begin_icon_drag(_: String, _: u32, _: std::sync::Arc<std::sync::atomic::AtomicIsize>) {}
     pub fn destroy(_: isize) {}
 }
 
-pub use imp::{begin_icon_drag, destroy};
+/// The flying icon picture of one icon drag (see `begin_icon_drag`).
+pub struct DragImage(std::sync::Arc<std::sync::atomic::AtomicIsize>);
+
+impl DragImage {
+    /// Removes the picture, or stops it from appearing if its icon is still loading.
+    pub fn destroy(&self) {
+        let h = self.0.swap(-1, std::sync::atomic::Ordering::SeqCst);
+        if h > 0 {
+            imp::destroy(h);
+        }
+    }
+}
+
+/// Starts the flying picture for an icon drag (returns at once; the icon loads in the
+/// background).
+pub fn begin_icon_drag(path: String, px: u32) -> DragImage {
+    let state = std::sync::Arc::new(std::sync::atomic::AtomicIsize::new(0));
+    imp::begin_icon_drag(path, px, state.clone());
+    DragImage(state)
+}
 
 /// True while the user's main mouse button is held. Honors "swap primary and secondary
 /// buttons": then the physical right button is the main one.

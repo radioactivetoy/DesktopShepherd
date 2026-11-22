@@ -57,7 +57,7 @@ struct UiState {
     /// Selection rectangle in progress: box id and where it started (window points).
     band: Option<(u64, Pos2)>,
     /// The icon picture flying with the mouse during an icon drag (window handle).
-    drag_image: Option<isize>,
+    drag_image: Option<ghost::DragImage>,
     /// Safety net: when an icon drag was first seen with the mouse button up.
     drag_up_since: Option<Instant>,
     /// (box id, tab index or None for the box title, text being typed)
@@ -80,6 +80,8 @@ struct UiState {
     drag: Option<(u64, u8, Pos2, Rect)>,
     /// Boxes the person just moved or resized: re-read which monitor they're on.
     rebind: HashSet<u64>,
+    /// Boxes have Windows' glass (false = no-glass fallback: they paint a solid background).
+    glass: bool,
     /// Commands for box windows from elsewhere (menus, monitor changes): box id, command.
     box_cmds: Vec<(u64, ViewportCommand)>,
     /// Boxes whose next position update comes from a move or resize by the person.
@@ -127,6 +129,8 @@ pub struct DeskApp {
     /// Shared data changed (files, icons, layout, selection): every box draws on the next pass.
     /// Otherwise a DirectX box draws only for its own reasons (see `HostSystem::frame`).
     redraw_all: bool,
+    /// Icon sizes (pixels) the boxes showed last pass (see `IconCache::keep_only_sizes`).
+    icon_sizes: Vec<u32>,
 }
 
 /// Passes and box frames drawn (for DESKBOXES_DEBUG_DRAWS).
@@ -288,6 +292,7 @@ impl DeskApp {
             panel_force: true,
             focus_settings: false,
             redraw_all: true,
+            icon_sizes: Vec::new(),
             layout,
         };
         if app.persist {
@@ -532,6 +537,21 @@ impl DeskApp {
             self.icons.forget_missing(&keep);
             self.redraw_all = true;
         }
+        // Icon sizes in use (pixels): when they change (View > Small/Medium/Large), drop the
+        // icons of sizes no box shows any more.
+        let s = desktop::system_scale();
+        let sizes: Vec<u32> = {
+            let mut v: Vec<u32> = self.layout.fences.iter().map(|f| ((f.icon_size as f32 * s).round() as u32).clamp(16, 256)).collect();
+            v.sort_unstable();
+            v.dedup();
+            v
+        };
+        if sizes != self.icon_sizes {
+            if !self.icon_sizes.is_empty() {
+                self.icons.keep_only_sizes(&sizes.iter().copied().collect());
+            }
+            self.icon_sizes = sizes;
+        }
         #[cfg(windows)]
         let icons_arrived = match self.hosts.as_ref() {
             Some(h) => self.icons.poll(&h.ctx),
@@ -655,6 +675,7 @@ impl DeskApp {
         let fingerprint = shared_ui_fingerprint(&self.ui);
         #[cfg(windows)]
         if let Some(hosts) = self.hosts.as_mut().filter(|h| !h.lost) {
+            self.ui.glass = hosts.has_glass();
             let ids: Vec<u64> = self.layout.fences.iter().map(|f| f.id).collect();
             hosts.retain(&ids);
             for fence in self.layout.fences.iter_mut() {
@@ -857,14 +878,20 @@ fn fence_window(
             .or_else(|| ctx.input(|i| i.viewport().inner_rect))
             .unwrap_or_else(|| Rect::from_min_size(Pos2::new(fence.rect[0], fence.rect[1]), rect.size()));
         let screen = current;
-        // Only the thin border: Windows draws the glass, tint and rounded corners.
-        let [br, bg, bb, ba] = fence.border_color;
-        painter.rect_stroke(
-            rect.shrink(0.5),
-            egui::CornerRadius::same(fence.corner.round().clamp(0.0, 40.0) as u8),
-            egui::Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(br, bg, bb, ba)),
-            egui::StrokeKind::Inside,
-        );
+        if st.glass {
+            // Only the thin border: Windows draws the glass, tint and rounded corners.
+            let [br, bg, bb, ba] = fence.border_color;
+            painter.rect_stroke(
+                rect.shrink(0.5),
+                egui::CornerRadius::same(fence.corner.round().clamp(0.0, 40.0) as u8),
+                egui::Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(br, bg, bb, ba)),
+                egui::StrokeKind::Inside,
+            );
+        } else {
+            // No glass available: a solid dark background with the box's tint and border.
+            painter.rect_filled(rect, 0.0, Color32::from_rgb(30, 30, 34));
+            fv::paint_background(&painter, &view, rect, 1.0);
+        }
         if hovering_files && !fence.auto_sort {
             painter.rect_stroke(
                 rect.shrink(2.0),
@@ -886,7 +913,7 @@ fn fence_window(
                 if since.elapsed() > Duration::from_millis(500) {
                     st.item_drag = None;
                     if let Some(img) = st.drag_image.take() {
-                        ghost::destroy(img);
+                        img.destroy();
                     }
                     st.drag_up_since = None;
                 } else {
@@ -1104,21 +1131,14 @@ fn fence_window(
                             }
                             st.item_drag = Some((fence.id, paths));
                             // A see-through picture of the icon flies with the mouse while dragging.
+                            // Loaded on the picture's own thread: a slow shortcut (network drive)
+                            // never freezes the boxes.
                             let ppp = ctx.pixels_per_point();
                             let px = (icon * ppp).round() as u32;
-                            if let Some(img) = crate::icons::load_now(&it.path, px) {
-                                let (w, h) = (img.size[0], img.size[1]);
-                                let mut bgra = Vec::with_capacity(w * h * 4);
-                                for c in &img.pixels {
-                                    // 80 % opaque, premultiplied.
-                                    let f = |v: u8| ((v as u32 * 204) / 255) as u8;
-                                    bgra.extend_from_slice(&[f(c.b()), f(c.g()), f(c.r()), f(c.a())]);
-                                }
-                                if let Some(old) = st.drag_image.take() {
-                                    ghost::destroy(old);
-                                }
-                                st.drag_image = ghost::begin_icon_drag(w, h, bgra, ((w / 2) as i32, (h / 2) as i32));
+                            if let Some(old) = st.drag_image.take() {
+                                old.destroy();
                             }
+                            st.drag_image = Some(ghost::begin_icon_drag(it.path.clone(), px));
                         }
                         if resp.dragged() && st.item_drag.as_ref().map(|d| d.1.len() > 1 || st.drag_image.is_none()).unwrap_or(false) {
                             ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
@@ -1134,7 +1154,7 @@ fn fence_window(
                         }
                         if resp.drag_stopped() {
                             if let Some(img) = st.drag_image.take() {
-                                ghost::destroy(img);
+                                img.destroy();
                             }
                             if let Some((from, paths)) = st.item_drag.take() {
                                 if let Some(at) = desktop::cursor_points(ctx.pixels_per_point()) {

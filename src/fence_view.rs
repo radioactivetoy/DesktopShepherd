@@ -223,7 +223,9 @@ pub fn paint_item(painter: &egui::Painter, icons: &mut IconCache, item: &DeskIte
         painter.rect_filled(cell.shrink(2.0 * scale), CornerRadius::same((4.0 * scale) as u8), Color32::from_white_alpha(highlight));
     }
     let icon_rect = Rect::from_center_size(Pos2::new(cell.center().x, cell.min.y + 6.0 * scale + icon / 2.0), Vec2::splat(icon));
-    match icons.get(&item.path, (icon / scale.max(0.01)) as u32) {
+    // In real pixels at the box's own size (the layout preview reuses the boxes' icons).
+    let px = (icon / scale.max(0.01) * painter.ctx().pixels_per_point()).round() as u32;
+    match icons.get(&item.path, px) {
         Some(tex) => {
             painter.image(tex, icon_rect, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
         }

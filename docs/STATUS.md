@@ -5,10 +5,15 @@
 | Process | Working set | Private | Threads | CPU idle (10 s, all cores) |
 |---|---|---|---|---|
 | supervisor `deskboxes.exe` | ~2 MB | 2 MB | – | 0.00 % |
-| worker `deskboxes.exe --worker` | ~110 MB (113 MB with settings open) | ~100 MB | 34 | ~0.00–0.02 % |
+| worker `deskboxes.exe --worker` | ~89 MB | ~75 MB | 34 | ~0.00–0.02 % |
 
 History: classic GL glass path 194–240 MB → DirectX composition path ~156 MB (155 MB private,
-30 threads) → after phase C (no eframe/GL) ~110 MB (2026-11-22).
+30 threads) → after phase C (no eframe/GL) ~110 MB (100 MB private) → after the memory round
+(icons loaded at real pixel size, unused icon sizes dropped, no fonts in the root egui context)
+~89 MB (75 MB private) (2026-11-22). A release build measured 107 MB / 99 MB private against
+110 / 100 for debug before that round: no real difference, so the debug build (opt-level 3)
+stays fine for daily use. (The "113 MB with settings open" figure is from before the memory
+round and has not been re-measured.)
 
 Mouse moving over a box (`tools\measure_hover_cpu.ps1`, 10 s, desktop shown so the boxes are
 really under the mouse): 7.3 s CPU before phase A → 2.6–2.8 s after phase A and B
@@ -43,16 +48,24 @@ egui font atlases, and the icon textures.
 
 ## Known issues / untested
 
-- Win+D / "Show desktop": fixed. A foreground notification (SetWinEventHook, out-of-context) re-places every box just above the desktop window when it comes forward (`desktop::watch_show_desktop`, `send_to_bottom`). Explorer lifts the desktop 30–100 ms *after* it takes focus, so a guard thread (`show-desktop-guard`, asleep otherwise) checks every 2 ms for 1 s and re-places the boxes the moment the desktop covers them. Covered time per Win+D: ~120 ms before → ~8–12 ms after the guard, ~6.5–7.6 ms after phase C (under one 60 Hz frame). Tests: `tools\test_show_desktop.ps1` (z-order), `tools\measure_show_desktop_gap.ps1` (covered time; start with the desktop *not* shown).
+- Win+D / "Show desktop": fixed. A foreground notification (SetWinEventHook, out-of-context) re-places every box just above the desktop window when it comes forward (`desktop::watch_show_desktop`, `send_to_bottom`). Explorer lifts the desktop 30–100 ms *after* it takes focus, so a guard thread (`show-desktop-guard`, asleep otherwise) checks every 2 ms for 1 s and re-places the boxes the moment the desktop covers them. Covered time per Win+D: ~120 ms before → ~8–12 ms after the guard, ~6.5–7.6 ms after phase C (under one 60 Hz frame). When the desktop already has the focus (e.g. right after clicking it), Win+D lifts it with no focus change; a second out-of-context notice (EVENT_OBJECT_FOCUS on the desktop icon list, found with `tools\probe_show_desktop_events.ps1`) now wakes the guard too (fixed 2026-11-22; before, boxes stayed hidden in that case; covered time there ~10–12 ms). Tests: `tools\test_show_desktop.ps1` (z-order), `tools\measure_show_desktop_gap.ps1` (covered time; start with the desktop *not* shown).
 - Blur slider changes the *opacity* of the system host-backdrop blur (fixed radius), so low
   values look like "less frosted" rather than a smaller radius.
 - RDP / weak GPUs: the app falls back to Windows' software DirectX (WARP); slower but the same
-  look. If Windows composition itself can't start, the worker exits with code 2 and the
-  supervisor retries with growing waits. Not done yet: a "no composition at all" fallback
-  (plain swap chain without glass) – what remains of phase D. The old GL classic path is gone.
-- While the settings window is being resized by dragging its edge, its content only redraws
-  when the mouse is released (Windows' modal sizing loop).
-- No IME yet (Chinese/Japanese input).
+  look. If Windows composition itself can't start (or `DESKBOXES_NO_COMPOSITION=1`), boxes are
+  ordinary windows with a solid dark background and tint, no glass (phase D is done). Fallback
+  chain: hardware D3D11 + glass, WARP + glass, no glass; only "no D3D device at all" exits with
+  code 2 (supervisor retries). WARP and a real "no composition" machine can't be tested on this
+  PC; only the forced no-glass mode was tested (looks right, same memory). The old GL classic
+  path is gone.
+- Fixed: the settings window now redraws live while its edge is dragged (`WM_ENTERSIZEMOVE` /
+  `WM_EXITSIZEMOVE` tracking and `runloop::pass_now()` from the window procedure).
+- Fixed: clean stop. `scripts\stop.ps1` sets the named event `Local\DeskBoxes.Quit`, waits up
+  to 5 s and only kills if needed (log: "quit signal received", no crash entry).
+- Fixed: starting an icon drag no longer loads the icon on the UI thread (the flying picture
+  loads it on its own thread), so a slow shortcut can't freeze the boxes.
+- Open: no IME yet (Chinese/Japanese input); per-monitor DPI mixing (review S8); the icon
+  loader watchdog (review S7).
 - Names: exe/data folder still `DeskBoxes`.
 - Synthetic drags (SetCursorPos + mouse_event) don't start a drag on a *rolled-up* box's title
   (same before and after phase C); untested by hand.
@@ -65,8 +78,10 @@ egui font atlases, and the icon textures.
 1. ~~Replace the eframe/glow root with a plain Win32 message loop~~ – done in phase C
    (2026-11-22): 155 → 110 MB. Remaining memory is mostly the D3D device + one composition
    swap chain per box (big boxes on a 125 % display are ~5–7 MB each) + egui font atlases +
-   icon textures, so ideas 2 and 3 are the next memory wins.
-2. Memory: load icon textures at `icon_size × pixels_per_point` instead of 2× size; free
+   icon textures, so ideas 2 (rest) and 3 are the next memory wins.
+2. ~~Memory: load icon textures at `icon_size × pixels_per_point` instead of 2× size~~ – done
+   (2026-11-22, `IconCache::get(path, px)`; sizes no longer used are dropped by
+   `IconCache::keep_only_sizes`; 110 → 89 MB together with the font change). Still open: free
    textures of items not shown in any box (LRU).
 3. Memory: share one swap chain sized per box but drop swap chains of rolled-up boxes.
 4. CPU: desktop rescan via `ReadDirectoryChangesW` instead of polling every 4 s.

@@ -61,6 +61,8 @@ struct Shared {
     close: bool,
     /// Panels only: smallest size the person can resize to (pixels, 0 = none).
     min_size: [i32; 2],
+    /// Windows' own move/resize loop is running (the person drags the window's edge).
+    sizing: bool,
 }
 
 /// Reads text from the clipboard (for Ctrl+V in text fields).
@@ -344,11 +346,26 @@ unsafe extern "system" fn wndproc(h: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LR
             }
             LRESULT(0)
         }
-        WM_DPICHANGED | WM_SIZE | WM_MOVE => {
+        0x0231 /* WM_ENTERSIZEMOVE */ | 0x0232 /* WM_EXITSIZEMOVE */ => {
             if let Ok(mut s) = shared.lock() {
-                s.dirty = true;
+                s.sizing = m == 0x0231;
             }
+            DefWindowProcW(h, m, wp, lp)
+        }
+        WM_DPICHANGED | WM_SIZE | WM_MOVE => {
+            let live = match shared.lock() {
+                Ok(mut s) => {
+                    s.dirty = true;
+                    m == WM_SIZE && s.sizing && s.can_close
+                }
+                Err(_) => false,
+            };
             wake();
+            // A panel being resized by its edge: our loop is paused (Windows runs its own), so
+            // draw now, or the content would only follow when the mouse is released.
+            if live {
+                crate::runloop::pass_now();
+            }
             DefWindowProcW(h, m, wp, lp)
         }
         _ => DefWindowProcW(h, m, wp, lp),
@@ -356,11 +373,8 @@ unsafe extern "system" fn wndproc(h: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LR
 }
 
 /// One box window.
-pub struct Host {
-    pub hwnd: HWND,
-    shared: Arc<Mutex<Shared>>,
-    swapchain: IDXGISwapChain1,
-    size: [u32; 2],
+/// The glass layers of a box (Windows' composition system).
+struct Glass {
     _target: DesktopWindowTarget,
     container: ContainerVisual,
     backdrop: SpriteVisual,
@@ -368,6 +382,15 @@ pub struct Host {
     tint_brush: CompositionColorBrush,
     content: SpriteVisual,
     geo: CompositionRoundedRectangleGeometry,
+}
+
+pub struct Host {
+    pub hwnd: HWND,
+    shared: Arc<Mutex<Shared>>,
+    swapchain: IDXGISwapChain1,
+    size: [u32; 2],
+    /// None = no-glass fallback: an ordinary window with a solid background drawn by egui.
+    glass: Option<Glass>,
     /// When egui asked to draw this box again (a timer, an animation), if it did.
     next: Option<std::time::Instant>,
     /// The look and size last given to the composition layers (set again only on change).
@@ -503,8 +526,8 @@ pub struct Look {
 }
 
 pub struct HostSystem {
-    _controller: windows::System::DispatcherQueueController,
-    compositor: Compositor,
+    _controller: Option<windows::System::DispatcherQueueController>,
+    compositor: Option<Compositor>,
     renderer: Renderer,
     pub ctx: egui::Context,
     hosts: HashMap<u64, Host>,
@@ -523,15 +546,37 @@ impl HostSystem {
     pub fn new(root_ctx: &egui::Context) -> Result<Self> {
         unsafe {
             let _ = RoInitialize(RO_INIT_SINGLETHREADED);
-            let controller = CreateDispatcherQueueController(DispatcherQueueOptions {
-                dwSize: std::mem::size_of::<DispatcherQueueOptions>() as u32,
-                threadType: DQTYPE_THREAD_CURRENT,
-                apartmentType: DQTAT_COM_NONE,
-            })?;
             let inst = GetModuleHandleW(None)?;
             let wc = WNDCLASSW { lpfnWndProc: Some(wndproc), hInstance: inst.into(), lpszClassName: w!("DeskBoxesBox"), ..Default::default() };
             RegisterClassW(&wc);
-            let compositor = Compositor::new()?;
+            // Glass needs Windows' composition system. Without it (or with
+            // DESKBOXES_NO_COMPOSITION=1, for testing) boxes still work, with solid backgrounds.
+            let composition = if std::env::var_os("DESKBOXES_NO_COMPOSITION").is_some() {
+                None
+            } else {
+                let made = (|| -> Result<(windows::System::DispatcherQueueController, Compositor)> {
+                    let controller = CreateDispatcherQueueController(DispatcherQueueOptions {
+                        dwSize: std::mem::size_of::<DispatcherQueueOptions>() as u32,
+                        threadType: DQTYPE_THREAD_CURRENT,
+                        apartmentType: DQTAT_COM_NONE,
+                    })?;
+                    Ok((controller, Compositor::new()?))
+                })();
+                match made {
+                    Ok(c) => Some(c),
+                    Err(e) => {
+                        crate::storage::log_line(&format!("Windows composition unavailable ({e:?}); boxes without glass"));
+                        None
+                    }
+                }
+            };
+            if composition.is_none() {
+                crate::storage::log_line("boxes drawn without glass (solid backgrounds)");
+            }
+            let (controller, compositor) = match composition {
+                Some((c, comp)) => (Some(c), Some(comp)),
+                None => (None, None),
+            };
             let renderer = Renderer::new()?;
             let _ = WAKE.set(root_ctx.clone());
             let ctx = egui::Context::default();
@@ -551,8 +596,11 @@ impl HostSystem {
         unsafe {
             let inst = GetModuleHandleW(None)?;
             let title = HSTRING::from(format!("DeskBoxes box {id}"));
+            // With glass the window has no surface of its own (composition draws it); without,
+            // it is an ordinary window with its own swap chain.
+            let ex = if self.compositor.is_some() { WS_EX_NOREDIRECTIONBITMAP } else { WINDOW_EX_STYLE(0) };
             let hwnd = CreateWindowExW(
-                WS_EX_NOREDIRECTIONBITMAP | WS_EX_TOOLWINDOW | WS_EX_ACCEPTFILES,
+                ex | WS_EX_TOOLWINDOW | WS_EX_ACCEPTFILES,
                 w!("DeskBoxesBox"),
                 &title,
                 WS_POPUP,
@@ -568,34 +616,19 @@ impl HostSystem {
             let shared = Arc::new(Mutex::new(Shared { no_activate: true, ..Default::default() }));
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, Arc::into_raw(shared.clone()) as isize);
             DragAcceptFiles(hwnd, true);
-            let on = BOOL(1);
-            let _ = DwmSetWindowAttribute(hwnd, DWMWA_USE_HOSTBACKDROPBRUSH, &on as *const _ as *const _, 4);
-
-            let c = &self.compositor;
-            let target = c.cast::<ICompositorDesktopInterop>()?.CreateDesktopWindowTarget(hwnd, false)?;
-            let size = Vector2 { X: rect_px[2] as f32, Y: rect_px[3] as f32 };
-            let container = c.CreateContainerVisual()?;
-            let backdrop = c.CreateSpriteVisual()?;
-            backdrop.SetBrush(&c.CreateHostBackdropBrush()?)?;
-            let tint_brush = c.CreateColorBrushWithColor(Color { A: 0, R: 0, G: 0, B: 0 })?;
-            let tint = c.CreateSpriteVisual()?;
-            tint.SetBrush(&tint_brush)?;
-            let swapchain = self.renderer.create_swapchain(rect_px[2] as u32, rect_px[3] as u32)?;
-            let surface = c.cast::<ICompositorInterop>()?.CreateCompositionSurfaceForSwapChain(&swapchain)?;
-            let content = c.CreateSpriteVisual()?;
-            content.SetBrush(&c.CreateSurfaceBrushWithSurface(&surface)?)?;
-            for v in [&backdrop, &tint, &content] {
-                v.SetSize(size)?;
-            }
-            container.SetSize(size)?;
-            let kids = container.Children()?;
-            kids.InsertAtTop(&backdrop)?;
-            kids.InsertAtTop(&tint)?;
-            kids.InsertAtTop(&content)?;
-            let geo = c.CreateRoundedRectangleGeometry()?;
-            geo.SetSize(size)?;
-            container.SetClip(&c.CreateGeometricClipWithGeometry(&geo)?)?;
-            target.SetRoot(&container)?;
+            let made = match &self.compositor {
+                Some(c) => Self::glass_layers(c, &self.renderer, hwnd, rect_px).map(|(sc, g)| (sc, Some(g))),
+                None => self.renderer.create_swapchain_for_hwnd(hwnd, rect_px[2].max(1) as u32, rect_px[3].max(1) as u32).map(|sc| (sc, None)),
+            };
+            let (swapchain, glass) = match made {
+                Ok(m) => m,
+                Err(e) => {
+                    SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+                    let _ = DestroyWindow(hwnd);
+                    drop(Arc::from_raw(Arc::as_ptr(&shared)));
+                    return Err(e);
+                }
+            };
             let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
             crate::desktop::register_box(hwnd.0 as isize);
             crate::desktop::send_to_bottom(hwnd.0 as isize);
@@ -604,17 +637,48 @@ impl HostSystem {
                 shared,
                 swapchain,
                 size: [rect_px[2].max(1) as u32, rect_px[3].max(1) as u32],
-                _target: target,
-                container,
-                backdrop,
-                tint,
-                tint_brush,
-                content,
-                geo,
+                glass,
                 next: None,
                 applied: None,
             })
         }
+    }
+
+    /// The glass layers for a box window: frosted backdrop, tint, and the contents' swap chain,
+    /// clipped to a rounded rectangle.
+    unsafe fn glass_layers(c: &Compositor, renderer: &Renderer, hwnd: HWND, rect_px: [i32; 4]) -> Result<(IDXGISwapChain1, Glass)> {
+        let on = BOOL(1);
+        let _ = DwmSetWindowAttribute(hwnd, DWMWA_USE_HOSTBACKDROPBRUSH, &on as *const _ as *const _, 4);
+        let target = c.cast::<ICompositorDesktopInterop>()?.CreateDesktopWindowTarget(hwnd, false)?;
+        let size = Vector2 { X: rect_px[2] as f32, Y: rect_px[3] as f32 };
+        let container = c.CreateContainerVisual()?;
+        let backdrop = c.CreateSpriteVisual()?;
+        backdrop.SetBrush(&c.CreateHostBackdropBrush()?)?;
+        let tint_brush = c.CreateColorBrushWithColor(Color { A: 0, R: 0, G: 0, B: 0 })?;
+        let tint = c.CreateSpriteVisual()?;
+        tint.SetBrush(&tint_brush)?;
+        let swapchain = renderer.create_swapchain(rect_px[2] as u32, rect_px[3] as u32)?;
+        let surface = c.cast::<ICompositorInterop>()?.CreateCompositionSurfaceForSwapChain(&swapchain)?;
+        let content = c.CreateSpriteVisual()?;
+        content.SetBrush(&c.CreateSurfaceBrushWithSurface(&surface)?)?;
+        for v in [&backdrop, &tint, &content] {
+            v.SetSize(size)?;
+        }
+        container.SetSize(size)?;
+        let kids = container.Children()?;
+        kids.InsertAtTop(&backdrop)?;
+        kids.InsertAtTop(&tint)?;
+        kids.InsertAtTop(&content)?;
+        let geo = c.CreateRoundedRectangleGeometry()?;
+        geo.SetSize(size)?;
+        container.SetClip(&c.CreateGeometricClipWithGeometry(&geo)?)?;
+        target.SetRoot(&container)?;
+        Ok((swapchain, Glass { _target: target, container, backdrop, tint, tint_brush, content, geo }))
+    }
+
+    /// Boxes have Windows' frosted glass (false = no-glass fallback: solid backgrounds).
+    pub fn has_glass(&self) -> bool {
+        self.compositor.is_some()
     }
 
     /// After the graphics device was lost: a new device, new box windows and a fresh egui
@@ -832,17 +896,19 @@ impl HostSystem {
             }
             if changed {
                 // Each change makes Windows recompose the box: only send what changed.
-                let size = Vector2 { X: w as f32, Y: ht as f32 };
-                let _ = h.container.SetSize(size);
-                let _ = h.backdrop.SetSize(size);
-                let _ = h.tint.SetSize(size);
-                let _ = h.content.SetSize(size);
-                let _ = h.geo.SetSize(size);
-                let r = look.corner_points * ppp;
-                let _ = h.geo.SetCornerRadius(Vector2 { X: r, Y: r });
-                let _ = h.tint_brush.SetColor(Color { A: look.tint[3], R: look.tint[0], G: look.tint[1], B: look.tint[2] });
-                let _ = h.backdrop.SetOpacity(look.blur.clamp(0.0, 1.0));
-                let _ = h.backdrop.SetIsVisible(look.blur > 0.0);
+                if let Some(g) = &h.glass {
+                    let size = Vector2 { X: w as f32, Y: ht as f32 };
+                    let _ = g.container.SetSize(size);
+                    let _ = g.backdrop.SetSize(size);
+                    let _ = g.tint.SetSize(size);
+                    let _ = g.content.SetSize(size);
+                    let _ = g.geo.SetSize(size);
+                    let r = look.corner_points * ppp;
+                    let _ = g.geo.SetCornerRadius(Vector2 { X: r, Y: r });
+                    let _ = g.tint_brush.SetColor(Color { A: look.tint[3], R: look.tint[0], G: look.tint[1], B: look.tint[2] });
+                    let _ = g.backdrop.SetOpacity(look.blur.clamp(0.0, 1.0));
+                    let _ = g.backdrop.SetIsVisible(look.blur > 0.0);
+                }
                 h.applied = Some(applied);
             }
 

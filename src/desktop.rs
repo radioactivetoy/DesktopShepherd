@@ -239,6 +239,45 @@ pub fn set_low_priority(on: bool) {
     }
 }
 
+/// Listens for a polite "please quit" request (scripts\stop.ps1 sets the named event
+/// `Local\DeskBoxes.Quit`) and calls `on_quit` once when it arrives. The helper thread sleeps
+/// inside Windows until then, so it costs no CPU. Call once, from the worker.
+pub fn watch_quit_signal(on_quit: impl Fn() + Send + 'static) {
+    #[cfg(windows)]
+    unsafe {
+        use windows::core::w;
+        use windows::Win32::Foundation::{BOOL, HANDLE};
+        use windows::Win32::System::Threading::{CreateEventW, ResetEvent, WaitForSingleObject, INFINITE};
+        // Manual-reset event, not signalled at the start.
+        let ev = match CreateEventW(None, BOOL(1), BOOL(0), w!("Local\\DeskBoxes.Quit")) {
+            Ok(h) => h,
+            Err(e) => {
+                storage_log(&format!("quit signal: could not create event: {e}"));
+                return;
+            }
+        };
+        // Clear any request left over from before this start.
+        let _ = ResetEvent(ev);
+        // Raw handles are not Send; pass the number and rebuild it in the thread.
+        // The handle is kept open for the whole run on purpose.
+        let raw = ev.0 as isize;
+        let spawned = std::thread::Builder::new().name("quit-signal".into()).spawn(move || {
+            let h = HANDLE(raw as *mut _);
+            if WaitForSingleObject(h, INFINITE).0 == 0 {
+                storage_log("quit signal received");
+                on_quit();
+            }
+        });
+        if let Err(e) = spawned {
+            storage_log(&format!("quit signal: could not start thread: {e}"));
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = on_quit;
+    }
+}
+
 /// The main monitor's size in screen points (pixels divided by the display scale).
 pub fn primary_screen_points() -> [f32; 2] {
     #[cfg(windows)]
@@ -561,6 +600,41 @@ pub fn watch_show_desktop() {
             WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS,
         );
         storage_log(&format!("show-desktop watch: {:?}", hook.0));
+
+        // When the desktop already has the focus (e.g. right after a click on it), Win+D lifts it
+        // without any change of focused window, so the notice above never comes. Explorer then
+        // only moves the keyboard focus to the desktop's icon list: watch for that too.
+        unsafe extern "system" fn focus_cb(_h: HWINEVENTHOOK, _ev: u32, hwnd: HWND, _o: i32, _c: i32, _t: u32, _ms: u32) {
+            use windows::Win32::UI::WindowsAndMessaging::{GetAncestor, GA_ROOT};
+            let class_of = |h: HWND| {
+                let mut buf = [0u16; 32];
+                let n = GetClassNameW(h, &mut buf);
+                String::from_utf16_lossy(&buf[..n.max(0) as usize])
+            };
+            let class = class_of(hwnd);
+            if class != "SysListView32" && class != "SHELLDLL_DefView" {
+                return;
+            }
+            let root = class_of(GetAncestor(hwnd, GA_ROOT));
+            if root != "Progman" && root != "WorkerW" {
+                return; // a list view in some other program
+            }
+            if let Some(tx) = GUARD.get() {
+                if let Ok(tx) = tx.lock() {
+                    let _ = tx.send(());
+                }
+            }
+        }
+        let focus_hook = SetWinEventHook(
+            windows::Win32::UI::WindowsAndMessaging::EVENT_OBJECT_FOCUS,
+            windows::Win32::UI::WindowsAndMessaging::EVENT_OBJECT_FOCUS,
+            None,
+            Some(focus_cb),
+            0,
+            0,
+            WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS,
+        );
+        storage_log(&format!("show-desktop focus watch: {:?}", focus_hook.0));
     }
 }
 

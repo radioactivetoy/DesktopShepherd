@@ -18,15 +18,17 @@ changing anything. The owner does not code: explain results in plain words, no j
    and CPU before/after big changes (see "Measuring").
 3. **No network, no web engine.** No telemetry, no online features.
 4. **Never `cargo update`.** Pinned crates keep the GNU build working (see `docs/BUILDING.md`).
-5. Keep the software-DirectX (WARP) fallback working (`d3d::Renderer::new` tries the hardware
-   device first, then WARP). Never add GL, a web engine or eframe back.
+5. Keep the fallback chain working: hardware DirectX + glass, then software DirectX (WARP) +
+   glass (`d3d::Renderer::new`), then no glass (plain windows, solid dark background; test with
+   env var `DESKBOXES_NO_COMPOSITION=1`). Never add GL, a web engine or eframe back.
 6. Saved layout (`model.rs`) must stay backward compatible: new fields use `#[serde(default)]`;
    breaking changes get a migration in `app.rs` (`version` field, see v2/v3).
 
 ## Workflow
 
 ```powershell
-.\scripts\stop.ps1            # stop worker then supervisor (exe is locked while running)
+.\scripts\stop.ps1            # asks the worker to quit cleanly (waits up to 5 s, kills only if
+                              # needed), then stops the supervisor (exe is locked while running)
 cargo build
 Start-Process .\target\debug\deskboxes.exe
 ```
@@ -52,8 +54,9 @@ Get-CimInstance Win32_Process -Filter "Name='deskboxes.exe'" | % {
   "{0} ws={1:N0}MB cpu={2:N2}%" -f $_.CommandLine, ($p.WorkingSet64/1MB), (($b-$a)/10000/[Environment]::ProcessorCount*100) }
 ```
 
-Current baseline (after phase C): worker ~110 MB working set (~100 MB private), ~0.01 % CPU
-idle; supervisor ~2 MB private.
+Current baseline: worker ~89 MB working set (~75 MB private), ~0.01 % CPU idle; supervisor
+~2 MB private. (A release build is no smaller, so the debug build, which is opt-level 3, is fine
+for daily use.)
 
 ## Gotchas learned the hard way
 
@@ -63,7 +66,8 @@ idle; supervisor ~2 MB private.
   path. The GL path and eframe are gone (phase C), so this no longer matters.
 - There is no main window any more. `src/runloop.rs` is the program's own message loop (hidden
   window `DeskBoxesMain`, never shown). Other threads wake it with `runloop::wake_after` /
-  WM_APP; quit with `runloop::request_quit()`.
+  WM_APP; quit with `runloop::request_quit()` (the stop script reaches it through the named
+  event `Local\DeskBoxes.Quit`, `desktop::watch_quit_signal`).
 - App-driven box moves (relayout, bring back on screen, restore backup) must go through
   `DeskApp::place_box` / `place_all_boxes`, otherwise the DirectX windows don't move.
 - Moving boxes by re-rendering every frame caused jitter/flashes; boxes move themselves via

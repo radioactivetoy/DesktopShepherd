@@ -33,6 +33,23 @@ const WM_APP_WAKE: u32 = WM_APP + 1;
 thread_local! {
     /// The app, reachable from the hidden window's procedure for the shutdown save.
     static APP: RefCell<Option<DeskApp>> = const { RefCell::new(None) };
+    /// The root (scheduling) context, for `pass_now`.
+    static ROOT: RefCell<Option<egui::Context>> = const { RefCell::new(None) };
+}
+
+/// Runs one pass right away, from inside a window procedure. Used while the person resizes
+/// the settings window: Windows then runs its own message loop and ours is paused, so without
+/// this the window would only redraw when the mouse is released. Does nothing if a pass is
+/// already running (no re-entry).
+pub fn pass_now() {
+    let Some(root) = ROOT.with(|r| r.borrow().clone()) else { return };
+    APP.with(|a| {
+        if let Ok(mut a) = a.try_borrow_mut() {
+            if let Some(app) = a.as_mut() {
+                let _ = root.run(egui::RawInput::default(), |ctx| app.update(ctx));
+            }
+        }
+    });
 }
 
 fn post_wake() {
@@ -115,12 +132,17 @@ pub fn run(screenshot: Option<PathBuf>) -> i32 {
         WAKE_HWND.store(hwnd.0 as isize, Ordering::SeqCst);
 
         let root = root_context();
+        // The root context only schedules and never draws text: no fonts (saves their memory).
+        root.set_fonts(egui::FontDefinitions::empty());
         let Some(app) = DeskApp::new(&root, None) else {
             WAKE_HWND.store(0, Ordering::SeqCst);
             let _ = DestroyWindow(hwnd);
             return crate::EXIT_START_FAILED;
         };
         APP.with(|a| *a.borrow_mut() = Some(app));
+        ROOT.with(|r| *r.borrow_mut() = Some(root.clone()));
+        // scripts\stop.ps1 asks for a clean quit through a named event.
+        crate::desktop::watch_quit_signal(request_quit);
         wake_after(Duration::ZERO);
 
         let mut next_pass: Option<Instant> = None;

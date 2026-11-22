@@ -11,7 +11,10 @@ deskboxes.exe            supervisor (main.rs: supervise)
   worker exits (quit, crash, kill) it restores Windows' desktop icons. Non-zero exit → restart
   with growing waits for failures in a row (2, 5, 15, 30, 60, 120, then every 300 s; a run of
   ≥ 60 s resets them). Only exit code 0 (a real quit) stops the supervisor. A failed start
-  (for example composition cannot start at all) exits with code 2 and is retried the same way.
+  (no DirectX device at all) exits with code 2 and is retried the same way.
+- Clean stop: the worker waits on a named event `Local\DeskBoxes.Quit`
+  (`desktop::watch_quit_signal`, hooked to `runloop::request_quit`). `scripts\stop.ps1` sets
+  it, waits up to 5 s and only force-kills if the worker does not leave.
 - The worker also has a panic hook that logs and restores icons.
 - Log: `%APPDATA%\DeskBoxes\log.txt`. Layout: `%APPDATA%\DeskBoxes\layout.json` (written via
   `.tmp` + rename; rolling copies in `backups\`).
@@ -28,7 +31,12 @@ There is no eframe, no GL and no main window to draw on any more.
 - The loop sleeps in `MsgWaitForMultipleObjectsEx` until a message arrives or the next due
   pass. Idle = blocked in the wait = 0 % CPU.
 - A "root" `egui::Context` is kept only for scheduling: its repaint callback calls
-  `runloop::wake_after`. It draws nothing (the one exception is `--screenshot`).
+  `runloop::wake_after`. It draws nothing (the one exception is `--screenshot`), so it has no
+  fonts (`FontDefinitions::empty()`); screenshot mode still gets fonts.
+- The settings window can be resized by its edge with live redraw: `host.rs` tracks
+  `WM_ENTERSIZEMOVE` / `WM_EXITSIZEMOVE` per panel, and on `WM_SIZE` during that time calls
+  `runloop::pass_now()`, which runs one pass right inside the window procedure (a `RefCell`
+  `try_borrow` stops it from re-entering).
 - Quit = `runloop::request_quit()` (exit code 0, so the supervisor stops).
 
 ## Windows inside the worker
@@ -64,9 +72,14 @@ There is no eframe, no GL and no main window to draw on any more.
     DirectX windows.
   - **GPU fallback**: `d3d::Renderer::new` tries the hardware device first, then
     `D3D_DRIVER_TYPE_WARP` (Windows' software DirectX; logged). WARP is slower but fine for
-    small boxes and covers weak GPUs and Remote Desktop. If composition itself cannot start,
-    the worker exits with code 2 and the supervisor retries with growing waits. Not done yet
-    (rest of phase D): a fallback for "no composition at all" (plain swap chain, no glass).
+    small boxes and covers weak GPUs and Remote Desktop.
+  - **No-glass fallback**: if Windows' composition cannot start (or env var
+    `DESKBOXES_NO_COMPOSITION=1`, for testing), boxes are ordinary windows with their own flip
+    swap chain; egui draws a solid dark background and the tint (`HostSystem::has_glass`,
+    `Host.glass: Option<Glass>`, `UiState.glass`). Chain: hardware D3D11 + glass, WARP + glass,
+    no glass. Only "no D3D device at all" exits with code 2 (the supervisor retries with growing
+    waits). WARP and a real "no composition" machine are not testable on this PC; forced
+    no-glass mode was tested.
   - Device lost (`DXGI_ERROR_DEVICE_REMOVED/RESET`, e.g. driver update or GPU reset):
     `HostSystem::lost` is set, `app.rs` calls `HostSystem::recover()` (new renderer, fresh
     egui context, box windows recreated); retries every 2 s if it fails.
@@ -81,10 +94,11 @@ There is no eframe, no GL and no main window to draw on any more.
 |---|---|
 | main/UI | the loop in `runloop.rs`, egui passes, box frames, D3D rendering |
 | desktop scan | re-reads desktop folders every `rescan_secs` (default 4) |
-| icon loader | SHGetFileInfo/IShellItemImageFactory → textures (cached in `icons.rs`) |
+| icon loader | SHGetFileInfo/IShellItemImageFactory → textures (cached in `icons.rs`); icons are loaded at the size shown in real pixels (`IconCache::get(path, px)`, icon size × display scale), and textures of sizes no longer used are dropped (`IconCache::keep_only_sizes`, called from `app.rs` when the set of sizes changes) |
 | icon hide/show | toggles the desktop ListView asynchronously (never blocks on Explorer) |
 | move helper | `host::move_with_mouse`, alive only during a box drag |
-| flying icon | topmost layered window during icon drag (`ghost::begin_icon_drag`) |
+| flying icon | topmost layered window during icon drag (`ghost::begin_icon_drag(path, px) -> DragImage`); the picture loads its icon on its own thread and can be cancelled with `DragImage::destroy`, so a slow shortcut (network drive) cannot freeze the boxes |
+| quit watcher | waits on the named event `Local\DeskBoxes.Quit` (`desktop::watch_quit_signal`) |
 | show-desktop guard | asleep except for ~1 s after Win+D (see STATUS) |
 
 Idle the UI thread sleeps: it only wakes on input, a scan change, a widget timer (clock: once
@@ -102,8 +116,8 @@ a second) or a wake-up posted by another thread.
 | `comp_trial.rs` | stand-alone composition diagnostic (`--composition-trial`) |
 | `desktop.rs` | Win32 helpers: desktop scan, open item, hide/show icons, autostart Run key, single instance, monitors, work areas, z-order, rounding |
 | `fence_view.rs` | sorting/grid layout of items inside a box |
-| `ghost.rs` | only the flying icon picture while dragging icons between boxes (`begin_icon_drag` / `destroy`) and `primary_button_down()` |
-| `icons.rs` | icon cache |
+| `ghost.rs` | only the flying icon picture while dragging icons between boxes (`begin_icon_drag` returns a `DragImage`; `DragImage::destroy`) and `primary_button_down()` |
+| `icons.rs` | icon cache (`get(path, px)`, `keep_only_sizes`) |
 | `model.rs` | saved data types: `Layout`, `Fence`, `Tab`, `Settings`, `CategoryRule`, widgets config |
 | `storage.rs` | load/save/backups/log |
 | `widgets.rs` | widget registry (clock, note, sketch) – add new widgets here |
