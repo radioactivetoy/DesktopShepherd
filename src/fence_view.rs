@@ -307,8 +307,11 @@ pub fn paint_tabs(painter: &egui::Painter, fence: &Fence, strip: Rect, names: &[
 
 pub fn caption_galley(painter: &egui::Painter, text: &str, width: f32, font: FontId) -> std::sync::Arc<egui::Galley> {
     let mut job = LayoutJob::simple(text.to_string(), font, Color32::WHITE, width);
+    // Two lines at most, broken between words (a word too long for a whole line is still split);
+    // a name longer than that ends with "…".
     job.wrap.max_rows = 2;
-    job.wrap.break_anywhere = true;
+    job.wrap.break_anywhere = false;
+    job.wrap.overflow_character = Some('…');
     job.halign = Align::Center;
     painter.layout_job(job)
 }

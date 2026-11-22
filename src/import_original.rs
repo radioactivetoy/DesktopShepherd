@@ -120,8 +120,3 @@ pub fn boxes_from_original(current: &crate::model::Layout) -> Option<crate::mode
     }
     (added > 0).then_some(out)
 }
-
-/// The original organizer's layout file exists on this computer.
-pub fn original_available() -> bool {
-    original_dir().map(|d| d.join("cache").join("desk.cache").is_file()).unwrap_or(false)
-}

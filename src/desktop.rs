@@ -121,6 +121,8 @@ pub fn open_item(path: &str) {
             use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE};
             use windows::Win32::UI::Shell::ShellExecuteW;
             use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+            // The program being started may come to the front (it would otherwise open behind).
+            let _ = windows::Win32::UI::WindowsAndMessaging::AllowSetForegroundWindow(windows::Win32::UI::WindowsAndMessaging::ASFW_ANY);
             let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
             let file = HSTRING::from(path.as_str());
             let dir = Path::new(&path).parent().map(|p| HSTRING::from(p.as_os_str())).unwrap_or_default();
@@ -135,6 +137,9 @@ pub fn open_item(path: &str) {
             if (r.0 as isize) <= 32 {
                 crate::storage::log_line(&format!("could not open {path}"));
             }
+            // Then make sure the boxes are under it, as it settles.
+            RESTACK_ASKED.store(true, std::sync::atomic::Ordering::SeqCst);
+            crate::runloop::wake_after(std::time::Duration::ZERO);
         }
         #[cfg(not(windows))]
         {
@@ -1052,8 +1057,17 @@ pub fn focus_desktop() {
     #[cfg(windows)]
     unsafe {
         use windows::core::{w, PCWSTR};
-        use windows::Win32::UI::WindowsAndMessaging::{FindWindowW, SetForegroundWindow};
+        use windows::Win32::System::Threading::GetCurrentProcessId;
+        use windows::Win32::UI::WindowsAndMessaging::{FindWindowW, GetForegroundWindow, GetWindowThreadProcessId, SetForegroundWindow};
         if foreground_is_desktop() {
+            return;
+        }
+        // Only take the keyboard back from a window of ours (a sticky note, the search box…):
+        // another program in front stays as it is (activating the desktop over it could also
+        // lift the desktop, and the boxes with it, above that program).
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(GetForegroundWindow(), Some(&mut pid));
+        if pid != GetCurrentProcessId() {
             return;
         }
         if let Ok(p) = FindWindowW(w!("Progman"), PCWSTR::null()) {
@@ -1333,4 +1347,11 @@ pub fn pick_file(save: bool, title: &str, name: &str) -> Option<String> {
         let _ = (save, title, name);
         None
     }
+}
+
+/// A program was just started from a box: the app puts the boxes back under the windows soon.
+static RESTACK_ASKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn take_restack_request() -> bool {
+    RESTACK_ASKED.swap(false, std::sync::atomic::Ordering::SeqCst)
 }

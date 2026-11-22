@@ -43,8 +43,6 @@ enum Act {
     DeleteFence(u64),
     OpenManager,
     RestoreBackup(PathBuf),
-    /// Replace the boxes with the ones from the original organizer's saved layout.
-    ImportOriginal,
     /// Give every box the look of this one (Personalize > Apply this look to all boxes).
     ApplyLookToAll(u64),
     /// Open the Personalize window for this box.
@@ -738,16 +736,6 @@ impl DeskApp {
                         self.backups = storage::list_backups();
                     }
                 }
-                Act::ImportOriginal => {
-                    if let Some(mut l) = crate::import_original::boxes_from_original(&self.layout) {
-                        storage::backup_now(&self.layout);
-                        sanitize(&mut l);
-                        self.layout = l;
-                        self.place_all_boxes();
-                        self.mark_dirty();
-                        self.apply_icon_hiding();
-                    }
-                }
                 Act::ItemMenu { from, path } => {
                     let key = path.to_lowercase();
                     let mut paths = vec![path.clone()];
@@ -1191,6 +1179,11 @@ impl DeskApp {
 
         if self.persist {
             // Displays changed: Windows told us at once (WM_DISPLAYCHANGE), or the watcher noticed.
+            #[cfg(windows)]
+            if desktop::take_restack_request() {
+                let now = Instant::now();
+                self.restack_at.extend([now + Duration::from_millis(700), now + Duration::from_millis(2500)]);
+            }
             #[cfg(windows)]
             if crate::runloop::take_explorer_restarted() {
                 // Explorer restarted: a new desktop window. Put the boxes back just above it as it
