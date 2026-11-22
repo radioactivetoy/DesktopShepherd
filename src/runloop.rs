@@ -61,6 +61,40 @@ pub const SEARCH_HOTKEYS: &[(&str, u32, u32)] = &[
 /// The hide/show-all-boxes shortcut was pressed.
 static HIDE_REQUESTED: AtomicBool = AtomicBool::new(false);
 
+/// Box shortcuts pressed (1..9 = Ctrl+Alt+F2..F10; F1 is often taken by other tools) and the ones registered now.
+static BOX_KEYS: Mutex<Vec<u8>> = Mutex::new(Vec::new());
+static BOX_KEYS_SET: Mutex<Vec<u8>> = Mutex::new(Vec::new());
+const BOX_KEY_ID: i32 = 20;
+
+/// Box shortcuts pressed since the last call.
+pub fn take_box_keys() -> Vec<u8> {
+    BOX_KEYS.lock().map(|mut k| std::mem::take(&mut *k)).unwrap_or_default()
+}
+
+/// Registers Ctrl+Alt+F2..F10 for the given numbers (1..9) and gives back the others. (Not
+/// Ctrl+Alt+digits: on many keyboards that is AltGr, which types @, # and |.)
+pub fn set_box_hotkeys(nums: &[u8]) {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{RegisterHotKey, UnregisterHotKey, HOT_KEY_MODIFIERS};
+    let h = WAKE_HWND.load(Ordering::SeqCst);
+    if h == 0 {
+        return;
+    }
+    let hwnd = HWND(h as *mut _);
+    let Ok(mut set) = BOX_KEYS_SET.lock() else { return };
+    unsafe {
+        for n in set.drain(..) {
+            let _ = UnregisterHotKey(hwnd, BOX_KEY_ID + n as i32);
+        }
+        for &n in nums.iter().filter(|n| (1..=9).contains(*n)) {
+            if RegisterHotKey(hwnd, BOX_KEY_ID + n as i32, HOT_KEY_MODIFIERS(0x0002 | 0x0001 | 0x4000), 0x70 + n as u32).is_ok() {
+                set.push(n);
+            } else {
+                crate::storage::log_line(&format!("box shortcut Ctrl+Alt+F{} is already used by another program", n + 1));
+            }
+        }
+    }
+}
+
 /// Page switches asked for with Ctrl+Alt+PageDown (+1) / PageUp (-1) since the last pass.
 static PAGE_STEP: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
 
@@ -286,7 +320,11 @@ unsafe extern "system" fn main_wndproc(h: HWND, m: u32, wp: WPARAM, lp: LPARAM) 
                 }
                 return LRESULT(0);
             }
-            if id == 3 || id == 4 {
+            if (BOX_KEY_ID + 1..=BOX_KEY_ID + 9).contains(&id) {
+                if let Ok(mut k) = BOX_KEYS.lock() {
+                    k.push((id - BOX_KEY_ID) as u8);
+                }
+            } else if id == 3 || id == 4 {
                 PAGE_STEP.fetch_add(if id == 3 { 1 } else { -1 }, Ordering::SeqCst);
             } else if id == 2 {
                 HIDE_REQUESTED.store(true, Ordering::SeqCst);

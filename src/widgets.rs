@@ -46,6 +46,7 @@ pub const REGISTRY: &[WidgetKind] = &[
     WidgetKind { id: "calendar", label: "Calendar", icon: '\u{E787}', default_size: [290.0, 270.0], make: || Box::new(Calendar) },
     WidgetKind { id: "todo", label: "To-do list", icon: '\u{E73A}', default_size: [290.0, 280.0], make: || Box::new(Todo) },
     WidgetKind { id: "agenda", label: "Agenda (online calendars)", icon: '\u{E8BF}', default_size: [320.0, 300.0], make: || Box::new(Agenda) },
+    WidgetKind { id: "picture", label: "Picture frame", icon: '\u{EB9F}', default_size: [320.0, 240.0], make: || Box::new(Picture) },
     // Drawn by the box itself (it needs the desktop's icons): see `search_widget` in app.rs.
     WidgetKind { id: "search", label: "Search box", icon: '\u{E721}', default_size: [380.0, 280.0], make: || Box::new(Nothing) },
 ];
@@ -777,4 +778,160 @@ fn agenda_edit(ui: &mut Ui, data: &mut Value, urls: &[String], cals: &[crate::ag
             ui.label(egui::RichText::new("Calendars are downloaded every 30 minutes while this widget is shown. This is the only part of DesktopShepherd that uses the internet.").size(11.0).color(Color32::from_gray(150)));
     });
     out.changed
+}
+
+// ---- Picture frame --------------------------------------------------------------------------
+
+/// Pictures being read or ready, by file: decoded on a helper thread (a big photo would freeze
+/// the boxes), made at most 1600 px wide or tall, then turned into a texture once and dropped.
+static PICTURES: std::sync::Mutex<Option<std::collections::HashMap<String, Result<Option<egui::ColorImage>, String>>>> = std::sync::Mutex::new(None);
+/// A picture chosen in Windows' file picker (opened from the settings window), not yet used.
+static PICKED_PICTURE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+static PICKING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn start_picture_load(path: String) {
+    let p = path.clone();
+    let spawned = std::thread::Builder::new().name("picture".into()).spawn(move || {
+        let result = std::panic::catch_unwind(|| -> Result<egui::ColorImage, String> {
+            let img = image::open(&p).map_err(|e| format!("can't open the picture ({e})"))?;
+            let img = if img.width().max(img.height()) > 1600 { img.thumbnail(1600, 1600) } else { img };
+            let rgba = img.to_rgba8();
+            let size = [rgba.width() as usize, rgba.height() as usize];
+            Ok(egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_raw()))
+        })
+        .unwrap_or_else(|_| Err("can't read that picture".to_string()));
+        if let Ok(mut g) = PICTURES.lock() {
+            g.get_or_insert_with(Default::default).insert(p, result.map(Some));
+        }
+        #[cfg(windows)]
+        crate::runloop::wake_after(Duration::ZERO);
+    });
+    if spawned.is_err() {
+        if let Ok(mut g) = PICTURES.lock() {
+            g.get_or_insert_with(Default::default).remove(&path);
+        }
+    }
+}
+
+struct Picture;
+
+impl DeskWidget for Picture {
+    fn ui(&self, ui: &mut Ui, data: &mut Value) -> WidgetOutput {
+        let mut out = WidgetOutput::default();
+        let path = data.get("path").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let fill = data_bool(data, "fill", false);
+        let rect = ui.max_rect();
+        if path.is_empty() {
+            ui.add_space(6.0);
+            ui.label(egui::RichText::new("Right-click here and choose \"Widget settings…\" to pick a picture.").size(13.0).color(Color32::from_gray(220)));
+            return out;
+        }
+        // The texture, once made, lives in this box's memory; the decoded copy is dropped.
+        let tid = egui::Id::new(("picture-tex", &path));
+        let tex: Option<egui::TextureHandle> = ui.ctx().data(|d| d.get_temp(tid));
+        let tex = match tex {
+            Some(t) => Some(t),
+            None => {
+                let mut error = None;
+                let mut made = None;
+                if let Ok(mut g) = PICTURES.lock() {
+                    let map = g.get_or_insert_with(Default::default);
+                    match map.get_mut(&path) {
+                        None => {
+                            map.insert(path.clone(), Ok(None));
+                            start_picture_load(path.clone());
+                        }
+                        Some(Ok(slot)) => {
+                            if let Some(img) = slot.take() {
+                                let t = ui.ctx().load_texture(format!("picture:{path}"), img, egui::TextureOptions::LINEAR);
+                                ui.ctx().data_mut(|d| d.insert_temp(tid, t.clone()));
+                                map.remove(&path);
+                                made = Some(t);
+                            }
+                        }
+                        Some(Err(e)) => error = Some(e.clone()),
+                    }
+                }
+                if let Some(e) = error {
+                    ui.label(egui::RichText::new(format!("⚠ {e}")).size(12.5).color(Color32::from_rgb(255, 190, 130)));
+                    return out;
+                }
+                if made.is_none() {
+                    out.repaint_after = Some(Duration::from_millis(300)); // still being read
+                }
+                made
+            }
+        };
+        let Some(tex) = tex else { return out };
+        let [tw, th] = tex.size().map(|v| v.max(1) as f32);
+        let (rw, rh) = (rect.width().max(1.0), rect.height().max(1.0));
+        let full = egui::Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
+        let (draw, uv) = if fill {
+            // Fill the box, cropping the picture's edges.
+            let scale = (rw / tw).max(rh / th);
+            let (vw, vh) = (rw / (tw * scale), rh / (th * scale));
+            (rect, egui::Rect::from_center_size(Pos2::new(0.5, 0.5), egui::vec2(vw, vh)))
+        } else {
+            // The whole picture, as big as fits.
+            let scale = (rw / tw).min(rh / th);
+            (egui::Rect::from_center_size(rect.center(), egui::vec2(tw * scale, th * scale)), full)
+        };
+        ui.painter().with_clip_rect(rect).image(tex.id(), draw, uv, Color32::WHITE);
+        let _ = full;
+        out
+    }
+
+    fn has_settings(&self) -> bool {
+        true
+    }
+
+    fn settings(&self, ui: &mut Ui, data: &mut Value) -> bool {
+        let mut changed = false;
+        if let Some(p) = PICKED_PICTURE.lock().ok().and_then(|mut p| p.take()) {
+            data["path"] = json!(p);
+            changed = true;
+        }
+        let mut path = data.get("path").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        ui.label(egui::RichText::new("Picture (PNG or JPEG)").strong());
+        ui.horizontal(|ui| {
+            if ui.add(egui::TextEdit::singleline(&mut path).hint_text("C:\\Users\\…\\Pictures\\photo.jpg").desired_width(420.0)).changed() {
+                data["path"] = json!(path.trim());
+                changed = true;
+            }
+            let picking = PICKING.load(std::sync::atomic::Ordering::SeqCst);
+            if ui.add_enabled(!picking, egui::Button::new("Choose…")).clicked() {
+                PICKING.store(true, std::sync::atomic::Ordering::SeqCst);
+                // Windows' file picker waits for the person: on its own thread, never the boxes'.
+                let _ = std::thread::Builder::new().name("picture-picker".into()).spawn(|| {
+                    let picked = crate::desktop::pick_picture();
+                    if let (Some(p), Ok(mut slot)) = (picked, PICKED_PICTURE.lock()) {
+                        *slot = Some(p);
+                    }
+                    PICKING.store(false, std::sync::atomic::Ordering::SeqCst);
+                    #[cfg(windows)]
+                    crate::runloop::wake_after(Duration::ZERO);
+                });
+            }
+        });
+        let mut fill = data_bool(data, "fill", false);
+        ui.horizontal(|ui| {
+            if ui.radio(!fill, "Show the whole picture").clicked() && fill {
+                fill = false;
+                changed = true;
+            }
+            if ui.radio(fill, "Fill the box (edges may be cut)").clicked() && !fill {
+                fill = true;
+                changed = true;
+            }
+        });
+        data["fill"] = json!(fill);
+        if changed {
+            // Read the (new) file again on the next draw.
+            if let Ok(mut g) = PICTURES.lock() {
+                g.get_or_insert_with(Default::default).clear();
+            }
+            ui.ctx().request_repaint();
+        }
+        changed
+    }
 }

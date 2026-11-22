@@ -50,6 +50,8 @@ enum Act {
     Personalize(u64),
     /// Open the settings window of this widget box on its "Widget settings" tab.
     WidgetSettings(u64),
+    /// Give this box a keyboard shortcut (0 = none); no other box keeps the same one.
+    SetBoxHotkey(u64, u8),
     /// Pick a folder (Windows' folder picker, on its own thread) and make a folder box for it.
     NewFolderBox,
     /// Right-click on an item: Windows' own menu (and the other selected items with it), with
@@ -202,6 +204,8 @@ pub struct DeskApp {
     /// What the box windows were last shown or hidden for (page, hidden, each box's page).
     shown_for: Option<(u32, bool, Vec<(u64, u32)>)>,
     page_hotkeys_set: bool,
+    /// Box shortcuts registered now (numbers 1..9 = Ctrl+Alt+F2..F10).
+    box_hotkeys_applied: Option<Vec<u8>>,
     /// Type to jump: what was typed recently on the desktop and when (a pause starts over).
     ta_buf: String,
     ta_last: Option<Instant>,
@@ -401,6 +405,7 @@ impl DeskApp {
             current_setup: String::new(),
             shown_for: None,
             page_hotkeys_set: false,
+            box_hotkeys_applied: None,
             ta_buf: String::new(),
             ta_last: None,
             layout,
@@ -686,6 +691,16 @@ impl DeskApp {
                     self.personalize_tab = 0;
                     self.focus_personalize = true;
                 }
+                Act::SetBoxHotkey(id, n) => {
+                    for f in &mut self.layout.fences {
+                        if f.id == id {
+                            f.hotkey = n;
+                        } else if n != 0 && f.hotkey == n {
+                            f.hotkey = 0;
+                        }
+                    }
+                    self.mark_dirty();
+                }
                 Act::WidgetSettings(id) => {
                     self.personalize = Some(id);
                     self.personalize_tab = 1;
@@ -783,6 +798,42 @@ impl DeskApp {
                     }
                     _ => {}
                 }
+            }
+        }
+        // Box shortcuts (Ctrl+Alt+F2..F10): bring the box into view, or roll it up / down.
+        #[cfg(windows)]
+        if self.persist {
+            let mut nums: Vec<u8> = self.layout.fences.iter().map(|f| f.hotkey).filter(|n| (1..=9).contains(n)).collect();
+            nums.sort_unstable();
+            nums.dedup();
+            if self.box_hotkeys_applied.as_ref() != Some(&nums) {
+                crate::runloop::set_box_hotkeys(&nums);
+                self.box_hotkeys_applied = Some(nums);
+            }
+            for n in crate::runloop::take_box_keys() {
+                let Some(i) = self.layout.fences.iter().position(|f| f.hotkey == n) else { continue };
+                let (page, id) = (self.layout.fences[i].page, self.layout.fences[i].id);
+                let mut shown = true;
+                if self.boxes_hidden {
+                    self.set_boxes_hidden(false);
+                    shown = false;
+                }
+                if page != self.layout.current_page {
+                    self.layout.current_page = page;
+                    self.mark_dirty();
+                    shown = false;
+                }
+                let f = &mut self.layout.fences[i];
+                if shown || !f.expanded {
+                    // Already in view: roll it up or down (a rolled-up box always opens).
+                    f.expanded = !f.expanded;
+                    self.ui.hover_open.remove(&id);
+                    let h = if f.expanded { f.rect[3] } else { ROLLED_HEIGHT };
+                    self.ui.box_cmds.push((id, ViewportCommand::InnerSize(Vec2::new(f.rect[2], h))));
+                    self.ui.burst.insert(id, 15);
+                    self.mark_dirty();
+                }
+                self.redraw_all = true;
             }
         }
         // Pages: Ctrl+Alt+PageDown / PageUp, or the tray; then show only the current page's boxes.
@@ -1858,6 +1909,7 @@ pub enum MenuPage {
     MoveTo,
     MoveToTabs(u64),
     Pages,
+    Shortcut,
 }
 
 pub struct OpenMenu {
@@ -2186,6 +2238,9 @@ fn fence_menu(ui: &mut egui::Ui, fence: &mut Fence, st: &mut UiState, page: &mut
             if sub(ui, icon::TAB, "Move to page") {
                 *page = MenuPage::Pages;
             }
+            if sub(ui, icon::CHEVRON, "Keyboard shortcut") {
+                *page = MenuPage::Shortcut;
+            }
             if row(ui, icon::SEARCH, "Search desktop", None, true).clicked() {
                 st.open_search = true;
                 close = true;
@@ -2233,6 +2288,17 @@ fn fence_menu(ui: &mut egui::Ui, fence: &mut Fence, st: &mut UiState, page: &mut
                     close = true;
                 }
             }
+        }
+        MenuPage::Shortcut => {
+            back(ui, page, "Keyboard shortcut");
+            for n in 0..=9u8 {
+                let label = if n == 0 { "None".to_string() } else { format!("Ctrl+Alt+F{}", n + 1) };
+                if check(ui, fence.hotkey == n, &label) {
+                    actions.push(Act::SetBoxHotkey(fence.id, n));
+                    close = true;
+                }
+            }
+            ui.label(egui::RichText::new("Brings the box into view; pressed again, rolls it up or down.").size(11.5).color(Color32::from_gray(150)));
         }
         MenuPage::Pages => {
             back(ui, page, "Move to page");

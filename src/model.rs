@@ -103,6 +103,9 @@ pub struct Fence {
     pub page: u32,
     /// When the icons don't fit: 0 = scroll up/down, 1 = pages with dots (wheel or dots flip).
     pub overflow: u8,
+    /// Keyboard shortcut of this box: 0 = none, 1..9 = Ctrl+Alt+F2..F10 (brings it into view, then
+    /// rolls it up or down).
+    pub hotkey: u8,
 }
 
 impl Default for Fence {
@@ -144,6 +147,7 @@ impl Default for Fence {
             folder: None,
             page: 0,
             overflow: 0,
+            hotkey: 0,
         }
     }
 }

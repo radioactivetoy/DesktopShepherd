@@ -1171,3 +1171,31 @@ pub fn wait_for_quit_signal(wait: std::time::Duration) -> bool {
         false
     }
 }
+
+/// Windows' file picker for a picture (PNG / JPEG). Call from a helper thread: it waits for
+/// the person.
+pub fn pick_picture() -> Option<String> {
+    #[cfg(windows)]
+    unsafe {
+        use windows::core::w;
+        use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED};
+        use windows::Win32::UI::Shell::Common::COMDLG_FILTERSPEC;
+        use windows::Win32::UI::Shell::{FileOpenDialog, IFileOpenDialog, FOS_FILEMUSTEXIST, FOS_FORCEFILESYSTEM, SIGDN_FILESYSPATH};
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        let dlg: IFileOpenDialog = CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER).ok()?;
+        let _ = dlg.SetOptions(FOS_FILEMUSTEXIST | FOS_FORCEFILESYSTEM);
+        let _ = dlg.SetTitle(w!("Choose a picture"));
+        let types = [COMDLG_FILTERSPEC { pszName: w!("Pictures (PNG, JPEG)"), pszSpec: w!("*.png;*.jpg;*.jpeg") }];
+        let _ = dlg.SetFileTypes(&types);
+        dlg.Show(None).ok()?;
+        let item = dlg.GetResult().ok()?;
+        let name = item.GetDisplayName(SIGDN_FILESYSPATH).ok()?;
+        let path = name.to_string().ok();
+        windows::Win32::System::Com::CoTaskMemFree(Some(name.0 as *const _));
+        path
+    }
+    #[cfg(not(windows))]
+    {
+        None
+    }
+}
