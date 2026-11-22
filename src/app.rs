@@ -227,6 +227,8 @@ pub struct DeskApp {
     box_hotkeys_applied: Option<Vec<u8>>,
     /// A request left from before the start (desktop menu while not running) was looked for.
     pending_checked: bool,
+    /// The virtual desktop last seen (index).
+    vdesk_seen: Option<usize>,
     /// The desktop menu entries were written for this run.
     desktop_menu_applied: Option<bool>,
     /// Type to jump: what was typed recently on the desktop and when (a pause starts over).
@@ -432,6 +434,7 @@ impl DeskApp {
             picked_layout: Arc::new(Mutex::new(None)),
             box_hotkeys_applied: None,
             pending_checked: false,
+            vdesk_seen: None,
             desktop_menu_applied: None,
             ta_buf: String::new(),
             ta_last: None,
@@ -1011,6 +1014,23 @@ impl DeskApp {
                     self.mark_dirty();
                 }
                 self.redraw_all = true;
+            }
+        }
+        // Virtual desktops: boxes come along to the desktop shown, and (if linked) each desktop
+        // shows its own page.
+        #[cfg(windows)]
+        if self.persist {
+            if let Some(vd) = crate::vdesk::current() {
+                if self.vdesk_seen != Some(vd) {
+                    let first = self.vdesk_seen.is_none();
+                    self.vdesk_seen = Some(vd);
+                    let hw: Vec<isize> = self.ui.hwnds.values().copied().collect();
+                    crate::vdesk::bring_windows_here(&hw);
+                    if self.layout.settings.link_vdesks && !first && self.layout.current_page != vd as u32 {
+                        self.layout.current_page = vd as u32;
+                        self.mark_dirty();
+                    }
+                }
             }
         }
         // Pages: Ctrl+Alt+PageDown / PageUp, or the tray; then show only the current page's boxes.
@@ -3210,6 +3230,7 @@ impl DeskApp {
         ui.label(egui::RichText::new("Frosted glass: set each box's blur in its menu (Personalize > Blur).").color(Color32::from_gray(150)).size(12.0));
         ui.add_space(10.0);
         ui.heading("Monitors");
+        dirty |= ui.checkbox(&mut s.link_vdesks, "Each Windows virtual desktop shows its own page of boxes (desktop 1 = page 1, desktop 2 = page 2…)").changed();
         if ui.checkbox(&mut s.per_setup, "Remember box positions for each monitor setup (e.g. laptop alone / docked)").changed() {
             dirty = true;
         }

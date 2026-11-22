@@ -23,6 +23,8 @@ mod install;
 #[cfg(windows)]
 mod drawbox;
 #[cfg(windows)]
+mod vdesk;
+#[cfg(windows)]
 mod shellmenu;
 mod snap;
 #[cfg(windows)]

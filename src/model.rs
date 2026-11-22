@@ -229,6 +229,8 @@ pub struct Settings {
     /// How visible a faded box stays (percent) and after how many seconds away it fades.
     pub fade_opacity: u8,
     pub fade_delay: u32,
+    /// Each Windows virtual desktop shows its own page of boxes (desktop 1 = page 1…).
+    pub link_vdesks: bool,
 }
 
 impl Default for Settings {
@@ -256,6 +258,7 @@ impl Default for Settings {
             fade_idle: false,
             fade_opacity: 30,
             fade_delay: 3,
+            link_vdesks: false,
         }
     }
 }
