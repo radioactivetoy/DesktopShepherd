@@ -43,6 +43,8 @@ pub const REGISTRY: &[WidgetKind] = &[
     WidgetKind { id: "note", label: "Sticky note", icon: '\u{E70B}', default_size: [280.0, 220.0], make: || Box::new(Note) },
     WidgetKind { id: "sketch", label: "Drawing pad", icon: '\u{E70F}', default_size: [360.0, 280.0], make: || Box::new(Sketch) },
     WidgetKind { id: "sysmon", label: "System monitor", icon: '\u{E9D9}', default_size: [310.0, 270.0], make: || Box::new(SysMon) },
+    WidgetKind { id: "laptop", label: "Laptop status", icon: '\u{E83F}', default_size: [300.0, 150.0], make: || Box::new(Laptop) },
+    WidgetKind { id: "media", label: "Now playing", icon: '\u{E8D6}', default_size: [360.0, 140.0], make: || Box::new(Media) },
     WidgetKind { id: "calendar", label: "Calendar", icon: '\u{E787}', default_size: [290.0, 270.0], make: || Box::new(Calendar) },
     WidgetKind { id: "todo", label: "To-do list", icon: '\u{E73A}', default_size: [290.0, 280.0], make: || Box::new(Todo) },
     WidgetKind { id: "agenda", label: "Agenda (online calendars)", icon: '\u{E8BF}', default_size: [320.0, 300.0], make: || Box::new(Agenda) },
@@ -1213,4 +1215,449 @@ fn agenda_details(ui: &mut Ui, (heading, evs): &AgendaDetails, names: &[String])
         }
     });
     back
+}
+
+// ---- Laptop status (battery, Wi-Fi, Bluetooth) -----------------------------------------------
+
+#[derive(Clone, Default)]
+struct LaptopInfo {
+    /// Battery: percent, charging (plugged in), minutes left (if Windows knows). None = no battery.
+    battery: Option<(u8, bool, Option<u32>)>,
+    /// Wi-Fi: Some(Some((network, signal 0-100))) connected, Some(None) not connected, None = no Wi-Fi.
+    wifi: Option<Option<(String, u32)>>,
+    /// Bluetooth: None = no Bluetooth, Some((on, connected device names)).
+    bluetooth: Option<(bool, Vec<String>)>,
+}
+
+/// Last reading (and when), read on a helper thread at most every 5 s while a laptop widget shows.
+static LAPTOP: std::sync::Mutex<Option<(std::time::Instant, LaptopInfo)>> = std::sync::Mutex::new(None);
+static LAPTOP_BUSY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(windows)]
+fn read_laptop() -> LaptopInfo {
+    let mut info = LaptopInfo::default();
+    unsafe {
+        use windows::Win32::System::Power::{GetSystemPowerStatus, SYSTEM_POWER_STATUS};
+        let mut s = SYSTEM_POWER_STATUS::default();
+        // BatteryFlag 128 = no battery, 255 = unknown.
+        if GetSystemPowerStatus(&mut s).is_ok() && s.BatteryFlag != 128 && s.BatteryFlag != 255 && s.BatteryLifePercent <= 100 {
+            let left = (s.BatteryLifeTime != u32::MAX).then(|| s.BatteryLifeTime / 60);
+            info.battery = Some((s.BatteryLifePercent, s.ACLineStatus == 1, left));
+        }
+    }
+    unsafe {
+        use windows::Win32::Foundation::HANDLE;
+        use windows::Win32::NetworkManagement::WiFi::*;
+        let mut ver = 0u32;
+        let mut h = HANDLE::default();
+        if WlanOpenHandle(2, None, &mut ver, &mut h) == 0 {
+            let mut list: *mut WLAN_INTERFACE_INFO_LIST = std::ptr::null_mut();
+            if WlanEnumInterfaces(h, None, &mut list) == 0 && !list.is_null() {
+                let n = (*list).dwNumberOfItems as usize;
+                if n > 0 {
+                    info.wifi = Some(None);
+                    let first = (*list).InterfaceInfo.as_ptr();
+                    for i in 0..n {
+                        let iface = &*first.add(i);
+                        if iface.isState != wlan_interface_state_connected {
+                            continue;
+                        }
+                        let mut size = 0u32;
+                        let mut data: *mut core::ffi::c_void = std::ptr::null_mut();
+                        if WlanQueryInterface(h, &iface.InterfaceGuid, wlan_intf_opcode_current_connection, None, &mut size, &mut data, None) == 0 && !data.is_null() {
+                            let a = &*(data as *const WLAN_CONNECTION_ATTRIBUTES);
+                            let ssid = &a.wlanAssociationAttributes.dot11Ssid;
+                            let len = (ssid.uSSIDLength as usize).min(32);
+                            let name = String::from_utf8_lossy(&ssid.ucSSID[..len]).to_string();
+                            info.wifi = Some(Some((name, a.wlanAssociationAttributes.wlanSignalQuality.min(100))));
+                            WlanFreeMemory(data);
+                            break;
+                        }
+                    }
+                }
+                WlanFreeMemory(list as *const _);
+            }
+            let _ = WlanCloseHandle(h, None);
+        }
+    }
+    unsafe {
+        use windows::Win32::Devices::Bluetooth::*;
+        use windows::Win32::Foundation::{CloseHandle, BOOL, HANDLE};
+        let params = BLUETOOTH_FIND_RADIO_PARAMS { dwSize: std::mem::size_of::<BLUETOOTH_FIND_RADIO_PARAMS>() as u32 };
+        let mut radio = HANDLE::default();
+        if let Ok(find) = BluetoothFindFirstRadio(&params, &mut radio) {
+            let on = BluetoothIsConnectable(radio).as_bool();
+            let mut names = Vec::new();
+            if on {
+                // Only devices connected right now; no search (that would take seconds).
+                let sp = BLUETOOTH_DEVICE_SEARCH_PARAMS {
+                    dwSize: std::mem::size_of::<BLUETOOTH_DEVICE_SEARCH_PARAMS>() as u32,
+                    fReturnAuthenticated: BOOL(0),
+                    fReturnRemembered: BOOL(0),
+                    fReturnUnknown: BOOL(0),
+                    fReturnConnected: BOOL(1),
+                    fIssueInquiry: BOOL(0),
+                    cTimeoutMultiplier: 0,
+                    hRadio: radio,
+                };
+                let mut di = BLUETOOTH_DEVICE_INFO { dwSize: std::mem::size_of::<BLUETOOTH_DEVICE_INFO>() as u32, ..Default::default() };
+                if let Ok(df) = BluetoothFindFirstDevice(&sp, &mut di) {
+                    loop {
+                        if di.fConnected.as_bool() {
+                            let len = di.szName.iter().position(|c| *c == 0).unwrap_or(di.szName.len());
+                            names.push(String::from_utf16_lossy(&di.szName[..len]));
+                        }
+                        di = BLUETOOTH_DEVICE_INFO { dwSize: std::mem::size_of::<BLUETOOTH_DEVICE_INFO>() as u32, ..Default::default() };
+                        if BluetoothFindNextDevice(df, &mut di).is_err() || names.len() > 20 {
+                            break;
+                        }
+                    }
+                    let _ = BluetoothFindDeviceClose(df);
+                }
+            }
+            let _ = CloseHandle(radio);
+            let _ = BluetoothFindRadioClose(find);
+            info.bluetooth = Some((on, names));
+        }
+    }
+    info
+}
+#[cfg(not(windows))]
+fn read_laptop() -> LaptopInfo {
+    LaptopInfo::default()
+}
+
+fn laptop_now() -> LaptopInfo {
+    let current = LAPTOP.lock().ok().and_then(|g| g.clone());
+    let stale = current.as_ref().map(|(t, _)| t.elapsed() >= Duration::from_secs(5)).unwrap_or(true);
+    if stale && !LAPTOP_BUSY.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        let spawned = std::thread::Builder::new().name("laptop-status".into()).spawn(|| {
+            let info = std::panic::catch_unwind(read_laptop).unwrap_or_default();
+            if let Ok(mut g) = LAPTOP.lock() {
+                *g = Some((std::time::Instant::now(), info));
+            }
+            LAPTOP_BUSY.store(false, std::sync::atomic::Ordering::SeqCst);
+            #[cfg(windows)]
+            crate::runloop::wake_after(Duration::ZERO);
+        });
+        if spawned.is_err() {
+            LAPTOP_BUSY.store(false, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+    current.map(|(_, i)| i).unwrap_or_default()
+}
+
+/// One status line: icon, text, and a small detail on the right.
+fn status_line(ui: &mut Ui, icon: char, text: &str, detail: &str, color: Color32) {
+    ui.horizontal(|ui| {
+        ui.add_sized([24.0, 22.0], egui::Label::new(egui::RichText::new(icon.to_string()).size(17.0).color(color)));
+        ui.add(egui::Label::new(egui::RichText::new(text).size(13.5).color(Color32::from_gray(235))).truncate());
+        if !detail.is_empty() {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.label(egui::RichText::new(detail).size(12.0).color(Color32::from_gray(175)));
+            });
+        }
+    });
+}
+
+struct Laptop;
+
+impl DeskWidget for Laptop {
+    fn ui(&self, ui: &mut Ui, _data: &mut Value) -> WidgetOutput {
+        let info = laptop_now();
+        ui.add_space(2.0);
+        match info.battery {
+            Some((pct, charging, left)) => {
+                let icon = if charging { '\u{E83E}' } else { '\u{E83F}' };
+                let detail = match (charging, left) {
+                    (true, _) if pct >= 100 => "charged".to_string(),
+                    (true, _) => "charging".to_string(),
+                    (false, Some(m)) => format!("{}h {:02}m left", m / 60, m % 60),
+                    (false, None) => String::new(),
+                };
+                status_line(ui, icon, &format!("Battery {pct} %"), &detail, level_color(1.0 - pct as f32 / 100.0));
+                // The charge as a bar.
+                let (r, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 6.0), Sense::hover());
+                ui.painter().rect_filled(r, 3.0, Color32::from_white_alpha(28));
+                let mut fill = r;
+                fill.set_width(r.width() * pct as f32 / 100.0);
+                ui.painter().rect_filled(fill, 3.0, if pct <= 15 { Color32::from_rgb(255, 110, 100) } else { Color32::from_rgb(110, 210, 120) });
+                ui.add_space(4.0);
+            }
+            None => status_line(ui, '\u{E83E}', "No battery (plugged in)", "", Color32::from_gray(170)),
+        }
+        match &info.wifi {
+            Some(Some((name, q))) => {
+                let bars = match q {
+                    0..=25 => "▂",
+                    26..=50 => "▂▄",
+                    51..=75 => "▂▄▆",
+                    _ => "▂▄▆█",
+                };
+                status_line(ui, '\u{E701}', name, &format!("{bars} {q} %"), Color32::from_rgb(110, 190, 255));
+            }
+            Some(None) => status_line(ui, '\u{EB5E}', "Wi-Fi: not connected", "", Color32::from_gray(170)),
+            None => status_line(ui, '\u{EB5E}', "No Wi-Fi", "", Color32::from_gray(140)),
+        }
+        match &info.bluetooth {
+            Some((true, names)) if !names.is_empty() => status_line(ui, '\u{E702}', &names.join(", "), "connected", Color32::from_rgb(110, 190, 255)),
+            Some((true, _)) => status_line(ui, '\u{E702}', "Bluetooth on", "nothing connected", Color32::from_rgb(110, 190, 255)),
+            Some((false, _)) => status_line(ui, '\u{E702}', "Bluetooth off", "", Color32::from_gray(150)),
+            None => status_line(ui, '\u{E702}', "No Bluetooth", "", Color32::from_gray(140)),
+        }
+        WidgetOutput { changed: false, repaint_after: Some(Duration::from_secs(5)) }
+    }
+}
+
+// ---- Media (what's playing) ------------------------------------------------------------------
+
+#[derive(Clone, Default)]
+struct MediaInfo {
+    app: String,
+    title: String,
+    artist: String,
+    playing: bool,
+    /// Position and length in seconds, and when they were read (the bar moves on from there).
+    timeline: Option<(f64, f64, std::time::Instant)>,
+    /// Cover picture (decoded, at most 256 px), with a number that changes with the song.
+    art: Option<(u64, std::sync::Arc<egui::ColorImage>)>,
+}
+
+/// What's playing, read on a helper thread at most every 2 s while a media widget shows (Windows'
+/// own media controls: Spotify, browsers, VLC… anything that shows in the volume flyout).
+static MEDIA: std::sync::Mutex<Option<(std::time::Instant, Option<MediaInfo>)>> = std::sync::Mutex::new(None);
+static MEDIA_BUSY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(windows)]
+fn media_session() -> Option<windows::Media::Control::GlobalSystemMediaTransportControlsSession> {
+    use windows::Media::Control::GlobalSystemMediaTransportControlsSessionManager as M;
+    M::RequestAsync().ok()?.get().ok()?.GetCurrentSession().ok()
+}
+
+#[cfg(windows)]
+fn read_media(previous: Option<&MediaInfo>) -> Option<MediaInfo> {
+    use windows::Media::Control::GlobalSystemMediaTransportControlsSessionPlaybackStatus as S;
+    let s = media_session()?;
+    let props = s.TryGetMediaPropertiesAsync().ok()?.get().ok()?;
+    let title = props.Title().map(|t| t.to_string()).unwrap_or_default();
+    let artist = props.Artist().map(|t| t.to_string()).unwrap_or_default();
+    let app = s.SourceAppUserModelId().map(|t| t.to_string()).unwrap_or_default();
+    let playing = s.GetPlaybackInfo().ok().and_then(|p| p.PlaybackStatus().ok()).map(|st| st == S::Playing).unwrap_or(false);
+    let timeline = s.GetTimelineProperties().ok().and_then(|t| {
+        let pos = t.Position().ok()?.Duration as f64 / 1e7;
+        let end = t.EndTime().ok()?.Duration as f64 / 1e7;
+        (end > 1.0).then_some((pos, end, std::time::Instant::now()))
+    });
+    // Same song as before: keep its picture (reading it again costs more than the rest).
+    let key = {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        (&app, &title, &artist).hash(&mut h);
+        h.finish()
+    };
+    let art = match previous.and_then(|p| p.art.clone()).filter(|(k, _)| *k == key) {
+        Some(a) => Some(a),
+        None => (|| -> Option<(u64, std::sync::Arc<egui::ColorImage>)> {
+            use windows::Storage::Streams::DataReader;
+            let stream = props.Thumbnail().ok()?.OpenReadAsync().ok()?.get().ok()?;
+            let size = stream.Size().ok()? as u32;
+            if size == 0 || size > 8 * 1024 * 1024 {
+                return None;
+            }
+            let reader = DataReader::CreateDataReader(&stream).ok()?;
+            reader.LoadAsync(size).ok()?.get().ok()?;
+            let mut buf = vec![0u8; size as usize];
+            reader.ReadBytes(&mut buf).ok()?;
+            let img = image::load_from_memory(&buf).ok()?.thumbnail(256, 256).to_rgba8();
+            let ci = egui::ColorImage::from_rgba_unmultiplied([img.width() as usize, img.height() as usize], img.as_raw());
+            Some((key, std::sync::Arc::new(ci)))
+        })(),
+    };
+    Some(MediaInfo { app, title, artist, playing, timeline, art })
+}
+#[cfg(not(windows))]
+fn read_media(_previous: Option<&MediaInfo>) -> Option<MediaInfo> {
+    None
+}
+
+fn refresh_media(force: bool) {
+    let current = MEDIA.lock().ok().and_then(|g| g.clone());
+    let stale = current.as_ref().map(|(t, _)| t.elapsed() >= Duration::from_secs(2)).unwrap_or(true);
+    if (stale || force) && !MEDIA_BUSY.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        let prev = current.and_then(|(_, m)| m);
+        let spawned = std::thread::Builder::new().name("media-status".into()).spawn(move || {
+            let info = std::panic::catch_unwind(|| read_media(prev.as_ref())).ok().flatten();
+            if let Ok(mut g) = MEDIA.lock() {
+                *g = Some((std::time::Instant::now(), info));
+            }
+            MEDIA_BUSY.store(false, std::sync::atomic::Ordering::SeqCst);
+            #[cfg(windows)]
+            crate::runloop::wake_after(Duration::ZERO);
+        });
+        if spawned.is_err() {
+            MEDIA_BUSY.store(false, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+}
+
+/// Play/pause, next or previous, on a helper thread (the player answers when it likes).
+fn media_command(which: u8) {
+    let _ = std::thread::Builder::new().name("media-command".into()).spawn(move || {
+        #[cfg(windows)]
+        if let Some(s) = media_session() {
+            let r = match which {
+                0 => s.TrySkipPreviousAsync(),
+                1 => s.TryTogglePlayPauseAsync(),
+                _ => s.TrySkipNextAsync(),
+            };
+            if let Ok(op) = r {
+                let _ = op.get();
+            }
+        }
+        std::thread::sleep(Duration::from_millis(300));
+        if let Ok(mut g) = MEDIA.lock() {
+            if let Some((t, _)) = g.as_mut() {
+                *t = std::time::Instant::now() - Duration::from_secs(10); // read again now
+            }
+        }
+        #[cfg(windows)]
+        crate::runloop::wake_after(Duration::ZERO);
+    });
+}
+
+/// A friendly app name from Windows' id for the player: "Spotify.exe" -> "Spotify",
+/// "AppleInc.AppleMusicWin_nzyj…!App" -> "Apple Music", "Microsoft.ZuneMusic_…!Microsoft.ZuneMusic"
+/// -> "Media Player". Browsers report a code: "Browser".
+fn app_label(id: &str) -> String {
+    let lower = id.to_lowercase();
+    for (k, v) in [("zunemusic", "Media Player"), ("spotify", "Spotify"), ("chrome", "Chrome"), ("msedge", "Edge"), ("firefox", "Firefox"), ("vlc", "VLC"), ("applemusic", "Apple Music")] {
+        if lower.contains(k) {
+            return v.to_string();
+        }
+    }
+    // Packaged app: the package name, before "_" and "!", after the publisher ("Publisher.Name").
+    let pkg = id.split('!').next().unwrap_or(id);
+    let pkg = pkg.split('_').next().unwrap_or(pkg);
+    let base = pkg.rsplit(['\\', '/']).next().unwrap_or(pkg);
+    let base = base.trim_end_matches(".exe").trim_end_matches(".EXE");
+    let base = base.rsplit('.').next().unwrap_or(base);
+    if base.is_empty() || (base.len() > 14 && base.chars().all(|c| c.is_ascii_hexdigit())) {
+        return "Browser".into(); // Chrome / Edge sometimes report a code instead of a name
+    }
+    let base = base.strip_suffix("Win").unwrap_or(base);
+    // "AppleMusic" -> "Apple Music"
+    let mut out = String::new();
+    for (i, c) in base.chars().enumerate() {
+        if i > 0 && c.is_uppercase() && !out.ends_with(' ') {
+            out.push(' ');
+        }
+        out.push(c);
+    }
+    out
+}
+
+fn mmss(secs: f64) -> String {
+    let s = secs.max(0.0) as u64;
+    if s >= 3600 {
+        format!("{}:{:02}:{:02}", s / 3600, (s / 60) % 60, s % 60)
+    } else {
+        format!("{}:{:02}", s / 60, s % 60)
+    }
+}
+
+struct Media;
+
+impl DeskWidget for Media {
+    fn ui(&self, ui: &mut Ui, _data: &mut Value) -> WidgetOutput {
+        refresh_media(false);
+        let info = MEDIA.lock().ok().and_then(|g| g.as_ref().and_then(|(_, m)| m.clone()));
+        // Nothing playing: an empty box (it fills again when music starts).
+        let Some(m) = info else {
+            return WidgetOutput { changed: false, repaint_after: Some(Duration::from_secs(3)) };
+        };
+        let full = ui.max_rect();
+        let side = (full.height() - 8.0).min(full.width() * 0.42).max(32.0);
+        let art_rect = egui::Rect::from_min_size(Pos2::new(full.min.x, full.center().y - side / 2.0), egui::vec2(side, side));
+        // The cover with rounded corners: one texture per widget, replaced when the song changes.
+        let tid = ui.make_persistent_id("media-art");
+        match &m.art {
+            Some((key, img)) => {
+                let held: Option<(u64, egui::TextureHandle)> = ui.ctx().data(|d| d.get_temp(tid));
+                let tex = match held.filter(|(k, _)| k == key) {
+                    Some((_, t)) => t,
+                    None => {
+                        let t = ui.ctx().load_texture("media-art", (**img).clone(), egui::TextureOptions::LINEAR);
+                        ui.ctx().data_mut(|d| d.insert_temp(tid, (*key, t.clone())));
+                        t
+                    }
+                };
+                egui::Image::new((tex.id(), art_rect.size())).corner_radius(8).paint_at(ui, art_rect);
+            }
+            None => {
+                ui.ctx().data_mut(|d| d.remove::<(u64, egui::TextureHandle)>(tid));
+                ui.painter().rect_filled(art_rect, 8.0, Color32::from_white_alpha(18));
+                ui.painter().text(art_rect.center(), egui::Align2::CENTER_CENTER, "\u{E8D6}", egui::FontId::proportional(side * 0.4), Color32::from_gray(170));
+            }
+        }
+        // Right side: app, title, artist, controls, progress; centred vertically.
+        let x0 = art_rect.max.x + 14.0;
+        let w = (full.max.x - x0 - 4.0).max(40.0);
+        let block_h = 15.0 + 22.0 + if m.artist.is_empty() { 0.0 } else { 19.0 } + 44.0 + if m.timeline.is_some() { 22.0 } else { 0.0 };
+        let mut y = (full.center().y - block_h / 2.0).max(full.min.y);
+        let p = ui.painter().with_clip_rect(egui::Rect::from_min_max(Pos2::new(x0, full.min.y), full.max));
+        let line = |p: &egui::Painter, y: f32, text: &str, size: f32, color: Color32| {
+            let g = p.layout_no_wrap(text.to_string(), egui::FontId::proportional(size), color);
+            p.galley(Pos2::new(x0, y), g, color);
+        };
+        line(&p, y, &app_label(&m.app).to_uppercase(), 10.5, Color32::from_gray(150));
+        y += 15.0;
+        line(&p, y, if m.title.is_empty() { "(no title)" } else { &m.title }, 16.0, Color32::WHITE);
+        y += 22.0;
+        if !m.artist.is_empty() {
+            line(&p, y, &m.artist, 13.0, Color32::from_gray(200));
+            y += 19.0;
+        }
+        // Controls: previous, a round play/pause button, next.
+        let cy = y + 22.0;
+        let mid = Pos2::new(x0 + 58.0, cy);
+        let button = |ui: &mut Ui, c: Pos2, r: f32, idn: &str| -> egui::Response {
+            ui.interact(egui::Rect::from_center_size(c, egui::vec2(r * 2.0, r * 2.0)), ui.id().with(("media", idn)), Sense::click())
+        };
+        let prev = button(ui, Pos2::new(mid.x - 44.0, cy), 15.0, "prev").on_hover_text("Previous");
+        let play = button(ui, mid, 19.0, "play").on_hover_text(if m.playing { "Pause" } else { "Play" });
+        let next = button(ui, Pos2::new(mid.x + 44.0, cy), 15.0, "next").on_hover_text("Next");
+        let pa = ui.painter();
+        let dim = |r: &egui::Response| if r.hovered() { Color32::WHITE } else { Color32::from_gray(210) };
+        pa.text(Pos2::new(mid.x - 44.0, cy), egui::Align2::CENTER_CENTER, "\u{E892}", egui::FontId::proportional(17.0), dim(&prev));
+        pa.text(Pos2::new(mid.x + 44.0, cy), egui::Align2::CENTER_CENTER, "\u{E893}", egui::FontId::proportional(17.0), dim(&next));
+        pa.circle_filled(mid, if play.hovered() { 19.0 } else { 18.0 }, Color32::WHITE);
+        pa.text(mid + egui::vec2(if m.playing { 0.0 } else { 1.5 }, 0.0), egui::Align2::CENTER_CENTER, if m.playing { "\u{E769}" } else { "\u{E768}" }, egui::FontId::proportional(16.0), Color32::from_rgb(20, 20, 24));
+        if prev.clicked() {
+            media_command(0);
+        }
+        if play.clicked() {
+            media_command(1);
+        }
+        if next.clicked() {
+            media_command(2);
+        }
+        y += 44.0;
+        // Progress: where in the song, moving on by itself while playing.
+        let mut repaint = Duration::from_secs(2);
+        if let Some((pos, end, read_at)) = m.timeline {
+            let now = if m.playing { pos + read_at.elapsed().as_secs_f64() } else { pos };
+            let now = now.min(end);
+            let bar = egui::Rect::from_min_size(Pos2::new(x0, y + 4.0), egui::vec2(w, 4.0));
+            pa.rect_filled(bar, 2.0, Color32::from_white_alpha(40));
+            let mut done = bar;
+            done.set_width(bar.width() * (now / end).clamp(0.0, 1.0) as f32);
+            pa.rect_filled(done, 2.0, Color32::from_gray(230));
+            pa.text(Pos2::new(x0, y + 10.0), egui::Align2::LEFT_TOP, mmss(now), egui::FontId::proportional(10.5), Color32::from_gray(160));
+            pa.text(Pos2::new(x0 + w, y + 10.0), egui::Align2::RIGHT_TOP, mmss(end), egui::FontId::proportional(10.5), Color32::from_gray(160));
+            if m.playing {
+                repaint = Duration::from_secs(1); // the seconds move on
+            }
+        }
+        WidgetOutput { changed: false, repaint_after: Some(repaint) }
+    }
 }

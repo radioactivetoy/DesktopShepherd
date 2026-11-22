@@ -450,6 +450,8 @@ pub struct Host {
     next: Option<std::time::Instant>,
     /// The look and size last given to the composition layers (set again only on change).
     applied: Option<([u8; 4], u32, u32, [u32; 2])>,
+    /// The whole box's opacity last asked for (fading when the mouse is away).
+    opacity: f32,
 }
 
 impl Drop for Host {
@@ -696,7 +698,7 @@ impl HostSystem {
                 size: [rect_px[2].max(1) as u32, rect_px[3].max(1) as u32],
                 glass,
                 next: None,
-                applied: None,
+                applied: None, opacity: 1.0,
             })
         }
     }
@@ -783,6 +785,29 @@ impl HostSystem {
                 h.size = [8, 8];
                 h.applied = None; // the glass layers are re-sized when it shows again
             }
+        }
+    }
+
+    /// Fades the whole box (glass, text and icons) to `a` (0..1) over a short animation, done by
+    /// Windows' compositor: nothing is redrawn. Without glass it does nothing.
+    pub fn set_box_opacity(&mut self, id: u64, a: f32) {
+        let Some(comp) = self.compositor.as_ref() else { return };
+        let Some(h) = self.hosts.get_mut(&id) else { return };
+        if (h.opacity - a).abs() < 0.01 {
+            return;
+        }
+        h.opacity = a;
+        let Some(g) = &h.glass else { return };
+        let anim = (|| -> windows::core::Result<()> {
+            let an = comp.CreateScalarKeyFrameAnimation()?;
+            an.InsertKeyFrame(1.0, a)?;
+            // Fading out slowly, back in quickly.
+            let ms: i64 = if a < 1.0 { 600 } else { 150 };
+            an.SetDuration(windows::Foundation::TimeSpan { Duration: ms * 10_000 })?;
+            g.container.StartAnimation(&windows::core::HSTRING::from("Opacity"), &an)
+        })();
+        if anim.is_err() {
+            let _ = g.container.SetOpacity(a);
         }
     }
 

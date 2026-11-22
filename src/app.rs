@@ -50,6 +50,11 @@ enum Act {
     Personalize(u64),
     /// Open the settings window of this widget box on its "Widget settings" tab.
     WidgetSettings(u64),
+    /// Bring back a deleted box (index into `deleted`).
+    RestoreDeleted(usize),
+    /// Save the layout to a file / load one (Settings > Layout).
+    ExportLayout,
+    ImportLayout,
     /// Give this box a keyboard shortcut (0 = none); no other box keeps the same one.
     SetBoxHotkey(u64, u8),
     /// Pick a folder (Windows' folder picker, on its own thread) and make a folder box for it.
@@ -110,6 +115,8 @@ struct UiState {
     menu_at: Pos2,
     /// Start drawing a new box on the next pass (menu, tray).
     start_draw: bool,
+    /// When the mouse was last over each box (for fading).
+    hover_at: HashMap<u64, Instant>,
     /// Pages: how many there are and which is shown (for the box menu), and a switch asked
     /// for from the tray.
     page_count: u32,
@@ -130,6 +137,7 @@ pub enum TrayCmd {
     Open,
     NewBox,
     DrawBox,
+    UndoDelete,
     Search,
     HideShow,
     NextPage,
@@ -211,6 +219,10 @@ pub struct DeskApp {
     /// What the box windows were last shown or hidden for (page, hidden, each box's page).
     shown_for: Option<(u32, bool, Vec<(u64, u32)>)>,
     page_hotkeys_set: bool,
+    /// Deleted boxes (for Undo) and when they were deleted.
+    deleted: Vec<(Fence, Instant)>,
+    /// A layout file chosen in "Import layout…", waiting to be loaded.
+    picked_layout: Arc<Mutex<Option<String>>>,
     /// Box shortcuts registered now (numbers 1..9 = Ctrl+Alt+F2..F10).
     box_hotkeys_applied: Option<Vec<u8>>,
     /// A request left from before the start (desktop menu while not running) was looked for.
@@ -416,6 +428,8 @@ impl DeskApp {
             current_setup: String::new(),
             shown_for: None,
             page_hotkeys_set: false,
+            deleted: Vec::new(),
+            picked_layout: Arc::new(Mutex::new(None)),
             box_hotkeys_applied: None,
             pending_checked: false,
             desktop_menu_applied: None,
@@ -594,6 +608,13 @@ impl DeskApp {
                     }
                 }
                 Act::DeleteFence(id) => {
+                    // Kept for "Undo" (the last 10, until the program closes).
+                    if let Some(f) = self.layout.fences.iter().find(|f| f.id == id) {
+                        self.deleted.push((f.clone(), Instant::now()));
+                        if self.deleted.len() > 10 {
+                            self.deleted.remove(0);
+                        }
+                    }
                     self.layout.fences.retain(|f| f.id != id);
                     // Forget the window bookkeeping of the deleted box.
                     for m in [&mut self.ui.burst] {
@@ -605,6 +626,59 @@ impl DeskApp {
                     self.ui.focused.remove(&id);
                     self.ui.hover_open.remove(&id);
                     self.mark_dirty();
+                }
+                Act::RestoreDeleted(i) => {
+                    if i < self.deleted.len() {
+                        let (f, _) = self.deleted.remove(i);
+                        // Show it: switch to its page, show hidden boxes.
+                        if f.page != self.layout.current_page {
+                            self.layout.current_page = f.page;
+                        }
+                        if self.boxes_hidden {
+                            self.set_boxes_hidden(false);
+                        }
+                        let id = f.id;
+                        if self.layout.fences.iter().any(|o| o.id == id) {
+                            let mut f = f;
+                            f.id = self.layout.new_id();
+                            self.layout.fences.push(f);
+                        } else {
+                            self.layout.fences.push(f);
+                        }
+                        if let Ok(mut e) = self.extra_paths.lock() {
+                            *e = clean_paths(&self.layout);
+                        }
+                        let _ = self.scan_wake.send(());
+                        self.mark_dirty();
+                        self.redraw_all = true;
+                    }
+                }
+                Act::ExportLayout => {
+                    #[cfg(windows)]
+                    {
+                        let text = serde_json::to_string_pretty(&self.layout).unwrap_or_default();
+                        let _ = std::thread::Builder::new().name("export-layout".into()).spawn(move || {
+                            if let Some(p) = desktop::pick_file(true, "Export layout", "DesktopShepherd layout.json") {
+                                if let Err(e) = std::fs::write(&p, text) {
+                                    storage::log_line(&format!("export failed: {e}"));
+                                }
+                            }
+                        });
+                    }
+                }
+                Act::ImportLayout => {
+                    #[cfg(windows)]
+                    {
+                        let picked = self.picked_layout.clone();
+                        let _ = std::thread::Builder::new().name("import-layout".into()).spawn(move || {
+                            if let Some(p) = desktop::pick_file(false, "Import layout", "") {
+                                if let Ok(mut s) = picked.lock() {
+                                    *s = Some(p);
+                                }
+                                crate::runloop::wake_after(Duration::ZERO);
+                            }
+                        });
+                    }
                 }
                 Act::OpenManager => self.manager_open = true,
                 Act::DropItems { from, paths, at } => {
@@ -841,6 +915,10 @@ impl DeskApp {
             self.desktop_menu_applied = Some(on);
             let _ = std::thread::Builder::new().name("desktop-menu".into()).spawn(move || desktop::set_desktop_menu(on));
         }
+        crate::apps::set_enabled(self.layout.settings.search_apps);
+        if let Some(p) = self.picked_layout.lock().ok().and_then(|mut p| p.take()) {
+            self.actions.push(Act::RestoreBackup(std::path::PathBuf::from(p)));
+        }
         // New boxes from Ctrl+Alt+B, the menus or the desktop's right-click menu.
         #[cfg(windows)]
         if self.persist {
@@ -1076,6 +1154,12 @@ impl DeskApp {
                 TrayCmd::HideShow => self.ui.toggle_hidden = true,
                 TrayCmd::NextPage => self.ui.page_step += 1,
                 TrayCmd::DrawBox => self.ui.start_draw = true,
+                TrayCmd::UndoDelete => {
+                    if !self.deleted.is_empty() {
+                        let i = self.deleted.len() - 1;
+                        self.actions.push(Act::RestoreDeleted(i));
+                    }
+                }
                 TrayCmd::Quit => self.actions.push(Act::Quit),
             }
         }
@@ -1309,6 +1393,25 @@ impl DeskApp {
                 });
                 // Part of the desktop (clicks don't bring it forward) and square Windows corners (the box
                 // draws its own): set up once, by the handle the host created.
+                // Fading while the mouse is away (Settings > Desktop): the compositor animates it.
+                {
+                    let s = &self.layout.settings;
+                    let menu_here = matches!(self.ui.menu.as_ref().map(|m| &m.target), Some(MenuTarget::Fence(i)) if *i == id);
+                    let target = if !s.fade_idle || menu_here || self.ui.selection.iter().any(|_| false) {
+                        1.0
+                    } else {
+                        let delay = Duration::from_secs(s.fade_delay.clamp(1, 60) as u64);
+                        match self.ui.hover_at.get(&id) {
+                            Some(t) if t.elapsed() < delay => {
+                                // Come back when it is time to fade.
+                                crate::runloop::wake_after(delay - t.elapsed() + Duration::from_millis(30));
+                                1.0
+                            }
+                            _ => s.fade_opacity.clamp(5, 100) as f32 / 100.0,
+                        }
+                    };
+                    hosts.set_box_opacity(id, target);
+                }
                 if let Some(hw) = hosts.hwnd(id) {
                     if !self.ui.hwnds.contains_key(&id) {
                         if let Some(hw) = desktop::prepare_box(hw, fence.widget.is_none()) {
@@ -1364,6 +1467,12 @@ impl DeskApp {
                 self.show_rename(ctx);
             } else if let Some(h) = self.hosts.as_mut() {
                 h.close_panel(RENAME_PANEL);
+            }
+            // "Box deleted · Undo" for 8 seconds after a delete.
+            if self.deleted.last().map(|(_, t)| t.elapsed() < Duration::from_secs(8)).unwrap_or(false) {
+                self.show_undo_toast(ctx);
+            } else if let Some(h) = self.hosts.as_mut() {
+                h.close_panel(UNDO_PANEL);
             }
         }
         // Commands for box windows from the menus (focus for renaming, roll up/down).
@@ -1436,6 +1545,9 @@ fn fence_window(
     // Native Windows 11 rounded corners matching the box's corner setting.
     let want = fence.corner.round() as i32;
     // Part of the desktop: clicking doesn't bring it forward; after typing in it, back down.
+    if ctx.input(|i| i.pointer.has_pointer()) {
+        st.hover_at.insert(fence.id, Instant::now());
+    }
     let has_focus = ctx.input(|i| i.viewport().focused).unwrap_or(false);
     if has_focus {
         st.focused.insert(fence.id);
@@ -2793,6 +2905,21 @@ impl DeskApp {
                 }
             });
         });
+        if !self.deleted.is_empty() {
+            ui.add_space(4.0);
+            let mut restore = None;
+            ui.horizontal_wrapped(|ui| {
+                ui.label(egui::RichText::new("Recently deleted:").color(Color32::from_gray(170)));
+                for (i, (f, _)) in self.deleted.iter().enumerate().rev() {
+                    if ui.button(format!("↶ {}", f.name)).on_hover_text("Bring this box back").clicked() {
+                        restore = Some(i);
+                    }
+                }
+            });
+            if let Some(i) = restore {
+                self.actions.push(Act::RestoreDeleted(i));
+            }
+        }
         ui.add_space(8.0);
         let claimed: HashSet<String> = self
             .layout
@@ -2898,6 +3025,12 @@ impl DeskApp {
             ui.label(egui::RichText::new(title).color(Color32::from_gray(210)).size(15.0));
             ui.add_space(12.0);
             let [sw, sh] = desktop::primary_screen_points();
+            if self.persist && ui.button("Export layout…").on_hover_text("Save all boxes and settings to a file (it includes your agenda links)").clicked() {
+                self.actions.push(Act::ExportLayout);
+            }
+            if self.persist && ui.button("Import layout…").on_hover_text("Replace the boxes and settings with a saved file (the current ones are backed up first)").clicked() {
+                self.actions.push(Act::ImportLayout);
+            }
             if self.persist && ui.button("Bring every box back on screen").clicked() {
                 let main = Rect::from_min_size(Pos2::ZERO, Vec2::new(sw, sh));
                 for f in &mut self.layout.fences {
@@ -3015,6 +3148,15 @@ impl DeskApp {
         ui.label(egui::RichText::new("They always come back when DesktopShepherd closes, even after a crash.").color(Color32::from_gray(150)).size(12.0));
         dirty |= ui.checkbox(&mut s.expand_on_hover, "Open rolled-up boxes while the mouse is over them").changed();
         ui.horizontal(|ui| {
+            dirty |= ui.checkbox(&mut s.fade_idle, "Fade boxes while the mouse is away").changed();
+            if s.fade_idle {
+                ui.label("to");
+                dirty |= ui.add(egui::Slider::new(&mut s.fade_opacity, 5..=90).suffix(" %")).changed();
+                ui.label("after");
+                dirty |= ui.add(egui::DragValue::new(&mut s.fade_delay).range(1..=60).suffix(" s")).changed();
+            }
+        });
+        ui.horizontal(|ui| {
             dirty |= ui.checkbox(&mut s.snap, "Snap boxes to each other and to the screen edges").changed();
             ui.label("gap");
             dirty |= ui.add(egui::DragValue::new(&mut s.snap_gap).range(0.0..=40.0).speed(0.5).suffix(" pt")).changed();
@@ -3025,6 +3167,7 @@ impl DeskApp {
             dirty |= ui.add(egui::DragValue::new(&mut s.grid_size).range(4.0..=200.0).speed(1.0).suffix(" pt")).changed();
         });
         ui.label(egui::RichText::new("Hold Alt while moving or resizing a box to place it freely.").color(Color32::from_gray(150)).size(12.0));
+        dirty |= ui.checkbox(&mut s.search_apps, "Quick search also finds programs (from the Start menu)").changed();
         #[cfg(windows)]
         ui.horizontal_wrapped(|ui| {
             ui.label("Quick search shortcut:");
@@ -3587,9 +3730,10 @@ fn make_tray(ctx: &egui::Context, cmds: Arc<Mutex<Vec<TrayCmd>>>) -> Option<tray
     let hide = MenuItem::new("Hide / show boxes", true, None);
     let next_page = MenuItem::new("Next page of boxes", true, None);
     let draw_box = MenuItem::new("Draw a new box…  (Ctrl+Alt+B)", true, None);
+    let undo_delete = MenuItem::new("Bring back the last deleted box", true, None);
     let quit = MenuItem::new("Quit", true, None);
-    let _ = menu.append_items(&[&open, &search, &hide, &next_page, &new_box, &draw_box, &PredefinedMenuItem::separator(), &quit]);
-    let (open_id, new_id, quit_id, search_id, hide_id, page_id, draw_id) = (open.id().clone(), new_box.id().clone(), quit.id().clone(), search.id().clone(), hide.id().clone(), next_page.id().clone(), draw_box.id().clone());
+    let _ = menu.append_items(&[&open, &search, &hide, &next_page, &new_box, &draw_box, &undo_delete, &PredefinedMenuItem::separator(), &quit]);
+    let (open_id, new_id, quit_id, search_id, hide_id, page_id, draw_id, undo_id) = (open.id().clone(), new_box.id().clone(), quit.id().clone(), search.id().clone(), hide.id().clone(), next_page.id().clone(), draw_box.id().clone(), undo_delete.id().clone());
     {
         let cmds = cmds.clone();
         let ctx = ctx.clone();
@@ -3606,6 +3750,8 @@ fn make_tray(ctx: &egui::Context, cmds: Arc<Mutex<Vec<TrayCmd>>>) -> Option<tray
                 Some(TrayCmd::NextPage)
             } else if e.id == draw_id {
                 Some(TrayCmd::DrawBox)
+            } else if e.id == undo_id {
+                Some(TrayCmd::UndoDelete)
             } else if e.id == quit_id {
                 Some(TrayCmd::Quit)
             } else {
@@ -3695,8 +3841,12 @@ impl DeskApp {
         let w = 600.0_f32.min(sw - 40.0);
         let (x, y) = (((sw - w) / 2.0).max(0.0), (sh * 0.16).max(0.0));
         let rect_px = [(x * scale) as i32, (y * scale) as i32, (w * scale) as i32, (s.height * scale) as i32];
-        let results: Vec<DeskItem> = crate::search::rank(self.items.values(), &s.query, 12).into_iter().cloned().collect();
+        // Desktop items, and (if turned on) the Start menu's programs.
+        let apps = crate::apps::list();
+        let pool = crate::apps::search_pool(self.items.values(), &apps, self.layout.settings.search_apps);
+        let results: Vec<DeskItem> = crate::search::rank(pool, &s.query, 12).into_iter().cloned().collect();
         let homes = self.item_homes();
+        let app_paths: HashSet<String> = apps.iter().map(|a| a.path.to_lowercase()).collect();
         let other = self.layout.fences.iter().find(|f| f.auto_sort).map(|f| f.name.clone()).unwrap_or_else(|| "Desktop".into());
         if s.sel >= results.len() {
             s.sel = results.len().saturating_sub(1);
@@ -3784,7 +3934,8 @@ impl DeskApp {
                                 p.rect_filled(ir.shrink(3.0), egui::CornerRadius::same(3), Color32::from_gray(110));
                             }
                         }
-                        let home = homes.get(&it.path.to_lowercase()).cloned().unwrap_or_else(|| other.clone());
+                        let key = it.path.to_lowercase();
+                        let home = homes.get(&key).cloned().unwrap_or_else(|| if app_paths.contains(&key) { "Program".to_string() } else { other.clone() });
                         p.text(Pos2::new(rect.min.x + 38.0, rect.center().y), egui::Align2::LEFT_CENTER, &it.name, FontId::proportional(14.5), Color32::from_gray(240));
                         p.text(Pos2::new(rect.max.x - 8.0, rect.center().y), egui::Align2::RIGHT_CENTER, home, FontId::proportional(12.0), Color32::from_gray(150));
                         if resp.clicked() {
@@ -4178,7 +4329,8 @@ fn search_widget(ui: &mut egui::Ui, id: u64, desk: &DeskState, icons: &mut IconC
     }
     let row_h = 28.0;
     let fits = ((ui.available_height() - 6.0) / row_h).floor().max(1.0) as usize;
-    let results: Vec<&DeskItem> = if q.trim().is_empty() { Vec::new() } else { crate::search::rank(desk.items.values(), &q, fits) };
+    let apps = crate::apps::list();
+    let results: Vec<&DeskItem> = if q.trim().is_empty() { Vec::new() } else { crate::search::rank(crate::apps::search_pool(desk.items.values(), &apps, crate::apps::enabled()), &q, fits) };
     let (up, down, enter, esc) = ui.input(|i| (i.key_pressed(egui::Key::ArrowUp), i.key_pressed(egui::Key::ArrowDown), i.key_pressed(egui::Key::Enter), i.key_pressed(egui::Key::Escape)));
     let mut open: Option<String> = None;
     if r.has_focus() || r.lost_focus() {
@@ -4314,5 +4466,48 @@ impl DeskApp {
                 self.redraw_all = true;
             }
         }
+    }
+}
+
+#[cfg(windows)]
+const UNDO_PANEL: u64 = u64::MAX - 6;
+
+impl DeskApp {
+    /// A small note at the bottom of the main monitor after a box was deleted, with "Undo".
+    #[cfg(windows)]
+    fn show_undo_toast(&mut self, ctx: &egui::Context) {
+        let Some((f, at)) = self.deleted.last() else { return };
+        let name = f.name.clone();
+        let left = Duration::from_secs(8).saturating_sub(at.elapsed());
+        let scale = desktop::system_scale();
+        let work = desktop::work_area_at(Pos2::new(10.0, 10.0), scale);
+        let (w, h) = (380.0_f32, 52.0_f32);
+        let (x, y) = (work.center().x - w / 2.0, work.max.y - h - 24.0);
+        let rect_px = [(x * scale) as i32, (y * scale) as i32, (w * scale) as i32, (h * scale) as i32];
+        let force = self.panel_force;
+        let mut undo = false;
+        if let Some(mut hosts) = self.hosts.take() {
+            hosts.panel(UNDO_PANEL, crate::host::PanelKind::Menu, "DesktopShepherd undo", rect_px, true, force, |pctx| {
+                let frame = egui::Frame::new().fill(Color32::from_rgb(44, 44, 46)).stroke(egui::Stroke::new(1.0_f32, Color32::from_white_alpha(30))).inner_margin(egui::Margin::symmetric(14, 10));
+                egui::CentralPanel::default().frame(frame).show(pctx, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.add(egui::Label::new(egui::RichText::new(format!("“{name}” deleted")).size(14.0).color(Color32::WHITE)).truncate());
+                        ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                            if ui.button(egui::RichText::new("Undo").size(14.0)).clicked() {
+                                undo = true;
+                            }
+                        });
+                    });
+                });
+            });
+            self.hosts = Some(hosts);
+        }
+        if undo {
+            let i = self.deleted.len() - 1;
+            self.actions.push(Act::RestoreDeleted(i));
+        }
+        // Close it on time.
+        ctx.request_repaint_after(left + Duration::from_millis(50));
+        crate::runloop::wake_after(left + Duration::from_millis(50));
     }
 }

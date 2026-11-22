@@ -1295,3 +1295,40 @@ pub fn set_desktop_menu(on: bool) {
         let _ = on;
     }
 }
+
+/// Windows' file picker for a layout file: Save (`save` = true, suggesting `name`) or Open.
+/// Call from a helper thread: it waits for the person.
+pub fn pick_file(save: bool, title: &str, name: &str) -> Option<String> {
+    #[cfg(windows)]
+    unsafe {
+        use windows::core::{w, HSTRING};
+        use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED};
+        use windows::Win32::UI::Shell::Common::COMDLG_FILTERSPEC;
+        use windows::Win32::UI::Shell::{FileOpenDialog, FileSaveDialog, IFileDialog, IFileOpenDialog, IFileSaveDialog, SIGDN_FILESYSPATH};
+        use windows::core::Interface;
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        let dlg: IFileDialog = if save {
+            CoCreateInstance::<_, IFileSaveDialog>(&FileSaveDialog, None, CLSCTX_INPROC_SERVER).ok()?.cast().ok()?
+        } else {
+            CoCreateInstance::<_, IFileOpenDialog>(&FileOpenDialog, None, CLSCTX_INPROC_SERVER).ok()?.cast().ok()?
+        };
+        let _ = dlg.SetTitle(&HSTRING::from(title));
+        let types = [COMDLG_FILTERSPEC { pszName: w!("DesktopShepherd layout (*.json)"), pszSpec: w!("*.json") }];
+        let _ = dlg.SetFileTypes(&types);
+        let _ = dlg.SetDefaultExtension(w!("json"));
+        if !name.is_empty() {
+            let _ = dlg.SetFileName(&HSTRING::from(name));
+        }
+        dlg.Show(None).ok()?;
+        let item = dlg.GetResult().ok()?;
+        let n = item.GetDisplayName(SIGDN_FILESYSPATH).ok()?;
+        let path = n.to_string().ok();
+        windows::Win32::System::Com::CoTaskMemFree(Some(n.0 as *const _));
+        path
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (save, title, name);
+        None
+    }
+}

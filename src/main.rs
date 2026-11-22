@@ -2,6 +2,7 @@
 //! DesktopShepherd — a lightweight desktop icon organizer (boxes on the desktop) with widgets.
 
 mod agenda;
+mod apps;
 mod app;
 mod comp_trial;
 #[cfg(windows)]

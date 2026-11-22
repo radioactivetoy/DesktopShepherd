@@ -222,6 +222,13 @@ pub struct Settings {
     pub per_setup: bool,
     /// "DesktopShepherd ▸" in the desktop's right-click menu (new box / widget there).
     pub desktop_menu: bool,
+    /// Quick search also lists Start menu programs.
+    pub search_apps: bool,
+    /// Boxes fade while the mouse is away from them.
+    pub fade_idle: bool,
+    /// How visible a faded box stays (percent) and after how many seconds away it fades.
+    pub fade_opacity: u8,
+    pub fade_delay: u32,
 }
 
 impl Default for Settings {
@@ -245,6 +252,10 @@ impl Default for Settings {
             hide_hotkey: 5,
             per_setup: false,
             desktop_menu: true,
+            search_apps: true,
+            fade_idle: false,
+            fade_opacity: 30,
+            fade_delay: 3,
         }
     }
 }
