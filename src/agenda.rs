@@ -107,13 +107,13 @@ fn start_download(url: String) {
         let result = std::panic::catch_unwind(|| {
             download(&url).and_then(|text| {
                 if !text.contains("BEGIN:VCALENDAR") {
-                    return Err("that link isn't an iCal calendar (.ics)".to_string());
+                    return Err(crate::i18n::t("that link isn't an iCal calendar (.ics)").to_string());
                 }
                 let today = chrono::Local::now().date_naive();
                 Ok(parse(&text, today - CDuration::days(BACK_DAYS), today + CDuration::days(AHEAD_DAYS)))
             })
         })
-        .unwrap_or_else(|_| Err("that calendar has something DesktopShepherd can't read".to_string()));
+        .unwrap_or_else(|_| Err(crate::i18n::t("that calendar has something DesktopShepherd can't read").to_string()));
         if let Ok(mut g) = STATE.lock() {
             let st = g.get_or_insert_with(HashMap::new).entry(url.clone()).or_default();
             st.loading = false;
@@ -152,12 +152,12 @@ fn download(url: &str) -> Result<String, String> {
     use windows::Win32::Networking::WinHttp::*;
     let url = url.trim();
     let Some((scheme, rest)) = url.split_once("://") else {
-        return Err("the link must start with https://, http:// or webcal://".into());
+        return Err(crate::i18n::t("the link must start with https://, http:// or webcal://").into());
     };
     let secure = match scheme.to_ascii_lowercase().as_str() {
         "https" | "webcal" | "webcals" => true,
         "http" => false,
-        _ => return Err("the link must start with https://, http:// or webcal://".into()),
+        _ => return Err(crate::i18n::t("the link must start with https://, http:// or webcal://").into()),
     };
     let rest = rest.split('#').next().unwrap_or("");
     // Server part: up to the first / or ?; the rest (path and query) is what is asked for.
@@ -172,7 +172,7 @@ fn download(url: &str) -> Result<String, String> {
         _ => (hostport, if secure { 443 } else { 80 }),
     };
     if host.is_empty() {
-        return Err("the link has no server name".into());
+        return Err(crate::i18n::t("the link has no server name").into());
     }
     struct Handle(*mut core::ffi::c_void);
     impl Drop for Handle {
@@ -187,20 +187,20 @@ fn download(url: &str) -> Result<String, String> {
     unsafe {
         let session = Handle(WinHttpOpen(&HSTRING::from("DesktopShepherd-Agenda/1.0"), WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, PCWSTR::null(), PCWSTR::null(), 0));
         if session.0.is_null() {
-            return Err("Windows' web access could not start".into());
+            return Err(crate::i18n::t("Windows' web access could not start").into());
         }
         let _ = WinHttpSetTimeouts(session.0, 20_000, 20_000, 20_000, 20_000);
         let connect = Handle(WinHttpConnect(session.0, &HSTRING::from(host), port, 0));
         if connect.0.is_null() {
-            return Err(format!("could not reach {host}"));
+            return Err(crate::i18n::tf("could not reach {}", &[&host]));
         }
         let flags = if secure { WINHTTP_FLAG_SECURE } else { WINHTTP_OPEN_REQUEST_FLAGS(0) };
         let request = Handle(WinHttpOpenRequest(connect.0, &HSTRING::from("GET"), &HSTRING::from(path), PCWSTR::null(), PCWSTR::null(), std::ptr::null(), flags));
         if request.0.is_null() {
-            return Err("could not prepare the request".into());
+            return Err(crate::i18n::t("could not prepare the request").into());
         }
-        WinHttpSendRequest(request.0, None, None, 0, 0, 0).map_err(|e| format!("could not reach {host} ({})", e.message()))?;
-        WinHttpReceiveResponse(request.0, std::ptr::null_mut()).map_err(|e| format!("no answer from {host} ({})", e.message()))?;
+        WinHttpSendRequest(request.0, None, None, 0, 0, 0).map_err(|e| crate::i18n::tf("could not reach {} ({})", &[&host, &e.message()]))?;
+        WinHttpReceiveResponse(request.0, std::ptr::null_mut()).map_err(|e| crate::i18n::tf("no answer from {} ({})", &[&host, &e.message()]))?;
         let mut status: u32 = 0;
         let mut len = std::mem::size_of::<u32>() as u32;
         let _ = WinHttpQueryHeaders(
@@ -213,11 +213,11 @@ fn download(url: &str) -> Result<String, String> {
         );
         if status != 200 {
             return Err(match status {
-                401 | 403 => format!("{host} refused the link (error {status}): is it the private/secret iCal address?"),
+                401 | 403 => crate::i18n::tf("{} refused the link (error {}): is it the private/secret iCal address?", &[&host, &status]),
                 // Google answers 404 to a calendar's public address unless it is shared publicly.
-                404 if path.contains("/public/") => "that is the calendar's public address, which only works for public calendars: use its \"Secret address in iCal format\" instead".to_string(),
-                404 => format!("{host} doesn't know that link (error 404)"),
-                _ => format!("{host} answered with error {status}"),
+                404 if path.contains("/public/") => crate::i18n::t("that is the calendar's public address, which only works for public calendars: use its \"Secret address in iCal format\" instead").to_string(),
+                404 => crate::i18n::tf("{} doesn't know that link (error 404)", &[&host]),
+                _ => crate::i18n::tf("{} answered with error {}", &[&host, &status]),
             });
         }
         let mut body: Vec<u8> = Vec::new();
@@ -230,14 +230,14 @@ fn download(url: &str) -> Result<String, String> {
             body.resize(start + avail as usize, 0);
             let mut read: u32 = 0;
             if WinHttpReadData(request.0, body[start..].as_mut_ptr() as *mut _, avail, &mut read).is_err() {
-                return Err("the download was interrupted".into());
+                return Err(crate::i18n::t("the download was interrupted").into());
             }
             body.truncate(start + read as usize);
             if read == 0 {
                 break;
             }
             if body.len() > 8 * 1024 * 1024 {
-                return Err("that calendar is too big (over 8 MB)".into());
+                return Err(crate::i18n::t("that calendar is too big (over 8 MB)").into());
             }
         }
         Ok(String::from_utf8_lossy(&body).into_owned())
@@ -246,7 +246,7 @@ fn download(url: &str) -> Result<String, String> {
 
 #[cfg(not(windows))]
 fn download(_url: &str) -> Result<String, String> {
-    Err("not available on this system".into())
+    Err(crate::i18n::t("not available on this system").into())
 }
 
 // ---- reading iCal ----------------------------------------------------------------------------

@@ -998,7 +998,7 @@ pub fn pick_folder() -> Option<String> {
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
         let dlg: IFileOpenDialog = CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER).ok()?;
         let _ = dlg.SetOptions(FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM);
-        let _ = dlg.SetTitle(windows::core::w!("Choose a folder for the box"));
+        let _ = dlg.SetTitle(&windows::core::HSTRING::from(crate::i18n::t("Choose a folder for the box")));
         dlg.Show(None).ok()?;
         let item = dlg.GetResult().ok()?;
         let name = item.GetDisplayName(SIGDN_FILESYSPATH).ok()?;
@@ -1185,8 +1185,9 @@ pub fn pick_picture() -> Option<String> {
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
         let dlg: IFileOpenDialog = CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER).ok()?;
         let _ = dlg.SetOptions(FOS_FILEMUSTEXIST | FOS_FORCEFILESYSTEM);
-        let _ = dlg.SetTitle(w!("Choose a picture"));
-        let types = [COMDLG_FILTERSPEC { pszName: w!("Pictures (PNG, JPEG)"), pszSpec: w!("*.png;*.jpg;*.jpeg") }];
+        let _ = dlg.SetTitle(&windows::core::HSTRING::from(crate::i18n::t("Choose a picture")));
+        let type_name = windows::core::HSTRING::from(crate::i18n::t("Pictures (PNG, JPEG)"));
+        let types = [COMDLG_FILTERSPEC { pszName: windows::core::PCWSTR(type_name.as_ptr()), pszSpec: w!("*.png;*.jpg;*.jpeg") }];
         let _ = dlg.SetFileTypes(&types);
         dlg.Show(None).ok()?;
         let item = dlg.GetResult().ok()?;
@@ -1279,14 +1280,14 @@ pub fn set_desktop_menu(on: bool) {
                 }
             }
         };
-        item(&root, "01draw", "Draw a new box…", "draw");
-        item(&root, "02box", "New box here", "box");
-        item(&root, "03folder", "New folder box here…", "folder");
+        item(&root, "01draw", crate::i18n::t("Draw a new box…"), "draw");
+        item(&root, "02box", crate::i18n::t("New box here"), "box");
+        item(&root, "03folder", crate::i18n::t("New folder box here…"), "folder");
         if let Ok((w, _)) = root.create_subkey("shell\\04widgets") {
-            let _ = w.set_value("MUIVerb", &"New widget here");
+            let _ = w.set_value("MUIVerb", &crate::i18n::t("New widget here"));
             let _ = w.set_value("SubCommands", &"");
             for (i, k) in crate::widgets::REGISTRY.iter().enumerate() {
-                item(&w, &format!("{i:02}{}", k.id), k.label, &format!("widget:{}", k.id));
+                item(&w, &format!("{i:02}{}", k.id), crate::i18n::t(k.label), &format!("widget:{}", k.id));
             }
         }
     }
@@ -1313,7 +1314,8 @@ pub fn pick_file(save: bool, title: &str, name: &str) -> Option<String> {
             CoCreateInstance::<_, IFileOpenDialog>(&FileOpenDialog, None, CLSCTX_INPROC_SERVER).ok()?.cast().ok()?
         };
         let _ = dlg.SetTitle(&HSTRING::from(title));
-        let types = [COMDLG_FILTERSPEC { pszName: w!("DesktopShepherd layout (*.json)"), pszSpec: w!("*.json") }];
+        let type_name = HSTRING::from(crate::i18n::t("DesktopShepherd layout (*.json)"));
+        let types = [COMDLG_FILTERSPEC { pszName: windows::core::PCWSTR(type_name.as_ptr()), pszSpec: w!("*.json") }];
         let _ = dlg.SetFileTypes(&types);
         let _ = dlg.SetDefaultExtension(w!("json"));
         if !name.is_empty() {

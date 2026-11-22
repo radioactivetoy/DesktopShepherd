@@ -125,7 +125,7 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
             let old = SelectObject(dc, font);
             SetBkMode(dc, TRANSPARENT);
             SetTextColor(dc, COLORREF(0x00FF_FFFF));
-            let mut hint: Vec<u16> = "Drag to draw the new box  ·  Esc to cancel".encode_utf16().collect();
+            let mut hint: Vec<u16> = crate::i18n::t("Drag to draw the new box  ·  Esc to cancel").encode_utf16().collect();
             let mut hr = main;
             DrawTextW(dc, &mut hint, &mut hr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
             SelectObject(dc, old);

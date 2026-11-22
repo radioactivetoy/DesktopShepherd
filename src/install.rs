@@ -10,6 +10,7 @@
 
 #![cfg(windows)]
 
+use crate::i18n::tf;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use windows::core::{w, HSTRING, PCWSTR};
@@ -122,20 +123,20 @@ pub fn run_setup() {
     let exe = dir.join(format!("{APP}.exe"));
     let again = exe.exists();
     let q = if again {
-        format!("Update {APP}?\n\nThe installed copy in\n{}\nwill be replaced. Your boxes stay as they are.", dir.display())
+        tf("Update {}?\n\nThe installed copy in\n{}\nwill be replaced. Your boxes stay as they are.", &[&APP, &dir.display()])
     } else {
-        format!("Install {APP}?\n\nIt goes to\n{}\n(just for you, no admin rights needed), gets a Start menu entry and starts with Windows.\n\nYou can remove it later from Settings > Apps > Installed apps.", dir.display())
+        tf("Install {}?\n\nIt goes to\n{}\n(just for you, no admin rights needed), gets a Start menu entry and starts with Windows.\n\nYou can remove it later from Settings > Apps > Installed apps.", &[&APP, &dir.display()])
     };
     if !ask(&q, MB_YESNO | MB_ICONQUESTION) {
         return;
     }
     if !stop_running() {
-        tell(&format!("{APP} is still running and didn't close. Quit it from its tray icon, then run the setup again."), MB_ICONWARNING);
+        tell(&tf("{} is still running and didn't close. Quit it from its tray icon, then run the setup again.", &[&APP]), MB_ICONWARNING);
         return;
     }
     let Ok(me) = std::env::current_exe() else { return };
     if let Err(e) = std::fs::create_dir_all(&dir).and_then(|_| std::fs::copy(&me, &exe).map(|_| ())) {
-        tell(&format!("Could not copy the program to\n{}\n\n{e}", dir.display()), MB_ICONWARNING);
+        tell(&tf("Could not copy the program to\n{}\n\n{}", &[&dir.display(), &e]), MB_ICONWARNING);
         return;
     }
     if let Some(lnk) = shortcut_path() {
@@ -171,19 +172,24 @@ pub fn run_setup() {
         }
     }
     // Said before starting it: the starting program would close this message right away.
-    tell(&format!("{APP} is {}. It starts when you press OK; its icon is in the tray (next to the clock).", if again { "updated" } else { "installed" }), MB_ICONINFORMATION);
+    let done = if again {
+        tf("{} is updated. It starts when you press OK; its icon is in the tray (next to the clock).", &[&APP])
+    } else {
+        tf("{} is installed. It starts when you press OK; its icon is in the tray (next to the clock).", &[&APP])
+    };
+    tell(&done, MB_ICONINFORMATION);
     if let Err(e) = std::process::Command::new(&exe).current_dir(&dir).env("DESKTOPSHEPHERD_INSTALLED", "1").spawn() {
-        tell(&format!("{APP} is installed but did not start: {e}"), MB_ICONWARNING);
+        tell(&tf("{} is installed but did not start: {}", &[&APP, &e]), MB_ICONWARNING);
     }
 }
 
 /// `--uninstall`, run by Windows' "Installed apps".
 pub fn run_uninstall() {
-    if !ask(&format!("Remove {APP} from this computer?"), MB_YESNO | MB_ICONQUESTION) {
+    if !ask(&tf("Remove {} from this computer?", &[&APP]), MB_YESNO | MB_ICONQUESTION) {
         return;
     }
     if !stop_running() {
-        tell(&format!("{APP} is still running and didn't close. Quit it from its tray icon, then try again."), MB_ICONWARNING);
+        tell(&tf("{} is still running and didn't close. Quit it from its tray icon, then try again.", &[&APP]), MB_ICONWARNING);
         return;
     }
     // Make sure the normal desktop icons are back (the program does it when it quits, too).
@@ -203,7 +209,7 @@ pub fn run_uninstall() {
     }
     let data = crate::storage::data_dir();
     let delete_data = ask(
-        &format!("Also delete your saved boxes and settings?\n\n{}\n\nChoose No to keep them in case you install {APP} again.", data.display()),
+        &tf("Also delete your saved boxes and settings?\n\n{}\n\nChoose No to keep them in case you install {} again.", &[&data.display(), &APP]),
         MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2,
     );
     if delete_data {
@@ -214,7 +220,7 @@ pub fn run_uninstall() {
         let _ = crate::storage::save(&layout);
     }
     // Said first: while this message is open the program is still running from the folder.
-    tell(&format!("{APP} has been removed."), MB_ICONINFORMATION);
+    tell(&tf("{} has been removed.", &[&APP]), MB_ICONINFORMATION);
     // This program is running from the folder being removed: a short-lived, hidden command
     // window deletes it a moment after we exit.
     let dir = install_dir();

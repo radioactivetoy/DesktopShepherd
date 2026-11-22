@@ -351,7 +351,7 @@ pub fn paint_static(painter: &egui::Painter, icons: &mut IconCache, fence: &Fenc
     if let Some(wc) = &fence.widget {
         let a = areas(fence, rect, 1, scale);
         paint_title(painter, fence, a.title, scale, false);
-        let label = crate::widgets::find(&wc.kind).map(|k| k.label).unwrap_or("Widget");
+        let label = crate::widgets::find(&wc.kind).map(|k| crate::i18n::t(k.label)).unwrap_or(crate::i18n::t("Widget"));
         let g = painter.layout_no_wrap(label.to_string(), FontId::proportional(14.0 * scale), Color32::from_gray(200));
         painter.galley(a.content.center() - g.size() / 2.0, g, Color32::from_gray(200));
         return;

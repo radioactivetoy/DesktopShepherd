@@ -8,6 +8,7 @@
 //! * saving waits until changes settle, then writes once.
 
 use crate::desktop;
+use crate::i18n::{t, tf};
 use crate::fence_view::{self as fv, DeskState, ROLLED_HEIGHT};
 use crate::ghost;
 use crate::icons::IconCache;
@@ -286,6 +287,7 @@ impl DeskApp {
         // The first desktop read happens right away (it is quick) so boxes start filled.
         let initial = desktop::scan(&clean_paths(&layout));
         if first_run {
+            crate::i18n::set_lang(layout.settings.language); // the first boxes get their names in this language
             layout = default_layout(&initial);
             // Just installed by the setup: start with Windows (the setup asked for it).
             if std::env::var_os("DESKTOPSHEPHERD_INSTALLED").is_some() {
@@ -592,7 +594,7 @@ impl DeskApp {
                         id,
                         rect,
                         auto_sort: auto,
-                        name: if auto { "Desktop".into() } else { "New box".into() },
+                        name: if auto { t("Desktop").into() } else { t("New box").into() },
                         ..Fence::default()
                     });
                     self.mark_dirty();
@@ -604,7 +606,7 @@ impl DeskApp {
                         self.layout.fences.push(Fence {
                             id,
                             rect,
-                            name: k.label.into(),
+                            name: t(k.label).into(),
                             title_pos: TitlePos::Top,
                             widget: Some(WidgetConfig { kind: k.id.into(), data: serde_json::json!({}) }),
                             ..Fence::default()
@@ -663,7 +665,7 @@ impl DeskApp {
                     {
                         let text = serde_json::to_string_pretty(&self.layout).unwrap_or_default();
                         let _ = std::thread::Builder::new().name("export-layout".into()).spawn(move || {
-                            if let Some(p) = desktop::pick_file(true, "Export layout", "DesktopShepherd layout.json") {
+                            if let Some(p) = desktop::pick_file(true, t("Export layout"), "DesktopShepherd layout.json") {
                                 if let Err(e) = std::fs::write(&p, text) {
                                     storage::log_line(&format!("export failed: {e}"));
                                 }
@@ -676,7 +678,7 @@ impl DeskApp {
                     {
                         let picked = self.picked_layout.clone();
                         let _ = std::thread::Builder::new().name("import-layout".into()).spawn(move || {
-                            if let Some(p) = desktop::pick_file(false, "Import layout", "") {
+                            if let Some(p) = desktop::pick_file(false, t("Import layout"), "") {
                                 if let Ok(mut s) = picked.lock() {
                                     *s = Some(p);
                                 }
@@ -768,11 +770,11 @@ impl DeskApp {
                     {
                         use crate::shellmenu::Extra;
                         let mut extras: Vec<Extra> = targets.iter().enumerate().map(|(i, (_, n))| Extra { id: 100 + i as u32, label: n.clone(), sub: true }).collect();
-                        extras.push(Extra { id: 99, label: "New box".into(), sub: true });
+                        extras.push(Extra { id: 99, label: t("New box").into(), sub: true });
                         if !from_auto {
-                            extras.push(Extra { id: 1, label: "Remove from this box".into(), sub: false });
+                            extras.push(Extra { id: 1, label: t("Remove from this box").into(), sub: false });
                         }
-                        extras.push(Extra { id: 3, label: "Open file location".into(), sub: false });
+                        extras.push(Extra { id: 3, label: t("Open file location").into(), sub: false });
                         if crate::shellmenu::spawn(&paths, &extras) {
                             self.menu_ctx = Some((path.clone(), paths, targets.iter().map(|t| t.0).collect()));
                         } else {
@@ -1758,7 +1760,7 @@ fn fence_window(
         if let Some((rid, tab, mut text)) = st.renaming.take() {
             if rid == fence.id {
                 let edit_rect = Rect::from_min_size(rect.min + Vec2::new(30.0, 4.0), Vec2::new((rect.width() - 60.0).max(80.0), 22.0));
-                let resp = ui.put(edit_rect, egui::TextEdit::singleline(&mut text).hint_text("Name"));
+                let resp = ui.put(edit_rect, egui::TextEdit::singleline(&mut text).hint_text(t("Name")));
                 resp.request_focus();
                 let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
                 let esc = ui.input(|i| i.key_pressed(egui::Key::Escape));
@@ -1820,7 +1822,7 @@ fn fence_window(
                     }
                 }
                 None => {
-                    child.label(format!("Unknown widget \"{}\"", wc.kind));
+                    child.label(tf("Unknown widget \"{}\"", &[&wc.kind]));
                 }
             }
         } else if let Some((_, items)) = tabs.get(sel) {
@@ -1988,7 +1990,7 @@ fn fence_window(
                             ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
                             if let Some(p) = resp.interact_pointer_pos() {
                                 let n = st.item_drag.as_ref().map(|d| d.1.len()).unwrap_or(1);
-                                let label = if n == 1 { it.name.clone() } else { format!("{n} items") };
+                                let label = if n == 1 { it.name.clone() } else { tf("{} items", &[&n]) };
                                 let g = ui.painter().layout_no_wrap(label, egui::FontId::proportional(12.0), Color32::WHITE);
                                 let r = Rect::from_min_size(p + Vec2::new(14.0, 14.0), g.size() + Vec2::new(12.0, 6.0));
                                 let top = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Tooltip, ui.id().with("dragbadge")));
@@ -2058,9 +2060,9 @@ fn fence_window(
                     }
                     if items.is_empty() {
                         let msg = if fence.auto_sort {
-                            "Everything on the desktop is in a box."
+                            t("Everything on the desktop is in a box.")
                         } else {
-                            "Drag files here, or right-click an icon › Move to."
+                            t("Drag files here, or right-click an icon › Move to.")
                         };
                         ui.add_space(8.0);
                         ui.label(egui::RichText::new(msg).color(Color32::from_gray(150)).size(12.0));
@@ -2280,7 +2282,7 @@ fn slider_row(ui: &mut egui::Ui, label: &str, value: String, slider: &mut dyn Fn
 /// Personalize window, left column: colour, glass and border. Returns true if the look changed.
 fn look_left(ui: &mut egui::Ui, fence: &mut Fence) -> bool {
     let mut dirty = false;
-                heading(ui, "Colour");
+                heading(ui, t("Colour"));
                 // One row of swatches; the clear-glass one is drawn as see-through (a checkerboard).
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 2.0;
@@ -2305,7 +2307,7 @@ fn look_left(ui: &mut egui::Ui, fence: &mut Fence) -> bool {
                         } else if resp.hovered() {
                             p.circle_stroke(c, 13.0, egui::Stroke::new(1.0_f32, Color32::from_white_alpha(90)));
                         }
-                        if resp.on_hover_text(*name).clicked() {
+                        if resp.on_hover_text(t(*name)).clicked() {
                             fence.color = *rgb;
                             fence.alpha = *alpha;
                             dirty = true;
@@ -2314,7 +2316,7 @@ fn look_left(ui: &mut egui::Ui, fence: &mut Fence) -> bool {
                 });
                 // Any colour (with its opacity), picked by hand.
                 let mut tint = Color32::from_rgba_unmultiplied(fence.color[0], fence.color[1], fence.color[2], fence.alpha);
-                if color_row(ui, "box-colour", "Any colour…", &mut tint, true) {
+                if color_row(ui, "box-colour", t("Any colour…"), &mut tint, true) {
                     let [r, g, b, a] = tint.to_srgba_unmultiplied();
                     fence.color = [r, g, b];
                     fence.alpha = a;
@@ -2322,18 +2324,18 @@ fn look_left(ui: &mut egui::Ui, fence: &mut Fence) -> bool {
                 }
                 sep(ui);
                 let alpha_pct = format!("{}%", (fence.alpha as f32 / 2.55).round());
-                dirty |= slider_row(ui, "Opacity", alpha_pct, &mut |ui| ui.add(egui::Slider::new(&mut fence.alpha, 0..=255).show_value(false)).changed());
+                dirty |= slider_row(ui, t("Opacity"), alpha_pct, &mut |ui| ui.add(egui::Slider::new(&mut fence.alpha, 0..=255).show_value(false)).changed());
                 let corner_txt = format!("{}", fence.corner.round());
-                dirty |= slider_row(ui, "Corners", corner_txt, &mut |ui| ui.add(egui::Slider::new(&mut fence.corner, 0.0..=16.0).step_by(1.0).show_value(false)).changed());
+                dirty |= slider_row(ui, t("Corners"), corner_txt, &mut |ui| ui.add(egui::Slider::new(&mut fence.corner, 0.0..=16.0).step_by(1.0).show_value(false)).changed());
                 let blur_txt = format!("{}", fence.blur);
-                dirty |= slider_row(ui, "Blur", blur_txt, &mut |ui| ui.add(egui::Slider::new(&mut fence.blur, 0..=40).show_value(false)).changed());
+                dirty |= slider_row(ui, t("Blur"), blur_txt, &mut |ui| ui.add(egui::Slider::new(&mut fence.blur, 0..=40).show_value(false)).changed());
                 sep(ui);
-                heading(ui, "Border");
+                heading(ui, t("Border"));
                 let bw = format!("{}", fence.border_width);
-                dirty |= slider_row(ui, "Thickness", bw, &mut |ui| ui.add(egui::Slider::new(&mut fence.border_width, 0.0..=6.0).step_by(0.5).show_value(false)).changed());
+                dirty |= slider_row(ui, t("Thickness"), bw, &mut |ui| ui.add(egui::Slider::new(&mut fence.border_width, 0.0..=6.0).step_by(0.5).show_value(false)).changed());
                 let [r, g, b, a] = fence.border_color;
                 let mut border = Color32::from_rgba_unmultiplied(r, g, b, a);
-                if color_row(ui, "border-colour", "Border colour…", &mut border, true) {
+                if color_row(ui, "border-colour", t("Border colour…"), &mut border, true) {
                     fence.border_color = border.to_srgba_unmultiplied();
                     dirty = true;
                 }
@@ -2343,27 +2345,27 @@ fn look_left(ui: &mut egui::Ui, fence: &mut Fence) -> bool {
 /// Personalize window, right column: text, icons, title and tab placement, apply to all.
 fn look_right(ui: &mut egui::Ui, fence: &mut Fence, actions: &mut Vec<Act>) -> bool {
     let mut dirty = false;
-                heading(ui, "Text");
+                heading(ui, t("Text"));
                 let [r, g, b] = fence.text_color;
                 let mut text = Color32::from_rgb(r, g, b);
-                if color_row(ui, "text-colour", "Text colour…", &mut text, false) {
+                if color_row(ui, "text-colour", t("Text colour…"), &mut text, false) {
                     let [r, g, b, _] = text.to_srgba_unmultiplied();
                     fence.text_color = [r, g, b];
                     dirty = true;
                 }
                 ui.horizontal(|ui| {
                     ui.add_space(14.0);
-                    dirty |= ui.checkbox(&mut fence.text_shadow, "Shadow behind the text").changed();
+                    dirty |= ui.checkbox(&mut fence.text_shadow, t("Shadow behind the text")).changed();
                 });
                 let ts = format!("{}", fence.title_size.round());
-                dirty |= slider_row(ui, "Title size", ts, &mut |ui| ui.add(egui::Slider::new(&mut fence.title_size, 8.0..=32.0).step_by(1.0).show_value(false)).changed());
+                dirty |= slider_row(ui, t("Title size"), ts, &mut |ui| ui.add(egui::Slider::new(&mut fence.title_size, 8.0..=32.0).step_by(1.0).show_value(false)).changed());
                 let cs = format!("{}", fence.caption_size.round());
-                dirty |= slider_row(ui, "Text size", cs, &mut |ui| ui.add(egui::Slider::new(&mut fence.caption_size, 7.0..=24.0).step_by(1.0).show_value(false)).changed());
+                dirty |= slider_row(ui, t("Text size"), cs, &mut |ui| ui.add(egui::Slider::new(&mut fence.caption_size, 7.0..=24.0).step_by(1.0).show_value(false)).changed());
                 // Font: a drop-down list of the fonts installed on this PC.
                 ui.horizontal(|ui| {
                     ui.add_space(14.0);
                     let (lr, _) = ui.allocate_exact_size(Vec2::new(70.0, 30.0), Sense::hover());
-                    ui.painter().text(Pos2::new(lr.min.x, lr.center().y), egui::Align2::LEFT_CENTER, "Font", FontId::proportional(14.0), Color32::from_gray(225));
+                    ui.painter().text(Pos2::new(lr.min.x, lr.center().y), egui::Align2::LEFT_CENTER, t("Font"), FontId::proportional(14.0), Color32::from_gray(225));
                     let shown = if fence.font.is_empty() { "Segoe UI".to_string() } else { fence.font.clone() };
                     egui::ComboBox::from_id_salt("font-list").selected_text(shown.clone()).width(190.0).height(320.0).show_ui(ui, |ui| {
                         for name in fv::installed_fonts() {
@@ -2376,15 +2378,15 @@ fn look_right(ui: &mut egui::Ui, fence: &mut Fence, actions: &mut Vec<Act>) -> b
                 });
                 if fence.widget.is_none() {
                     sep(ui);
-                    heading(ui, "Icons");
+                    heading(ui, t("Icons"));
                     ui.horizontal(|ui| {
                         ui.add_space(14.0);
-                        dirty |= ui.checkbox(&mut fence.show_captions, "Show names under the icons").changed();
+                        dirty |= ui.checkbox(&mut fence.show_captions, t("Show names under the icons")).changed();
                     });
                     let is = format!("{}", fence.icon_size);
-                    dirty |= slider_row(ui, "Size", is, &mut |ui| ui.add(egui::Slider::new(&mut fence.icon_size, 16..=128).step_by(4.0).show_value(false)).changed());
-                    let sp = if fence.icon_spacing <= 0.0 { "auto".to_string() } else { format!("{}", fence.icon_spacing.round()) };
-                    dirty |= slider_row(ui, "Spacing", sp, &mut |ui| ui.add(egui::Slider::new(&mut fence.icon_spacing, 0.0..=200.0).step_by(2.0).show_value(false)).changed());
+                    dirty |= slider_row(ui, t("Size"), is, &mut |ui| ui.add(egui::Slider::new(&mut fence.icon_size, 16..=128).step_by(4.0).show_value(false)).changed());
+                    let sp = if fence.icon_spacing <= 0.0 { t("auto").to_string() } else { format!("{}", fence.icon_spacing.round()) };
+                    dirty |= slider_row(ui, t("Spacing"), sp, &mut |ui| ui.add(egui::Slider::new(&mut fence.icon_spacing, 0.0..=200.0).step_by(2.0).show_value(false)).changed());
                 }
                 sep(ui);
                 // Two-way switches for where the title and the tabs go.
@@ -2413,9 +2415,9 @@ fn look_right(ui: &mut egui::Ui, fence: &mut Fence, actions: &mut Vec<Act>) -> b
                 ui.horizontal(|ui| {
                     ui.add_space(14.0);
                     let (lr, _) = ui.allocate_exact_size(Vec2::new(70.0, 30.0), Sense::hover());
-                    ui.painter().text(Pos2::new(lr.min.x, lr.center().y), egui::Align2::LEFT_CENTER, "Title", FontId::proportional(14.0), Color32::from_gray(225));
+                    ui.painter().text(Pos2::new(lr.min.x, lr.center().y), egui::Align2::LEFT_CENTER, t("Title"), FontId::proportional(14.0), Color32::from_gray(225));
                     ui.spacing_mut().item_spacing.x = 4.0;
-                    for (pos, text) in [(TitlePos::Hidden, "Off"), (TitlePos::Left, "Left"), (TitlePos::Top, "Top"), (TitlePos::Bottom, "Bottom")] {
+                    for (pos, text) in [(TitlePos::Hidden, t("Off")), (TitlePos::Left, t("Left")), (TitlePos::Top, t("Top")), (TitlePos::Bottom, t("Bottom"))] {
                         let on = fence.title_pos == pos;
                         let fill = if on { Color32::from_rgb(76, 194, 255).linear_multiply(0.35) } else { Color32::from_white_alpha(10) };
                         let b = egui::Button::new(egui::RichText::new(text).size(13.0).color(if on { Color32::WHITE } else { Color32::from_gray(200) }))
@@ -2428,12 +2430,12 @@ fn look_right(ui: &mut egui::Ui, fence: &mut Fence, actions: &mut Vec<Act>) -> b
                         }
                     }
                 });
-                if let Some(right) = switch(ui, "Tabs", "Right side", "Top", fence.tab_pos == TabPos::Right) {
+                if let Some(right) = switch(ui, t("Tabs"), t("Right side"), t("Top"), fence.tab_pos == TabPos::Right) {
                     fence.tab_pos = if right { TabPos::Right } else { TabPos::Top };
                     dirty = true;
                 }
                 sep(ui);
-                if row(ui, icon::COLOR, "Apply this look to all boxes", None, true).clicked() {
+                if row(ui, icon::COLOR, t("Apply this look to all boxes"), None, true).clicked() {
                     actions.push(Act::ApplyLookToAll(fence.id));
                 }
                 ui.add_space(4.0);    dirty
@@ -2446,12 +2448,12 @@ fn fence_menu(ui: &mut egui::Ui, fence: &mut Fence, st: &mut UiState, page: &mut
     let mut close = false;
     match *page {
         MenuPage::Main => {
-            if row(ui, icon::RENAME, "Rename box", None, true).clicked() {
+            if row(ui, icon::RENAME, t("Rename box"), None, true).clicked() {
                 st.renaming = Some((fence.id, None, fence.name.clone()));
                 st.box_cmds.push((fence.id, ViewportCommand::Focus));
                 close = true;
             }
-            let (ic_roll, label) = if fence.expanded { (icon::UP, "Roll up") } else { (icon::DOWN, "Unroll") };
+            let (ic_roll, label) = if fence.expanded { (icon::UP, t("Roll up")) } else { (icon::DOWN, t("Unroll")) };
             if row(ui, ic_roll, label, None, true).clicked() {
                 fence.expanded = !fence.expanded;
                 st.hover_open.remove(&fence.id);
@@ -2462,28 +2464,28 @@ fn fence_menu(ui: &mut egui::Ui, fence: &mut Fence, st: &mut UiState, page: &mut
                 dirty = true;
                 close = true;
             }
-            if row(ui, icon::LOCK, "Lock position and size", fence.locked.then_some(icon::CHECK), true).clicked() {
+            if row(ui, icon::LOCK, t("Lock position and size"), fence.locked.then_some(icon::CHECK), true).clicked() {
                 fence.locked = !fence.locked;
                 dirty = true;
                 close = true;
             }
             sep(ui);
             if fence.widget.is_none() {
-                if sub(ui, icon::VIEW, "View") {
+                if sub(ui, icon::VIEW, t("View")) {
                     *page = MenuPage::View;
                 }
-                if sub(ui, icon::SORT, "Sort by") {
+                if sub(ui, icon::SORT, t("Sort by")) {
                     *page = MenuPage::Sort;
                 }
-                if !fence.auto_sort && row(ui, icon::TAB, "New tab", None, true).clicked() {
+                if !fence.auto_sort && row(ui, icon::TAB, t("New tab"), None, true).clicked() {
                     let n = fence.tabs.len() + 1;
-                    fence.tabs.push(Tab { name: format!("Tab {n}"), items: vec![] });
+                    fence.tabs.push(Tab { name: tf("Tab {}", &[&n]), items: vec![] });
                     fence.sel_tab = fence.tabs.len() - 1;
                     dirty = true;
                     close = true;
                 }
-                if row(ui, icon::AUTO, "Collect other desktop items", fence.auto_sort.then_some(icon::CHECK), true)
-                    .on_hover_text("Shows every desktop item no other box holds, sorted into tabs by kind")
+                if row(ui, icon::AUTO, t("Collect other desktop items"), fence.auto_sort.then_some(icon::CHECK), true)
+                    .on_hover_text(t("Shows every desktop item no other box holds, sorted into tabs by kind"))
                     .clicked()
                 {
                     fence.auto_sort = !fence.auto_sort;
@@ -2491,48 +2493,48 @@ fn fence_menu(ui: &mut egui::Ui, fence: &mut Fence, st: &mut UiState, page: &mut
                     close = true;
                 }
             }
-            if row(ui, icon::COLOR, "Personalize…", None, true).clicked() {
+            if row(ui, icon::COLOR, t("Personalize…"), None, true).clicked() {
                 actions.push(Act::Personalize(fence.id));
                 close = true;
             }
             let has_settings = fence.widget.as_ref().and_then(|w| widgets::find(&w.kind)).map(|k| (k.make)().has_settings()).unwrap_or(false);
-            if has_settings && row(ui, icon::SETTINGS, "Widget settings…", None, true).clicked() {
+            if has_settings && row(ui, icon::SETTINGS, t("Widget settings…"), None, true).clicked() {
                 actions.push(Act::WidgetSettings(fence.id));
                 close = true;
             }
             sep(ui);
-            if sub(ui, icon::ADD, "New") {
+            if sub(ui, icon::ADD, t("New")) {
                 *page = MenuPage::New;
             }
-            if sub(ui, icon::TAB, "Move to page") {
+            if sub(ui, icon::TAB, t("Move to page")) {
                 *page = MenuPage::Pages;
             }
-            if sub(ui, icon::CHEVRON, "Keyboard shortcut") {
+            if sub(ui, icon::CHEVRON, t("Keyboard shortcut")) {
                 *page = MenuPage::Shortcut;
             }
-            if row(ui, icon::SEARCH, "Search desktop", None, true).clicked() {
+            if row(ui, icon::SEARCH, t("Search desktop"), None, true).clicked() {
                 st.open_search = true;
                 close = true;
             }
-            if row(ui, icon::SETTINGS, "DesktopShepherd settings", None, true).clicked() {
+            if row(ui, icon::SETTINGS, t("DesktopShepherd settings"), None, true).clicked() {
                 actions.push(Act::OpenManager);
                 close = true;
             }
             sep(ui);
             if st.confirm_delete == Some(fence.id) {
-                let r = row(ui, icon::DELETE, "Click again to delete (files stay)", None, true);
+                let r = row(ui, icon::DELETE, t("Click again to delete (files stay)"), None, true);
                 if r.clicked() {
                     actions.push(Act::DeleteFence(fence.id));
                     st.confirm_delete = None;
                     close = true;
                 }
-            } else if row(ui, icon::DELETE, "Delete box", None, true).clicked() {
+            } else if row(ui, icon::DELETE, t("Delete box"), None, true).clicked() {
                 st.confirm_delete = Some(fence.id);
             }
         }
         MenuPage::View => {
-            back(ui, page, "View");
-            for (s, label) in [(32, "Small icons"), (48, "Medium icons"), (96, "Large icons")] {
+            back(ui, page, t("View"));
+            for (s, label) in [(32, t("Small icons")), (48, t("Medium icons")), (96, t("Large icons"))] {
                 if check(ui, fence.icon_size == s, label) {
                     fence.icon_size = s;
                     dirty = true;
@@ -2540,7 +2542,7 @@ fn fence_menu(ui: &mut egui::Ui, fence: &mut Fence, st: &mut UiState, page: &mut
                 }
             }
             sep(ui);
-            for (v, label) in [(0u8, "Scroll when icons don't fit"), (1, "Pages with dots when icons don't fit")] {
+            for (v, label) in [(0u8, t("Scroll when icons don't fit")), (1, t("Pages with dots when icons don't fit"))] {
                 if check(ui, fence.overflow == v, label) {
                     fence.overflow = v;
                     dirty = true;
@@ -2549,8 +2551,8 @@ fn fence_menu(ui: &mut egui::Ui, fence: &mut Fence, st: &mut UiState, page: &mut
             }
         }
         MenuPage::Sort => {
-            back(ui, page, "Sort by");
-            for (k, label) in [(SortKind::Manual, "As I arrange them"), (SortKind::Name, "Name"), (SortKind::Size, "Size"), (SortKind::Type, "Item type"), (SortKind::Modified, "Date modified"), (SortKind::OpenCount, "Times opened")] {
+            back(ui, page, t("Sort by"));
+            for (k, label) in [(SortKind::Manual, t("As I arrange them")), (SortKind::Name, t("Name")), (SortKind::Size, t("Size")), (SortKind::Type, t("Item type")), (SortKind::Modified, t("Date modified")), (SortKind::OpenCount, t("Times opened"))] {
                 if check(ui, fence.sort == k, label) {
                     fence.sort = k;
                     dirty = true;
@@ -2559,53 +2561,53 @@ fn fence_menu(ui: &mut egui::Ui, fence: &mut Fence, st: &mut UiState, page: &mut
             }
         }
         MenuPage::Shortcut => {
-            back(ui, page, "Keyboard shortcut");
+            back(ui, page, t("Keyboard shortcut"));
             for n in 0..=9u8 {
-                let label = if n == 0 { "None".to_string() } else { format!("Ctrl+Alt+F{}", n + 1) };
+                let label = if n == 0 { t("None").to_string() } else { format!("Ctrl+Alt+F{}", n + 1) };
                 if check(ui, fence.hotkey == n, &label) {
                     actions.push(Act::SetBoxHotkey(fence.id, n));
                     close = true;
                 }
             }
-            ui.label(egui::RichText::new("Brings the box into view; pressed again, rolls it up or down.").size(11.5).color(Color32::from_gray(150)));
+            ui.label(egui::RichText::new(t("Brings the box into view; pressed again, rolls it up or down.")).size(11.5).color(Color32::from_gray(150)));
         }
         MenuPage::Pages => {
-            back(ui, page, "Move to page");
+            back(ui, page, t("Move to page"));
             for p in 0..st.page_count {
-                let here = if p == st.current_page { " (shown now)" } else { "" };
-                if check(ui, fence.page == p, &format!("Page {}{here}", p + 1)) {
+                let label = if p == st.current_page { tf("Page {} (shown now)", &[&(p + 1)]) } else { tf("Page {}", &[&(p + 1)]) };
+                if check(ui, fence.page == p, &label) {
                     fence.page = p;
                     dirty = true;
                     close = true;
                 }
             }
             sep(ui);
-            if row(ui, icon::ADD, "New page", None, true).clicked() {
+            if row(ui, icon::ADD, t("New page"), None, true).clicked() {
                 fence.page = st.page_count;
                 dirty = true;
                 close = true;
             }
-            ui.label(egui::RichText::new("Switch pages with Ctrl+Alt+PageDown / PageUp or the tray icon.").size(11.5).color(Color32::from_gray(150)));
+            ui.label(egui::RichText::new(t("Switch pages with Ctrl+Alt+PageDown / PageUp or the tray icon.")).size(11.5).color(Color32::from_gray(150)));
         }
         MenuPage::New => {
-            back(ui, page, "New");
+            back(ui, page, t("New"));
             let before = actions.len();
-            if row(ui, icon::ADD, "Draw a new box…", None, true).on_hover_text("Drag a rectangle anywhere on the screen (Ctrl+Alt+B)").clicked() {
+            if row(ui, icon::ADD, t("Draw a new box…"), None, true).on_hover_text(t("Drag a rectangle anywhere on the screen (Ctrl+Alt+B)")).clicked() {
                 st.start_draw = true;
                 close = true;
             }
             sep(ui);
-            if row(ui, icon::VIEW, "Box", None, true).clicked() {
+            if row(ui, icon::VIEW, t("Box"), None, true).clicked() {
                 actions.push(Act::NewFence { auto: false });
                 close = true;
             }
-            if row(ui, icon::FOLDER, "Folder box…", None, true).on_hover_text("A box that shows what is in a folder, live").clicked() {
+            if row(ui, icon::FOLDER, t("Folder box…"), None, true).on_hover_text(t("A box that shows what is in a folder, live")).clicked() {
                 actions.push(Act::NewFolderBox);
                 close = true;
             }
             sep(ui);
             for k in widgets::REGISTRY {
-                if row(ui, k.icon, &format!("{} widget", k.label), None, true).clicked() {
+                if row(ui, k.icon, &tf("{} widget", &[&t(k.label)]), None, true).clicked() {
                     actions.push(Act::NewWidget(k.id));
                     close = true;
                 }
@@ -2623,17 +2625,17 @@ fn fence_menu(ui: &mut egui::Ui, fence: &mut Fence, st: &mut UiState, page: &mut
 /// The menu after drawing a rectangle: what to create in it. Returns true to close the menu.
 fn create_menu(ui: &mut egui::Ui, actions: &mut Vec<Act>) -> bool {
     let mut close = false;
-    if row(ui, icon::VIEW, "Box", None, true).clicked() {
+    if row(ui, icon::VIEW, t("Box"), None, true).clicked() {
         actions.push(Act::NewFence { auto: false });
         close = true;
     }
-    if row(ui, icon::FOLDER, "Folder box…", None, true).clicked() {
+    if row(ui, icon::FOLDER, t("Folder box…"), None, true).clicked() {
         actions.push(Act::NewFolderBox);
         close = true;
     }
     sep(ui);
     for k in widgets::REGISTRY {
-        if row(ui, k.icon, k.label, None, true).clicked() {
+        if row(ui, k.icon, t(k.label), None, true).clicked() {
             actions.push(Act::NewWidget(k.id));
             close = true;
         }
@@ -2644,22 +2646,22 @@ fn create_menu(ui: &mut egui::Ui, actions: &mut Vec<Act>) -> bool {
 fn tab_menu(ui: &mut egui::Ui, fence: &mut Fence, tab: usize, st: &mut UiState, _ctx_for_box: &egui::Context) -> (bool, bool) {
     let mut dirty = false;
     let mut close = false;
-    if row(ui, icon::RENAME, "Rename tab", None, true).clicked() {
+    if row(ui, icon::RENAME, t("Rename tab"), None, true).clicked() {
         if let Some(t) = fence.tabs.get(tab) {
             st.renaming = Some((fence.id, Some(tab), t.name.clone()));
             st.box_cmds.push((fence.id, ViewportCommand::Focus));
         }
         close = true;
     }
-    if row(ui, icon::TAB, "New tab", None, true).clicked() {
+    if row(ui, icon::TAB, t("New tab"), None, true).clicked() {
         let n = fence.tabs.len() + 1;
-        fence.tabs.push(Tab { name: format!("Tab {n}"), items: vec![] });
+        fence.tabs.push(Tab { name: tf("Tab {}", &[&n]), items: vec![] });
         fence.sel_tab = fence.tabs.len() - 1;
         dirty = true;
         close = true;
     }
     let can_delete = fence.tabs.len() > 1;
-    if row(ui, icon::DELETE, "Delete tab", None, can_delete).on_hover_text("Its items go back to the desktop").clicked() && can_delete {
+    if row(ui, icon::DELETE, t("Delete tab"), None, can_delete).on_hover_text(t("Its items go back to the desktop")).clicked() && can_delete {
         if tab < fence.tabs.len() {
             fence.tabs.remove(tab);
         }
@@ -2675,7 +2677,7 @@ fn item_menu(ui: &mut egui::Ui, from: u64, from_auto: bool, it: &DeskItem, targe
     let mut close = false;
     match *page {
         MenuPage::MoveTo => {
-            back(ui, page, "Move to");
+            back(ui, page, t("Move to"));
             for (id, name, tabs) in targets {
                 if tabs.len() > 1 {
                     if sub(ui, icon::VIEW, name) {
@@ -2687,13 +2689,13 @@ fn item_menu(ui: &mut egui::Ui, from: u64, from_auto: bool, it: &DeskItem, targe
                 }
             }
             sep(ui);
-            if row(ui, icon::ADD, "New box", None, true).clicked() {
+            if row(ui, icon::ADD, t("New box"), None, true).clicked() {
                 actions.push(Act::MoveToNewFence { path: it.path.clone() });
                 close = true;
             }
         }
         MenuPage::MoveToTabs(id) => {
-            if row(ui, icon::BACK, "Move to", None, true).clicked() {
+            if row(ui, icon::BACK, t("Move to"), None, true).clicked() {
                 *page = MenuPage::MoveTo;
             }
             sep(ui);
@@ -2707,21 +2709,21 @@ fn item_menu(ui: &mut egui::Ui, from: u64, from_auto: bool, it: &DeskItem, targe
             }
         }
         _ => {
-            let r = row(ui, icon::OPEN, "Open", None, true);
+            let r = row(ui, icon::OPEN, t("Open"), None, true);
             if r.clicked() {
                 desktop::open_item(&it.path);
                 actions.push(Act::Opened(it.path.clone()));
                 close = true;
             }
-            if row(ui, icon::FOLDER, "Open file location", None, true).clicked() {
+            if row(ui, icon::FOLDER, t("Open file location"), None, true).clicked() {
                 desktop::show_in_folder(&it.path);
                 close = true;
             }
             sep(ui);
-            if sub(ui, icon::MOVE, "Move to") {
+            if sub(ui, icon::MOVE, t("Move to")) {
                 *page = MenuPage::MoveTo;
             }
-            if !from_auto && row(ui, icon::REMOVE, "Remove from this box", None, true).clicked() {
+            if !from_auto && row(ui, icon::REMOVE, t("Remove from this box"), None, true).clicked() {
                 // Not deleted: it goes back to the desktop / auto-sort box.
                 actions.push(Act::MoveItem { path: it.path.clone(), to: 0, tab: 0 });
                 close = true;
@@ -2900,9 +2902,9 @@ impl DeskApp {
                 ui.horizontal(|ui| {
                     ui.label(egui::RichText::new("DesktopShepherd").size(20.0).strong().color(Color32::WHITE));
                     ui.add_space(20.0);
-                    ui.selectable_value(&mut self.page, Page::Boxes, "Boxes");
-                    ui.selectable_value(&mut self.page, Page::Layout, "Layout");
-                    ui.selectable_value(&mut self.page, Page::Settings, "Settings");
+                    ui.selectable_value(&mut self.page, Page::Boxes, t("Boxes"));
+                    ui.selectable_value(&mut self.page, Page::Layout, t("Layout"));
+                    ui.selectable_value(&mut self.page, Page::Settings, t("Settings"));
                 });
             });
             egui::CentralPanel::default().frame(egui::Frame::new().fill(Color32::from_rgb(16, 17, 19)).inner_margin(12.0)).show(ctx, |ui| {
@@ -2922,20 +2924,20 @@ impl DeskApp {
         // A short row: the three kinds of box, and every widget behind one "Add widget" list (it
         // grows with new widgets without running off the window).
         ui.horizontal_wrapped(|ui| {
-            if ui.button("➕ New box").clicked() {
+            if ui.button(t("➕ New box")).clicked() {
                 self.actions.push(Act::NewFence { auto: false });
             }
-            if ui.button("➕ New auto-sort box").on_hover_text("Collects every desktop item no other box holds, sorted into tabs by kind").clicked() {
+            if ui.button(t("➕ New auto-sort box")).on_hover_text(t("Collects every desktop item no other box holds, sorted into tabs by kind")).clicked() {
                 self.actions.push(Act::NewFence { auto: true });
             }
-            if ui.button("➕ New folder box…").on_hover_text("A box that shows what is in a folder, live").clicked() {
+            if ui.button(t("➕ New folder box…")).on_hover_text(t("A box that shows what is in a folder, live")).clicked() {
                 self.actions.push(Act::NewFolderBox);
             }
             ui.separator();
-            ui.menu_button(format!("➕ Add widget  {}", icon::DOWN), |ui| {
+            ui.menu_button(tf("➕ Add widget  {}", &[&icon::DOWN]), |ui| {
                 ui.set_min_width(230.0);
                 for k in widgets::REGISTRY {
-                    let text = egui::RichText::new(format!("{}    {}", k.icon, k.label)).size(14.0);
+                    let text = egui::RichText::new(format!("{}    {}", k.icon, t(k.label))).size(14.0);
                     if ui.add(egui::Button::new(text).frame(false).min_size(Vec2::new(220.0, 28.0))).clicked() {
                         self.actions.push(Act::NewWidget(k.id));
                         ui.close_menu();
@@ -2947,9 +2949,9 @@ impl DeskApp {
             ui.add_space(4.0);
             let mut restore = None;
             ui.horizontal_wrapped(|ui| {
-                ui.label(egui::RichText::new("Recently deleted:").color(Color32::from_gray(170)));
+                ui.label(egui::RichText::new(t("Recently deleted:")).color(Color32::from_gray(170)));
                 for (i, (f, _)) in self.deleted.iter().enumerate().rev() {
-                    if ui.button(format!("↶ {}", f.name)).on_hover_text("Bring this box back").clicked() {
+                    if ui.button(format!("↶ {}", f.name)).on_hover_text(t("Bring this box back")).clicked() {
                         restore = Some(i);
                     }
                 }
@@ -2968,10 +2970,9 @@ impl DeskApp {
             .collect();
         let unsorted = self.items.iter().filter(|(k, v)| v.on_desktop && !claimed.contains(*k)).count();
         ui.label(
-            egui::RichText::new(format!(
+            egui::RichText::new(tf(
                 "{} items on the desktop, {} not in a box yet. Tip: right-click a box for its options; double-click its title to roll it up.",
-                self.items.values().filter(|v| v.on_desktop).count(),
-                unsorted
+                &[&self.items.values().filter(|v| v.on_desktop).count(), &unsorted],
             ))
             .color(Color32::from_gray(170)),
         );
@@ -2979,10 +2980,10 @@ impl DeskApp {
         let mut dirty = false;
         ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             egui::Grid::new("boxes").num_columns(5).spacing([16.0, 8.0]).striped(true).show(ui, |ui| {
-                ui.strong("Name");
-                ui.strong("Kind");
-                ui.strong("Contents");
-                ui.strong("State");
+                ui.strong(t("Name"));
+                ui.strong(t("Kind"));
+                ui.strong(t("Contents"));
+                ui.strong(t("State"));
                 ui.strong("");
                 ui.end_row();
                 for f in self.layout.fences.iter_mut() {
@@ -2990,34 +2991,34 @@ impl DeskApp {
                     // (tiny) width forever.
                     dirty |= ui.add_sized([200.0, 26.0], egui::TextEdit::singleline(&mut f.name)).changed();
                     let kind = match &f.widget {
-                        Some(w) => widgets::find(&w.kind).map(|k| k.label).unwrap_or("Widget").to_string(),
-                        None if f.auto_sort => "Auto-sort box".into(),
-                        None => "Box".into(),
+                        Some(w) => t(widgets::find(&w.kind).map(|k| k.label).unwrap_or("Widget")).to_string(),
+                        None if f.auto_sort => t("Auto-sort box").into(),
+                        None => t("Box").into(),
                     };
                     ui.label(kind);
                     if f.widget.is_some() {
                         ui.label("—");
                     } else if f.auto_sort {
-                        ui.label(format!("{unsorted} items"));
+                        ui.label(tf("{} items", &[&unsorted]));
                     } else {
                         let n: usize = f.tabs.iter().map(|t| t.items.len()).sum();
-                        ui.label(format!("{n} items in {} tab(s)", f.tabs.len()));
+                        ui.label(tf("{} items in {} tab(s)", &[&n, &f.tabs.len()]));
                     }
                     ui.horizontal(|ui| {
-                        if ui.selectable_label(!f.expanded, "Rolled up").clicked() {
+                        if ui.selectable_label(!f.expanded, t("Rolled up")).clicked() {
                             f.expanded = !f.expanded;
                             let h = if f.expanded { f.rect[3] } else { ROLLED_HEIGHT };
                             self.ui.box_cmds.push((f.id, ViewportCommand::InnerSize(Vec2::new(f.rect[2], h))));
                             dirty = true;
                         }
-                        dirty |= ui.checkbox(&mut f.locked, "Locked").changed();
+                        dirty |= ui.checkbox(&mut f.locked, t("Locked")).changed();
                     });
                     if self.ui.confirm_delete == Some(f.id) {
-                        if ui.button(egui::RichText::new("Confirm delete").color(Color32::from_rgb(255, 120, 110))).clicked() {
+                        if ui.button(egui::RichText::new(t("Confirm delete")).color(Color32::from_rgb(255, 120, 110))).clicked() {
                             self.actions.push(Act::DeleteFence(f.id));
                             self.ui.confirm_delete = None;
                         }
-                    } else if ui.button("Delete").clicked() {
+                    } else if ui.button(t("Delete")).clicked() {
                         self.ui.confirm_delete = Some(f.id);
                     }
                     ui.end_row();
@@ -3034,17 +3035,17 @@ impl DeskApp {
         let monitors = if self.monitors.is_empty() { desktop::monitors() } else { self.monitors.clone() };
         let fixed = self.layout.settings.monitor_mode == crate::model::MonitorMode::Fixed;
         let role_name = |i: usize| match i {
-            0 => "Main monitor".to_string(),
-            1 => "Second monitor".to_string(),
-            2 => "Third monitor".to_string(),
-            n => format!("Monitor {}", n + 1),
+            0 => t("Main monitor").to_string(),
+            1 => t("Second monitor").to_string(),
+            2 => t("Third monitor").to_string(),
+            n => tf("Monitor {}", &[&(n + 1)]),
         };
         let label_of = |i: usize, m: &desktop::Monitor| -> String {
             let dev = m.name.trim_start_matches("\\\\.\\").to_string();
             let size = format!("{}×{}", m.rect.width().round(), m.rect.height().round());
             if fixed {
                 // Fixed mode: boxes stay on this physical display, whatever its role.
-                format!("{dev} (fixed){}  ·  {size}", if m.primary { ", main now" } else { "" })
+                tf("{} (fixed){}  ·  {}", &[&dev, &(if m.primary { t(", main now") } else { "" }), &size])
             } else {
                 format!("{}  ·  {dev}  ·  {size}", role_name(i))
             }
@@ -3056,20 +3057,20 @@ impl DeskApp {
         }
         ui.horizontal(|ui| {
             let title = if view == 0 {
-                if monitors.len() > 1 { format!("All {} monitors", monitors.len()) } else { "Your desktop, as the boxes sit on it".to_string() }
+                if monitors.len() > 1 { tf("All {} monitors", &[&monitors.len()]) } else { t("Your desktop, as the boxes sit on it").to_string() }
             } else {
                 label_of(view - 1, &monitors[view - 1])
             };
             ui.label(egui::RichText::new(title).color(Color32::from_gray(210)).size(15.0));
             ui.add_space(12.0);
             let [sw, sh] = desktop::primary_screen_points();
-            if self.persist && ui.button("Export layout…").on_hover_text("Save all boxes and settings to a file (it includes your agenda links)").clicked() {
+            if self.persist && ui.button(t("Export layout…")).on_hover_text(t("Save all boxes and settings to a file (it includes your agenda links)")).clicked() {
                 self.actions.push(Act::ExportLayout);
             }
-            if self.persist && ui.button("Import layout…").on_hover_text("Replace the boxes and settings with a saved file (the current ones are backed up first)").clicked() {
+            if self.persist && ui.button(t("Import layout…")).on_hover_text(t("Replace the boxes and settings with a saved file (the current ones are backed up first)")).clicked() {
                 self.actions.push(Act::ImportLayout);
             }
-            if self.persist && ui.button("Bring every box back on screen").clicked() {
+            if self.persist && ui.button(t("Bring every box back on screen")).clicked() {
                 let main = Rect::from_min_size(Pos2::ZERO, Vec2::new(sw, sh));
                 for f in &mut self.layout.fences {
                     f.rect[2] = f.rect[2].min(main.width());
@@ -3084,9 +3085,9 @@ impl DeskApp {
         if monitors.len() > 1 {
             ui.label(
                 egui::RichText::new(if fixed {
-                    "Boxes stay on their display (Settings > Monitors: fixed)."
+                    t("Boxes stay on their display (Settings > Monitors: fixed).")
                 } else {
-                    "Boxes follow the monitor's role: main, second… (Settings > Monitors: by role)."
+                    t("Boxes follow the monitor's role: main, second… (Settings > Monitors: by role).")
                 })
                 .size(12.0)
                 .color(Color32::from_gray(150)),
@@ -3135,7 +3136,7 @@ impl DeskApp {
         // A monitor with no box: say so rather than show an empty area.
         let on_screen = self.layout.fences.iter().any(|f| screen.intersects(Rect::from_min_size(Pos2::new(f.rect[0], f.rect[1]), Vec2::new(f.rect[2], f.rect[3]))));
         if view > 0 && !on_screen {
-            painter.text(area.center(), egui::Align2::CENTER_CENTER, "No boxes on this monitor yet", FontId::proportional(15.0), Color32::from_gray(150));
+            painter.text(area.center(), egui::Align2::CENTER_CENTER, t("No boxes on this monitor yet"), FontId::proportional(15.0), Color32::from_gray(150));
         }
         // Monitor names on top of the boxes, in each monitor's bottom-left corner.
         if view == 0 && monitors.len() > 1 {
@@ -3158,7 +3159,7 @@ impl DeskApp {
             for i in 0..n {
                 let c = Pos2::new(cx + (i as f32 - (n as f32 - 1.0) / 2.0) * gap, y);
                 let r = Rect::from_center_size(c, Vec2::new(gap, 18.0));
-                let tip = if i == 0 { "All monitors".to_string() } else { label_of(i - 1, &monitors[i - 1]) };
+                let tip = if i == 0 { t("All monitors").to_string() } else { label_of(i - 1, &monitors[i - 1]) };
                 let resp = ui.interact(r, ui.id().with(("layout-dot", i)), Sense::click()).on_hover_text(tip);
                 if resp.clicked() {
                     view = i;
@@ -3188,41 +3189,41 @@ impl DeskApp {
             }
         });
         ui.add_space(6.0);
-        ui.heading("Desktop");
-        dirty |= ui.checkbox(&mut s.desktop_menu, "Add \"DesktopShepherd\" to the desktop's right-click menu (new box or widget where you click)").changed();
-        ui.label(egui::RichText::new("On Windows 11 it is under \"Show more options\". Or press Ctrl+Alt+B anywhere and drag a rectangle.").color(Color32::from_gray(150)).size(12.0));
-        if ui.checkbox(&mut s.hide_desktop_icons, "Hide Windows' own desktop icons (the boxes show them)").changed() {
+        ui.heading(t("Desktop"));
+        dirty |= ui.checkbox(&mut s.desktop_menu, t("Add \"DesktopShepherd\" to the desktop's right-click menu (new box or widget where you click)")).changed();
+        ui.label(egui::RichText::new(t("On Windows 11 it is under \"Show more options\". Or press Ctrl+Alt+B anywhere and drag a rectangle.")).color(Color32::from_gray(150)).size(12.0));
+        if ui.checkbox(&mut s.hide_desktop_icons, t("Hide Windows' own desktop icons (the boxes show them)")).changed() {
             dirty = true;
             icons_changed = true;
         }
-        ui.label(egui::RichText::new("They always come back when DesktopShepherd closes, even after a crash.").color(Color32::from_gray(150)).size(12.0));
-        dirty |= ui.checkbox(&mut s.expand_on_hover, "Open rolled-up boxes while the mouse is over them").changed();
+        ui.label(egui::RichText::new(t("They always come back when DesktopShepherd closes, even after a crash.")).color(Color32::from_gray(150)).size(12.0));
+        dirty |= ui.checkbox(&mut s.expand_on_hover, t("Open rolled-up boxes while the mouse is over them")).changed();
         ui.horizontal(|ui| {
-            dirty |= ui.checkbox(&mut s.fade_idle, "Fade boxes while the mouse is away").changed();
+            dirty |= ui.checkbox(&mut s.fade_idle, t("Fade boxes while the mouse is away")).changed();
             if s.fade_idle {
-                ui.label("to");
+                ui.label(t("to"));
                 dirty |= ui.add(egui::Slider::new(&mut s.fade_opacity, 5..=90).suffix(" %")).changed();
-                ui.label("after");
+                ui.label(t("after"));
                 dirty |= ui.add(egui::DragValue::new(&mut s.fade_delay).range(1..=60).suffix(" s")).changed();
             }
         });
         ui.horizontal(|ui| {
-            dirty |= ui.checkbox(&mut s.snap, "Snap boxes to each other and to the screen edges").changed();
-            ui.label("gap");
+            dirty |= ui.checkbox(&mut s.snap, t("Snap boxes to each other and to the screen edges")).changed();
+            ui.label(t("gap"));
             dirty |= ui.add(egui::DragValue::new(&mut s.snap_gap).range(0.0..=40.0).speed(0.5).suffix(" pt")).changed();
         });
         ui.horizontal(|ui| {
-            dirty |= ui.checkbox(&mut s.snap_grid, "Also snap to a grid").changed();
-            ui.label("size");
+            dirty |= ui.checkbox(&mut s.snap_grid, t("Also snap to a grid")).changed();
+            ui.label(t("size"));
             dirty |= ui.add(egui::DragValue::new(&mut s.grid_size).range(4.0..=200.0).speed(1.0).suffix(" pt")).changed();
         });
-        ui.label(egui::RichText::new("Hold Alt while moving or resizing a box to place it freely.").color(Color32::from_gray(150)).size(12.0));
-        dirty |= ui.checkbox(&mut s.search_apps, "Quick search also finds programs (from the Start menu)").changed();
+        ui.label(egui::RichText::new(t("Hold Alt while moving or resizing a box to place it freely.")).color(Color32::from_gray(150)).size(12.0));
+        dirty |= ui.checkbox(&mut s.search_apps, t("Quick search also finds programs (from the Start menu)")).changed();
         #[cfg(windows)]
         ui.horizontal_wrapped(|ui| {
-            ui.label("Quick search shortcut:");
+            ui.label(t("Quick search shortcut:"));
             for (i, (label, _, _)) in crate::runloop::SEARCH_HOTKEYS.iter().enumerate() {
-                if ui.selectable_label(s.search_hotkey == i, *label).clicked() && s.search_hotkey != i {
+                if ui.selectable_label(s.search_hotkey == i, t(*label)).clicked() && s.search_hotkey != i {
                     s.search_hotkey = i;
                     dirty = true;
                 }
@@ -3230,13 +3231,13 @@ impl DeskApp {
         });
         #[cfg(windows)]
         if !self.hotkey_ok {
-            ui.label(egui::RichText::new("That shortcut is already used by another program: pick another one.").color(Color32::from_rgb(255, 160, 120)).size(12.0));
+            ui.label(egui::RichText::new(t("That shortcut is already used by another program: pick another one.")).color(Color32::from_rgb(255, 160, 120)).size(12.0));
         }
         #[cfg(windows)]
         ui.horizontal_wrapped(|ui| {
-            ui.label("Hide / show all boxes:");
+            ui.label(t("Hide / show all boxes:"));
             for (i, (label, _, _)) in crate::runloop::SEARCH_HOTKEYS.iter().enumerate() {
-                if ui.selectable_label(s.hide_hotkey == i, *label).clicked() && s.hide_hotkey != i {
+                if ui.selectable_label(s.hide_hotkey == i, t(*label)).clicked() && s.hide_hotkey != i {
                     s.hide_hotkey = i;
                     dirty = true;
                 }
@@ -3244,24 +3245,24 @@ impl DeskApp {
         });
         #[cfg(windows)]
         if !self.hide_hotkey_ok {
-            ui.label(egui::RichText::new("That shortcut is already used by another program: pick another one.").color(Color32::from_rgb(255, 160, 120)).size(12.0));
+            ui.label(egui::RichText::new(t("That shortcut is already used by another program: pick another one.")).color(Color32::from_rgb(255, 160, 120)).size(12.0));
         }
         #[cfg(windows)]
         ui.horizontal_wrapped(|ui| {
-            ui.label("Typing on the desktop:");
-            for (i, label) in ["Does nothing", "Jumps to the icon that starts with it", "Starts a quick search"].iter().enumerate() {
+            ui.label(t("Typing on the desktop:"));
+            for (i, label) in [t("Does nothing"), t("Jumps to the icon that starts with it"), t("Starts a quick search")].iter().enumerate() {
                 if ui.selectable_label(s.desktop_typing as usize == i, *label).clicked() && s.desktop_typing as usize != i {
                     s.desktop_typing = i as u8;
                     dirty = true;
                 }
             }
         });
-        ui.label(egui::RichText::new("Click an empty part of the desktop, then type: the same letter again goes to the next match, Enter opens it.").color(Color32::from_gray(150)).size(12.0));
-        ui.label(egui::RichText::new("Frosted glass: set each box's blur in its menu (Personalize > Blur).").color(Color32::from_gray(150)).size(12.0));
+        ui.label(egui::RichText::new(t("Click an empty part of the desktop, then type: the same letter again goes to the next match, Enter opens it.")).color(Color32::from_gray(150)).size(12.0));
+        ui.label(egui::RichText::new(t("Frosted glass: set each box's blur in its menu (Personalize > Blur).")).color(Color32::from_gray(150)).size(12.0));
         ui.add_space(10.0);
-        ui.heading("Monitors");
-        dirty |= ui.checkbox(&mut s.link_vdesks, "Each Windows virtual desktop shows its own page of boxes (desktop 1 = page 1, desktop 2 = page 2…)").changed();
-        if ui.checkbox(&mut s.per_setup, "Remember box positions for each monitor setup (e.g. laptop alone / docked)").changed() {
+        ui.heading(t("Monitors"));
+        dirty |= ui.checkbox(&mut s.link_vdesks, t("Each Windows virtual desktop shows its own page of boxes (desktop 1 = page 1, desktop 2 = page 2…)")).changed();
+        if ui.checkbox(&mut s.per_setup, t("Remember box positions for each monitor setup (e.g. laptop alone / docked)")).changed() {
             dirty = true;
         }
         if s.per_setup {
@@ -3270,7 +3271,7 @@ impl DeskApp {
                 ui.horizontal(|ui| {
                     let here = *key == self.current_setup;
                     ui.label(egui::RichText::new(format!("{}{key}", if here { "● " } else { "   " })).size(12.0).color(Color32::from_gray(170)));
-                    if !here && ui.small_button("Forget").clicked() {
+                    if !here && ui.small_button(t("Forget")).clicked() {
                         forget = Some(key.clone());
                     }
                 });
@@ -3281,25 +3282,25 @@ impl DeskApp {
         }
         let before = s.monitor_mode;
         ui.add_space(4.0);
-        ui.label(egui::RichText::new("Bind each box to:").strong());
+        ui.label(egui::RichText::new(t("Bind each box to:")).strong());
         ui.radio_value(
             &mut s.monitor_mode,
             crate::model::MonitorMode::Role,
-            "The monitor's role (main, second…): when the roles change, the boxes move with them",
+            t("The monitor's role (main, second…): when the roles change, the boxes move with them"),
         );
         ui.radio_value(
             &mut s.monitor_mode,
             crate::model::MonitorMode::Fixed,
-            "The monitor itself: boxes always stay on the monitor where they were created or moved",
+            t("The monitor itself: boxes always stay on the monitor where they were created or moved"),
         );
-        ui.label(egui::RichText::new("Moving a box to another monitor binds it there. Settings > Layout shows each monitor.").color(Color32::from_gray(150)).size(12.0));
+        ui.label(egui::RichText::new(t("Moving a box to another monitor binds it there. Settings > Layout shows each monitor.")).color(Color32::from_gray(150)).size(12.0));
         let monitors_changed = s.monitor_mode != before;
         dirty |= monitors_changed;
         for (i, m) in self.monitors.iter().enumerate() {
             let role = match i {
-                0 => "Main monitor".to_string(),
-                1 => "Second monitor".to_string(),
-                n => format!("Monitor {}", n + 1),
+                0 => t("Main monitor").to_string(),
+                1 => t("Second monitor").to_string(),
+                n => tf("Monitor {}", &[&(n + 1)]),
             };
             let count = self
                 .layout
@@ -3311,20 +3312,18 @@ impl DeskApp {
                 })
                 .count();
             ui.label(
-                egui::RichText::new(format!(
-                    "{role}: {} × {} ({}) — {count} box(es)",
-                    m.rect.width().round(),
-                    m.rect.height().round(),
-                    m.name.trim_start_matches("\\\\.\\")
+                egui::RichText::new(tf(
+                    "{}: {} × {} ({}) — {} box(es)",
+                    &[&role, &m.rect.width().round(), &m.rect.height().round(), &m.name.trim_start_matches("\\\\.\\"), &count],
                 ))
                 .color(Color32::from_gray(160))
                 .size(12.0),
             );
         }
         ui.add_space(10.0);
-        ui.heading("Auto-sort tabs");
+        ui.heading(t("Auto-sort tabs"));
         ui.label(
-            egui::RichText::new("Each tab collects items by file type, name pattern (* and ?) and/or how recently they changed; the first matching rule wins. Folders and everything else get their own tabs.")
+            egui::RichText::new(t("Each tab collects items by file type, name pattern (* and ?) and/or how recently they changed; the first matching rule wins. Folders and everything else get their own tabs."))
                 .color(Color32::from_gray(150))
                 .size(12.0),
         );
@@ -3333,7 +3332,7 @@ impl DeskApp {
             for (i, r) in s.categories.iter_mut().enumerate() {
                 dirty |= ui.add_sized([120.0, 26.0], egui::TextEdit::singleline(&mut r.name)).changed();
                 let mut exts = r.exts.join(", ");
-                if ui.add_sized([300.0, 26.0], egui::TextEdit::singleline(&mut exts).hint_text("types: zip, rar, 7z")).changed() {
+                if ui.add_sized([300.0, 26.0], egui::TextEdit::singleline(&mut exts).hint_text(t("types: zip, rar, 7z"))).changed() {
                     r.exts = exts
                         .split([',', ' ', ';'])
                         .map(|e| e.trim().trim_start_matches('.').to_lowercase())
@@ -3341,12 +3340,12 @@ impl DeskApp {
                         .collect();
                     dirty = true;
                 }
-                dirty |= ui.add_sized([150.0, 26.0], egui::TextEdit::singleline(&mut r.pattern).hint_text("name: *invoice*")).changed();
+                dirty |= ui.add_sized([150.0, 26.0], egui::TextEdit::singleline(&mut r.pattern).hint_text(t("name: *invoice*"))).changed();
                 ui.horizontal(|ui| {
-                    ui.label("changed in last");
-                    dirty |= ui.add(egui::DragValue::new(&mut r.days).range(0..=3650).suffix(" days")).on_hover_text("0 = any age").changed();
+                    ui.label(t("changed in last"));
+                    dirty |= ui.add(egui::DragValue::new(&mut r.days).range(0..=3650).suffix(t(" days"))).on_hover_text(t("0 = any age")).changed();
                 });
-                if ui.small_button("Remove").clicked() {
+                if ui.small_button(t("Remove")).clicked() {
                     remove = Some(i);
                 }
                 ui.end_row();
@@ -3357,58 +3356,53 @@ impl DeskApp {
             dirty = true;
         }
         ui.horizontal(|ui| {
-            if ui.button("Add tab rule").clicked() {
-                s.categories.push(crate::model::CategoryRule { name: "New tab".into(), ..Default::default() });
+            if ui.button(t("Add tab rule")).clicked() {
+                s.categories.push(crate::model::CategoryRule { name: t("New tab").into(), ..Default::default() });
                 dirty = true;
             }
-            if ui.button("Reset to defaults").clicked() {
+            if ui.button(t("Reset to defaults")).clicked() {
                 s.categories = crate::model::default_categories();
                 dirty = true;
             }
         });
         ui.add_space(10.0);
-        ui.heading("Computer");
-        if ui.checkbox(&mut s.start_with_windows, "Start DesktopShepherd when Windows starts").changed() {
+        ui.heading(t("Computer"));
+        if ui.checkbox(&mut s.start_with_windows, t("Start DesktopShepherd when Windows starts")).changed() {
             if self.persist {
                 desktop::set_start_with_windows(s.start_with_windows);
             }
             dirty = true;
         }
-        if ui.checkbox(&mut s.low_priority, "Run at low priority (never slows other programs)").changed() {
+        if ui.checkbox(&mut s.low_priority, t("Run at low priority (never slows other programs)")).changed() {
             if self.persist {
                 desktop::set_low_priority(s.low_priority);
             }
             dirty = true;
         }
-        ui.label(egui::RichText::new("New, renamed and removed desktop files show up as soon as Windows reports them.").color(Color32::from_gray(150)).size(12.0));
+        ui.label(egui::RichText::new(t("New, renamed and removed desktop files show up as soon as Windows reports them.")).color(Color32::from_gray(150)).size(12.0));
         ui.add_space(10.0);
-        ui.heading("Saved layouts");
-        ui.label(egui::RichText::new("A copy of your layout is kept each time DesktopShepherd starts (the last 10).").color(Color32::from_gray(150)).size(12.0));
+        ui.heading(t("Saved layouts"));
+        ui.label(egui::RichText::new(t("A copy of your layout is kept each time DesktopShepherd starts (the last 10).")).color(Color32::from_gray(150)).size(12.0));
         let mut restore = None;
         for b in self.backups.iter().rev().take(10) {
             ui.horizontal(|ui| {
                 ui.label(b.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default());
-                if self.persist && ui.small_button("Restore").clicked() {
+                if self.persist && ui.small_button(t("Restore")).clicked() {
                     restore = Some(b.clone());
                 }
             });
         }
         ui.add_space(10.0);
         ui.horizontal(|ui| {
-            if ui.button("Open data folder").clicked() {
+            if ui.button(t("Open data folder")).clicked() {
                 desktop::open_folder(&storage::data_dir());
             }
-            if self.persist && crate::import_original::original_available()
-                && ui.button("Import boxes from the original app").on_hover_text("Replaces your boxes with the ones the original organizer saved (your current layout is kept as a backup above).").clicked()
-            {
-                self.actions.push(Act::ImportOriginal);
-            }
-            if self.persist && ui.button("Quit DesktopShepherd").clicked() {
+            if self.persist && ui.button(t("Quit DesktopShepherd")).clicked() {
                 self.actions.push(Act::Quit);
             }
         });
         ui.add_space(6.0);
-        ui.label(egui::RichText::new(format!("{} desktop items", self.items.len())).color(Color32::from_gray(110)).size(11.0));
+        ui.label(egui::RichText::new(tf("{} desktop items", &[&self.items.len()])).color(Color32::from_gray(110)).size(11.0));
         if let Some(p) = restore {
             self.actions.push(Act::RestoreBackup(p));
         }
@@ -3446,7 +3440,7 @@ fn default_layout(items: &HashMap<String, DeskItem>) -> Layout {
     let id = layout.new_id();
     layout.fences.push(Fence {
         id,
-        name: "Apps".into(),
+        name: t("Apps").into(),
         rect: [m, m, apps_w, top_h],
         tabs: vec![Tab { name: "Apps".into(), items: apps.iter().map(|i| i.path.clone()).collect() }],
         ..Fence::default()
@@ -3454,7 +3448,7 @@ fn default_layout(items: &HashMap<String, DeskItem>) -> Layout {
     let id = layout.new_id();
     layout.fences.push(Fence {
         id,
-        name: "Desktop".into(),
+        name: t("Desktop").into(),
         rect: [m * 2.0 + apps_w, m, sw - apps_w - m * 3.0, top_h],
         auto_sort: true,
         ..Fence::default()
@@ -3462,7 +3456,7 @@ fn default_layout(items: &HashMap<String, DeskItem>) -> Layout {
     let id = layout.new_id();
     layout.fences.push(Fence {
         id,
-        name: "Clock".into(),
+        name: t("Clock").into(),
         rect: [m, m * 2.0 + top_h, 260.0, 130.0],
         title_pos: TitlePos::Top,
         widget: Some(WidgetConfig { kind: "clock".into(), data: serde_json::json!({}) }),
@@ -3471,13 +3465,13 @@ fn default_layout(items: &HashMap<String, DeskItem>) -> Layout {
     let id = layout.new_id();
     layout.fences.push(Fence {
         id,
-        name: "Note".into(),
+        name: t("Note").into(),
         rect: [m * 2.0 + 260.0, m * 2.0 + top_h, 320.0, 200.0],
         title_pos: TitlePos::Top,
         widget: Some(WidgetConfig {
             kind: "note".into(),
             data: serde_json::json!({
-                "text": "Welcome to DesktopShepherd!\n• Drag a box by its title, resize from its edges.\n• Double-click a title to roll the box up.\n• Right-click a box or an icon for options."
+                "text": t("Welcome to DesktopShepherd!\n• Drag a box by its title, resize from its edges.\n• Double-click a title to roll the box up.\n• Right-click a box or an icon for options.")
             }),
         }),
         ..Fence::default()
@@ -3775,14 +3769,14 @@ fn make_tray(ctx: &egui::Context, cmds: Arc<Mutex<Vec<TrayCmd>>>) -> Option<tray
     }
     let icon = tray_icon::Icon::from_rgba(rgba, n as u32, n as u32).ok()?;
     let menu = Menu::new();
-    let open = MenuItem::new("Open DesktopShepherd", true, None);
-    let new_box = MenuItem::new("New box", true, None);
-    let search = MenuItem::new("Search desktop", true, None);
-    let hide = MenuItem::new("Hide / show boxes", true, None);
-    let next_page = MenuItem::new("Next page of boxes", true, None);
-    let draw_box = MenuItem::new("Draw a new box…  (Ctrl+Alt+B)", true, None);
-    let undo_delete = MenuItem::new("Bring back the last deleted box", true, None);
-    let quit = MenuItem::new("Quit", true, None);
+    let open = MenuItem::new(t("Open DesktopShepherd"), true, None);
+    let new_box = MenuItem::new(t("New box"), true, None);
+    let search = MenuItem::new(t("Search desktop"), true, None);
+    let hide = MenuItem::new(t("Hide / show boxes"), true, None);
+    let next_page = MenuItem::new(t("Next page of boxes"), true, None);
+    let draw_box = MenuItem::new(t("Draw a new box…  (Ctrl+Alt+B)"), true, None);
+    let undo_delete = MenuItem::new(t("Bring back the last deleted box"), true, None);
+    let quit = MenuItem::new(t("Quit"), true, None);
     let _ = menu.append_items(&[&open, &search, &hide, &next_page, &new_box, &draw_box, &undo_delete, &PredefinedMenuItem::separator(), &quit]);
     let (open_id, new_id, quit_id, search_id, hide_id, page_id, draw_id, undo_id) = (open.id().clone(), new_box.id().clone(), quit.id().clone(), search.id().clone(), hide.id().clone(), next_page.id().clone(), draw_box.id().clone(), undo_delete.id().clone());
     {
@@ -3898,7 +3892,7 @@ impl DeskApp {
         let results: Vec<DeskItem> = crate::search::rank(pool, &s.query, 12).into_iter().cloned().collect();
         let homes = self.item_homes();
         let app_paths: HashSet<String> = apps.iter().map(|a| a.path.to_lowercase()).collect();
-        let other = self.layout.fences.iter().find(|f| f.auto_sort).map(|f| f.name.clone()).unwrap_or_else(|| "Desktop".into());
+        let other = self.layout.fences.iter().find(|f| f.auto_sort).map(|f| f.name.clone()).unwrap_or_else(|| t("Desktop").into());
         if s.sel >= results.len() {
             s.sel = results.len().saturating_sub(1);
         }
@@ -3949,7 +3943,7 @@ impl DeskApp {
                         ui.label(egui::RichText::new(icon::SEARCH.to_string()).size(18.0).color(Color32::from_gray(190)));
                         let te = ui.add(
                             egui::TextEdit::singleline(&mut s.query)
-                                .hint_text("Search the desktop…")
+                                .hint_text(t("Search the desktop…"))
                                 .font(FontId::proportional(18.0))
                                 .frame(false)
                                 .desired_width(f32::INFINITY),
@@ -3963,9 +3957,9 @@ impl DeskApp {
                     });
                     ui.add_space(6.0);
                     if s.query.trim().is_empty() {
-                        ui.label(egui::RichText::new("Type part of a name. Enter opens, Ctrl+Enter opens its folder, Esc closes.").size(12.5).color(Color32::from_gray(150)));
+                        ui.label(egui::RichText::new(t("Type part of a name. Enter opens, Ctrl+Enter opens its folder, Esc closes.")).size(12.5).color(Color32::from_gray(150)));
                     } else if results.is_empty() {
-                        ui.label(egui::RichText::new("Nothing on the desktop matches.").size(13.0).color(Color32::from_gray(160)));
+                        ui.label(egui::RichText::new(t("Nothing on the desktop matches.")).size(13.0).color(Color32::from_gray(160)));
                     }
                     for (i, it) in results.iter().enumerate() {
                         let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 34.0), Sense::click());
@@ -3986,7 +3980,7 @@ impl DeskApp {
                             }
                         }
                         let key = it.path.to_lowercase();
-                        let home = homes.get(&key).cloned().unwrap_or_else(|| if app_paths.contains(&key) { "Program".to_string() } else { other.clone() });
+                        let home = homes.get(&key).cloned().unwrap_or_else(|| if app_paths.contains(&key) { t("Program").to_string() } else { other.clone() });
                         p.text(Pos2::new(rect.min.x + 38.0, rect.center().y), egui::Align2::LEFT_CENTER, &it.name, FontId::proportional(14.5), Color32::from_gray(240));
                         p.text(Pos2::new(rect.max.x - 8.0, rect.center().y), egui::Align2::RIGHT_CENTER, home, FontId::proportional(12.0), Color32::from_gray(150));
                         if resp.clicked() {
@@ -4284,7 +4278,7 @@ impl DeskApp {
                 }
                 let frame = egui::Frame::new().fill(Color32::from_rgb(40, 40, 43)).stroke(egui::Stroke::new(1.0_f32, Color32::from_white_alpha(30))).inner_margin(egui::Margin::same(12));
                 egui::CentralPanel::default().frame(frame).show(pctx, |ui| {
-                    ui.label(egui::RichText::new("Rename").size(13.0).color(Color32::from_gray(170)));
+                    ui.label(egui::RichText::new(t("Rename")).size(13.0).color(Color32::from_gray(170)));
                     let out = egui::TextEdit::singleline(&mut r.text).font(FontId::proportional(16.0)).desired_width(f32::INFINITY).show(ui);
                     let te = out.response.clone();
                     if !r.selected_once {
@@ -4298,7 +4292,7 @@ impl DeskApp {
                     if !te.has_focus() && !close && done.is_none() {
                         te.request_focus();
                     }
-                    ui.label(egui::RichText::new("Enter renames, Esc cancels.").size(11.5).color(Color32::from_gray(140)));
+                    ui.label(egui::RichText::new(t("Enter renames, Esc cancels.")).size(11.5).color(Color32::from_gray(140)));
                 });
             });
             if close || done.is_some() {
@@ -4371,7 +4365,7 @@ fn search_widget(ui: &mut egui::Ui, id: u64, desk: &DeskState, icons: &mut IconC
     let mut sel: usize = ui.ctx().data(|d| d.get_temp(qid.with("sel"))).unwrap_or(0);
     let r = ui.add(
         egui::TextEdit::singleline(&mut q)
-            .hint_text(format!("{}  Search the desktop", icon::SEARCH))
+            .hint_text(tf("{}  Search the desktop", &[&icon::SEARCH]))
             .desired_width(f32::INFINITY)
             .margin(egui::Margin::symmetric(8, 6)),
     );
@@ -4401,7 +4395,7 @@ fn search_widget(ui: &mut egui::Ui, id: u64, desk: &DeskState, icons: &mut IconC
     }
     ui.add_space(6.0);
     if !q.trim().is_empty() && results.is_empty() {
-        ui.label(egui::RichText::new("Nothing found").size(13.0).color(Color32::from_gray(150)));
+        ui.label(egui::RichText::new(t("Nothing found")).size(13.0).color(Color32::from_gray(150)));
     }
     let px = (20.0 * ui.ctx().pixels_per_point()).round() as u32;
     for (i, it) in results.iter().enumerate() {
@@ -4470,17 +4464,17 @@ impl DeskApp {
                 let widget_kind = fence.widget.as_ref().and_then(|w| widgets::find(&w.kind));
                 egui::TopBottomPanel::top("look-top").frame(egui::Frame::new().fill(Color32::from_rgb(24, 25, 28)).inner_margin(10.0)).show(pctx, |ui| {
                     ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new("Personalize").size(20.0).strong().color(Color32::WHITE));
+                        ui.label(egui::RichText::new(t("Personalize")).size(20.0).strong().color(Color32::WHITE));
                         ui.label(egui::RichText::new(format!("  {}", fence.name)).size(15.0).color(Color32::from_gray(170)));
                         if widget_kind.map(|k| (k.make)().has_settings()).unwrap_or(false) {
                             ui.add_space(24.0);
-                            ui.selectable_value(&mut tab, 0, egui::RichText::new("Look").size(14.0));
-                            ui.selectable_value(&mut tab, 1, egui::RichText::new("Widget settings").size(14.0));
+                            ui.selectable_value(&mut tab, 0, egui::RichText::new(t("Look")).size(14.0));
+                            ui.selectable_value(&mut tab, 1, egui::RichText::new(t("Widget settings")).size(14.0));
                         } else {
                             tab = 0;
                         }
                         ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
-                            if ui.button("Done").clicked() {
+                            if ui.button(t("Done")).clicked() {
                                 close = true;
                             }
                         });
@@ -4542,9 +4536,9 @@ impl DeskApp {
                 let frame = egui::Frame::new().fill(Color32::from_rgb(44, 44, 46)).stroke(egui::Stroke::new(1.0_f32, Color32::from_white_alpha(30))).inner_margin(egui::Margin::symmetric(14, 10));
                 egui::CentralPanel::default().frame(frame).show(pctx, |ui| {
                     ui.horizontal(|ui| {
-                        ui.add(egui::Label::new(egui::RichText::new(format!("“{name}” deleted")).size(14.0).color(Color32::WHITE)).truncate());
+                        ui.add(egui::Label::new(egui::RichText::new(tf("“{}” deleted", &[&name])).size(14.0).color(Color32::WHITE)).truncate());
                         ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
-                            if ui.button(egui::RichText::new("Undo").size(14.0)).clicked() {
+                            if ui.button(egui::RichText::new(t("Undo")).size(14.0)).clicked() {
                                 undo = true;
                             }
                         });

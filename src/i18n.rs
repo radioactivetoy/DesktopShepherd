@@ -156,12 +156,18 @@ pub fn weekday_short(d: u32) -> &'static str {
 pub fn long_date(d: chrono::NaiveDate) -> String {
     use chrono::Datelike;
     let wd = weekday_name(d.weekday().num_days_from_monday());
+    format!("{wd}, {}", day_month(d))
+}
+
+/// "22 November" / "22 de noviembre" / "22 de novembre" (no weekday).
+pub fn day_month(d: chrono::NaiveDate) -> String {
+    use chrono::Datelike;
     let m = month_name(d.month());
     match lang() {
-        Lang::En => format!("{wd}, {} {m}", d.day()),
+        Lang::En => format!("{} {m}", d.day()),
         Lang::Es | Lang::Ca => {
             let de = if lang() == Lang::Ca && matches!(m.chars().next(), Some('a' | 'o')) { "d'" } else { "de " };
-            format!("{wd}, {} {de}{m}", d.day())
+            format!("{} {de}{m}", d.day())
         }
     }
 }
