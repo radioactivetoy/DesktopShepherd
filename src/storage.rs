@@ -154,3 +154,36 @@ pub fn backup_now(layout: &Layout) {
         }
     }
 }
+
+// ---- Sync between PCs through OneDrive ------------------------------------------------------
+//
+// With "Keep my boxes in OneDrive" on, every save also writes OneDrive\DesktopShepherd\layout.json
+// (only when its contents differ, so two PCs never bounce the same file back and forth), and a
+// newer file written by another PC is loaded (the current layout is backed up first).
+
+/// OneDrive\DesktopShepherd\layout.json, if OneDrive is set up on this PC.
+pub fn sync_path() -> Option<PathBuf> {
+    let base = std::env::var_os("OneDrive").or_else(|| std::env::var_os("OneDriveConsumer"))?;
+    let base = PathBuf::from(base);
+    base.is_dir().then(|| base.join("DesktopShepherd").join("layout.json"))
+}
+
+/// Writes the layout to the sync file if it differs. Returns the file's time after writing (or the
+/// current one if nothing changed).
+pub fn write_sync(layout: &Layout) -> Option<std::time::SystemTime> {
+    let path = sync_path()?;
+    let text = serde_json::to_string_pretty(layout).ok()?;
+    if fs::read_to_string(&path).ok().as_deref() != Some(text.as_str()) {
+        let dir = path.parent()?;
+        fs::create_dir_all(dir).ok()?;
+        let tmp = dir.join("layout.json.tmp");
+        fs::write(&tmp, text.as_bytes()).ok()?;
+        fs::rename(&tmp, &path).ok()?;
+    }
+    fs::metadata(&path).and_then(|m| m.modified()).ok()
+}
+
+/// The sync file's time, if it exists.
+pub fn sync_modified() -> Option<std::time::SystemTime> {
+    fs::metadata(sync_path()?).and_then(|m| m.modified()).ok()
+}

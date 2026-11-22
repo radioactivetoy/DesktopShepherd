@@ -228,6 +228,11 @@ pub struct DeskApp {
     pending_checked: bool,
     /// When this run started (the first update check waits a little).
     started_at: Instant,
+    /// The accent setting last applied.
+    accent_applied: Option<bool>,
+    /// OneDrive sync: the shared file's time we last wrote or loaded, and when it was checked.
+    sync_seen: Option<std::time::SystemTime>,
+    sync_check_at: Instant,
     /// The virtual desktop last seen (index).
     vdesk_seen: Option<usize>,
     /// The desktop menu entries were written for this run.
@@ -297,6 +302,7 @@ impl DeskApp {
         sanitize(&mut layout);
         // The language, before any text is made (tray menu, windows).
         crate::i18n::set_lang(layout.settings.language);
+        refresh_accent(layout.settings.follow_accent);
         if persist {
             storage::backup_now(&layout);
             if first_run {
@@ -439,6 +445,9 @@ impl DeskApp {
             box_hotkeys_applied: None,
             pending_checked: false,
             started_at: Instant::now(),
+            accent_applied: None,
+            sync_seen: None,
+            sync_check_at: Instant::now() - Duration::from_secs(60),
             vdesk_seen: None,
             desktop_menu_applied: None,
             ta_buf: String::new(),
@@ -514,6 +523,9 @@ impl DeskApp {
         }
         if let Err(e) = storage::save(&self.layout) {
             storage::log_line(&format!("save failed: {e}"));
+        }
+        if self.layout.settings.sync_onedrive {
+            self.sync_seen = storage::write_sync(&self.layout);
         }
     }
 
@@ -921,6 +933,28 @@ impl DeskApp {
                 crate::runloop::wake_after(Duration::from_secs(21) - self.started_at.elapsed().min(Duration::from_secs(20)));
             }
         }
+        // OneDrive sync: every 20 s, load the shared layout if another PC saved a newer one.
+        if self.persist && self.layout.settings.sync_onedrive && self.sync_check_at.elapsed() >= Duration::from_secs(20) {
+            self.sync_check_at = Instant::now();
+            let t = storage::sync_modified();
+            match (t, self.sync_seen) {
+                (Some(t), Some(seen)) if t > seen => {
+                    self.sync_seen = Some(t);
+                    if let Some(p) = storage::sync_path() {
+                        storage::log_line("sync: loading the layout saved on another PC");
+                        self.actions.push(Act::RestoreBackup(p));
+                    }
+                }
+                (Some(t), None) => {
+                    // Just turned on (or first check): this PC's layout goes to OneDrive.
+                    let _ = t;
+                    self.sync_seen = storage::write_sync(&self.layout);
+                }
+                (None, _) => self.sync_seen = storage::write_sync(&self.layout),
+                _ => {}
+            }
+            crate::runloop::wake_after(Duration::from_secs(21));
+        }
         crate::apps::set_enabled(self.layout.settings.search_apps);
         if let Some(p) = self.picked_layout.lock().ok().and_then(|mut p| p.take()) {
             self.actions.push(Act::RestoreBackup(std::path::PathBuf::from(p)));
@@ -1126,6 +1160,15 @@ impl DeskApp {
             }
             self.icon_sizes = sizes;
         }
+        // Windows' accent colour changed, or the setting: style everything again.
+        #[cfg(windows)]
+        let colour_changed = crate::runloop::take_colors_changed();
+        #[cfg(not(windows))]
+        let colour_changed = false;
+        if (colour_changed || self.accent_applied != Some(self.layout.settings.follow_accent)) && refresh_accent(self.layout.settings.follow_accent) {
+            self.font_names = vec!["\u{0}restyle".into()]; // forces the restyle below
+        }
+        self.accent_applied = Some(self.layout.settings.follow_accent);
         // Fonts chosen in boxes: load the ones in use (before any box draws this pass).
         let mut wanted: Vec<String> = self.layout.fences.iter().filter(|f| !f.font.is_empty()).map(|f| f.font.clone()).collect();
         wanted.sort();
@@ -1715,7 +1758,7 @@ fn fence_window(
                 painter.rect_stroke(
                     rect.shrink(1.5),
                     egui::CornerRadius::same(fence.corner.round().clamp(0.0, 40.0) as u8),
-                    egui::Stroke::new(2.5_f32, Color32::from_rgb(76, 194, 255)),
+                    egui::Stroke::new(2.5_f32, accent()),
                     egui::StrokeKind::Inside,
                 );
             }
@@ -2053,7 +2096,7 @@ fn fence_window(
                             b,
                             egui::CornerRadius::same(2),
                             Color32::from_rgba_unmultiplied(76, 194, 255, 40),
-                            egui::Stroke::new(1.0_f32, Color32::from_rgb(76, 194, 255)),
+                            egui::Stroke::new(1.0_f32, accent()),
                             egui::StrokeKind::Inside,
                         );
                     }
@@ -2318,7 +2361,7 @@ fn look_left(ui: &mut egui::Ui, fence: &mut Fence) -> bool {
                         }
                         p.circle_stroke(c, 10.0, egui::Stroke::new(1.0_f32, Color32::from_white_alpha(70)));
                         if selected {
-                            p.circle_stroke(c, 13.0, egui::Stroke::new(2.0_f32, Color32::from_rgb(76, 194, 255)));
+                            p.circle_stroke(c, 13.0, egui::Stroke::new(2.0_f32, accent()));
                         } else if resp.hovered() {
                             p.circle_stroke(c, 13.0, egui::Stroke::new(1.0_f32, Color32::from_white_alpha(90)));
                         }
@@ -2415,7 +2458,7 @@ fn look_right(ui: &mut egui::Ui, fence: &mut Fence, actions: &mut Vec<Act>) -> b
                         ui.spacing_mut().item_spacing.x = 4.0;
                         for (i, text) in [first, second].into_iter().enumerate() {
                             let on = (i == 0) == is_first;
-                            let fill = if on { Color32::from_rgb(76, 194, 255).linear_multiply(0.35) } else { Color32::from_white_alpha(10) };
+                            let fill = if on { accent().linear_multiply(0.35) } else { Color32::from_white_alpha(10) };
                             let b = egui::Button::new(egui::RichText::new(text).size(13.0).color(if on { Color32::WHITE } else { Color32::from_gray(200) }))
                                 .fill(fill)
                                 .corner_radius(egui::CornerRadius::same(4))
@@ -2435,7 +2478,7 @@ fn look_right(ui: &mut egui::Ui, fence: &mut Fence, actions: &mut Vec<Act>) -> b
                     ui.spacing_mut().item_spacing.x = 4.0;
                     for (pos, text) in [(TitlePos::Hidden, t("Off")), (TitlePos::Left, t("Left")), (TitlePos::Top, t("Top")), (TitlePos::Bottom, t("Bottom"))] {
                         let on = fence.title_pos == pos;
-                        let fill = if on { Color32::from_rgb(76, 194, 255).linear_multiply(0.35) } else { Color32::from_white_alpha(10) };
+                        let fill = if on { accent().linear_multiply(0.35) } else { Color32::from_white_alpha(10) };
                         let b = egui::Button::new(egui::RichText::new(text).size(13.0).color(if on { Color32::WHITE } else { Color32::from_gray(200) }))
                             .fill(fill)
                             .corner_radius(egui::CornerRadius::same(4))
@@ -3234,6 +3277,7 @@ impl DeskApp {
             dirty |= ui.add(egui::DragValue::new(&mut s.grid_size).range(4.0..=200.0).speed(1.0).suffix(" pt")).changed();
         });
         ui.label(egui::RichText::new(t("Hold Alt while moving or resizing a box to place it freely.")).color(Color32::from_gray(150)).size(12.0));
+        dirty |= ui.checkbox(&mut s.follow_accent, t("Use Windows' accent colour for highlights")).changed();
         dirty |= ui.checkbox(&mut s.search_apps, t("Quick search also finds programs (from the Start menu)")).changed();
         #[cfg(windows)]
         ui.horizontal_wrapped(|ui| {
@@ -3396,6 +3440,22 @@ impl DeskApp {
             dirty = true;
         }
         ui.label(egui::RichText::new(t("New, renamed and removed desktop files show up as soon as Windows reports them.")).color(Color32::from_gray(150)).size(12.0));
+        ui.add_space(10.0);
+        ui.heading(t("Sync"));
+        match storage::sync_path() {
+            Some(p) => {
+                if ui.checkbox(&mut s.sync_onedrive, t("Keep my boxes and settings in OneDrive (shared between my PCs)")).changed() {
+                    dirty = true;
+                    if !s.sync_onedrive {
+                        self.sync_seen = None;
+                    }
+                }
+                ui.label(egui::RichText::new(tf("File: {}. Changes from another PC are loaded within half a minute; your layout is backed up first.", &[&p.display()])).size(12.0).color(Color32::from_gray(150)));
+            }
+            None => {
+                ui.label(egui::RichText::new(t("OneDrive isn't set up on this PC.")).size(12.0).color(Color32::from_gray(150)));
+            }
+        }
         ui.add_space(10.0);
         ui.heading(t("Updates"));
         {
@@ -3682,6 +3742,38 @@ fn sanitize(layout: &mut Layout) {
 
 /// Fonts and the Windows 11 dark look for a drawing context. `extra_fonts`: the fonts boxes use
 /// (names from `fence_view::FONTS`), each loaded from the Windows Fonts folder as its own family.
+/// The highlight colour: Windows' accent colour (Settings > Desktop "Use Windows' accent colour"),
+/// or Windows 11's default light blue.
+static ACCENT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0x4C_C2_FF);
+
+pub fn accent() -> Color32 {
+    let v = ACCENT.load(std::sync::atomic::Ordering::Relaxed);
+    Color32::from_rgb((v >> 16) as u8, (v >> 8) as u8, v as u8)
+}
+
+/// Reads Windows' accent colour (if `follow`), made light enough to read on the dark boxes.
+/// Returns true if it changed.
+fn refresh_accent(follow: bool) -> bool {
+    let mut rgb: u32 = 0x4C_C2_FF;
+    #[cfg(windows)]
+    if follow {
+        use winreg::enums::HKEY_CURRENT_USER;
+        if let Ok(k) = winreg::RegKey::predef(HKEY_CURRENT_USER).open_subkey("Software\\Microsoft\\Windows\\DWM") {
+            if let Ok(v) = k.get_value::<u32, _>("AccentColor") {
+                // Stored as 0xAABBGGRR.
+                let (r, g, b) = ((v & 0xFF) as f32, ((v >> 8) & 0xFF) as f32, ((v >> 16) & 0xFF) as f32);
+                // Too dark to read on dark glass: mix with white until it is light enough.
+                let lum = 0.299 * r + 0.587 * g + 0.114 * b;
+                let t = if lum < 140.0 { ((140.0 - lum) / (255.0 - lum).max(1.0)).clamp(0.0, 0.8) } else { 0.0 };
+                let mix = |c: f32| (c + (255.0 - c) * t).round() as u32;
+                rgb = (mix(r) << 16) | (mix(g) << 8) | mix(b);
+            }
+        }
+    }
+    let _ = follow;
+    ACCENT.swap(rgb, std::sync::atomic::Ordering::Relaxed) != rgb
+}
+
 fn setup_style(ctx: &egui::Context, extra_fonts: &[String]) {
     let mut fonts = egui::FontDefinitions::default();
     // Use Windows' own UI font when present, for the same look as desktop captions.
@@ -3729,7 +3821,7 @@ fn setup_style(ctx: &egui::Context, extra_fonts: &[String]) {
         s.spacing.menu_width = 250.0;
         s.spacing.interact_size.y = 30.0;
         let v = &mut s.visuals;
-        let accent = Color32::from_rgb(76, 194, 255); // Windows 11 dark-mode accent blue
+        let accent = accent(); // Windows' accent colour (or Windows 11's default blue)
         v.window_fill = Color32::from_rgb(44, 44, 46);
         v.panel_fill = Color32::from_rgb(32, 32, 32);
         v.extreme_bg_color = Color32::from_rgb(28, 28, 28);
@@ -4013,7 +4105,7 @@ impl DeskApp {
                         }
                         let p = ui.painter();
                         if i == s.sel {
-                            p.rect_filled(rect, egui::CornerRadius::same(5), Color32::from_rgb(76, 194, 255).linear_multiply(0.28));
+                            p.rect_filled(rect, egui::CornerRadius::same(5), accent().linear_multiply(0.28));
                         }
                         let ir = Rect::from_min_size(Pos2::new(rect.min.x + 6.0, rect.center().y - 11.0), Vec2::splat(22.0));
                         match icons.get(&it.path, (22.0 * ppp).round() as u32) {

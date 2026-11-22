@@ -112,6 +112,12 @@ egui font atlases, and the icon textures.
   desktop, "s" jumped to the next s-item and "s" again to the one after; a text box in another
   window received "abc1" normally; typing "xyz" right after switching from the desktop to another
   window arrived intact 3 times out of 3.
+- New (2026-11-23): Windows accent colour for highlights (setting follow_accent, refreshed on
+  WM_DWMCOLORIZATIONCOLORCHANGED / WM_SETTINGCHANGE; dark accents lightened for contrast). OneDrive
+  sync (setting sync_onedrive; `storage::write_sync` only writes when the contents differ, a newer
+  shared file is loaded through RestoreBackup; checked with a stand-in OneDrive folder: a change from
+  the "other PC" arrived in ~20 s). Weather: several places, dots to switch. Light mode for menus
+  and settings is not done (they stay dark).
 - To do: Windows drop shadow on boxes (`desktop::set_shadow`, field `Fence.shadow`) is wired but
   showed no shadow in testing (box windows are composition windows with WS_EX_NOREDIRECTIONBITMAP);
   the Personalize checkbox is hidden until it works. Weather icons: use Meteocons later.

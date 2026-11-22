@@ -526,6 +526,13 @@ pub static ES: &[(&str, &str)] = &[
     ("DesktopShepherd {} is available", "DesktopShepherd {} está disponible"),
     ("Later", "Más tarde"),
     ("Update", "Actualizar"),
+    ("Use Windows' accent colour for highlights", "Usar el color de énfasis de Windows para los resaltados"),
+    ("Sync", "Sincronización"),
+    ("Keep my boxes and settings in OneDrive (shared between my PCs)", "Guardar mis cajas y la configuración en OneDrive (compartidas entre mis PC)"),
+    ("File: {}. Changes from another PC are loaded within half a minute; your layout is backed up first.", "Archivo: {}. Los cambios de otro PC se cargan en medio minuto; antes se guarda una copia de tu diseño."),
+    ("OneDrive isn't set up on this PC.", "OneDrive no está configurado en este PC."),
+    ("Places", "Lugares"),
+    ("Add a place:", "Añadir un lugar:"),
 ];
 
 pub static CA: &[(&str, &str)] = &[
@@ -863,6 +870,13 @@ pub static CA: &[(&str, &str)] = &[
     ("DesktopShepherd {} is available", "DesktopShepherd {} està disponible"),
     ("Later", "Més tard"),
     ("Update", "Actualitza"),
+    ("Use Windows' accent colour for highlights", "Utilitza el color d'èmfasi de Windows per als ressaltats"),
+    ("Sync", "Sincronització"),
+    ("Keep my boxes and settings in OneDrive (shared between my PCs)", "Desa les meves caixes i la configuració a OneDrive (compartides entre els meus PC)"),
+    ("File: {}. Changes from another PC are loaded within half a minute; your layout is backed up first.", "Fitxer: {}. Els canvis d'un altre PC es carreguen en mig minut; abans es desa una còpia del teu disseny."),
+    ("OneDrive isn't set up on this PC.", "OneDrive no està configurat en aquest PC."),
+    ("Places", "Llocs"),
+    ("Add a place:", "Afegeix un lloc:"),
 ];
 
 #[cfg(test)]

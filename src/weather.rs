@@ -137,18 +137,56 @@ fn search_places(q: String) {
     });
 }
 
+/// The widget's places: (name, lat, lon). A layout from before several places were possible
+/// (a single "place"/"lat"/"lon") is moved into the list.
+fn places(data: &mut Value) -> Vec<(String, f64, f64)> {
+    if !data["places"].is_array() {
+        let mut v = Vec::new();
+        if let (Some(lat), Some(lon)) = (data["lat"].as_f64(), data["lon"].as_f64()) {
+            v.push(json!({ "place": data["place"].as_str().unwrap_or(""), "lat": lat, "lon": lon }));
+        }
+        data["places"] = json!(v);
+    }
+    data["places"]
+        .as_array()
+        .map(|a| a.iter().filter_map(|p| Some((p["place"].as_str().unwrap_or("").to_string(), p["lat"].as_f64()?, p["lon"].as_f64()?))).collect())
+        .unwrap_or_default()
+}
+
 pub struct Weather;
 
 impl DeskWidget for Weather {
     fn ui(&self, ui: &mut Ui, data: &mut Value) -> WidgetOutput {
         let out = WidgetOutput { changed: false, repaint_after: Some(Duration::from_secs(600)) };
-        let (Some(lat), Some(lon)) = (data["lat"].as_f64(), data["lon"].as_f64()) else {
+        let list = places(data);
+        if list.is_empty() {
             ui.add_space(6.0);
             ui.label(egui::RichText::new(t("Right-click here and choose \"Widget settings…\" to pick a place.")).size(13.0).color(Color32::from_gray(220)));
             return out;
-        };
+        }
+        // Several places: dots at the bottom switch between them.
+        let sid = ui.make_persistent_id("weather-place");
+        let mut idx: usize = ui.ctx().data(|d| d.get_temp(sid)).unwrap_or(0).min(list.len() - 1);
+        if list.len() > 1 {
+            let full = ui.max_rect();
+            let gap = 14.0;
+            let y = full.max.y - 6.0;
+            let n = list.len();
+            for (i, (name, _, _)) in list.iter().enumerate() {
+                let c = Pos2::new(full.center().x + (i as f32 - (n as f32 - 1.0) / 2.0) * gap, y);
+                let r = egui::Rect::from_center_size(c, egui::vec2(gap, 12.0));
+                let resp = ui.interact(r, ui.id().with(("weather-dot", i)), egui::Sense::click()).on_hover_text(name);
+                if resp.clicked() {
+                    idx = i;
+                    ui.ctx().data_mut(|d| d.insert_temp(sid, i));
+                    ui.ctx().request_repaint();
+                }
+                let alpha = if i == idx { 235 } else if resp.hovered() { 160 } else { 90 };
+                ui.painter().circle_filled(c, if i == idx { 3.5 } else { 3.0 }, Color32::from_white_alpha(alpha));
+            }
+        }
+        let (place, lat, lon) = list[idx].clone();
         let fahrenheit = data["fahrenheit"].as_bool().unwrap_or(false);
-        let place = data["place"].as_str().unwrap_or("").to_string();
         let (f, err) = forecast(lat, lon, fahrenheit);
         let Some(f) = f else {
             let text = err.unwrap_or_else(|| t("Loading…").to_string());
@@ -191,10 +229,26 @@ impl DeskWidget for Weather {
 
     fn settings(&self, ui: &mut Ui, data: &mut Value) -> bool {
         let mut changed = false;
-        ui.label(egui::RichText::new(t("Place")).strong());
-        if let Some(p) = data["place"].as_str() {
-            ui.label(egui::RichText::new(p).size(14.0));
+        ui.label(egui::RichText::new(t("Places")).strong());
+        let list = places(data);
+        let mut remove = None;
+        for (i, (name, _, _)) in list.iter().enumerate() {
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new(name).size(14.0));
+                if ui.small_button(t("Remove")).clicked() {
+                    remove = Some(i);
+                }
+            });
         }
+        if let Some(i) = remove {
+            if let Some(a) = data["places"].as_array_mut() {
+                if i < a.len() {
+                    a.remove(i);
+                    changed = true;
+                }
+            }
+        }
+        ui.label(egui::RichText::new(t("Add a place:")).size(12.5).color(Color32::from_gray(180)));
         let qid = ui.make_persistent_id("weather-query");
         let mut q: String = ui.ctx().data(|d| d.get_temp(qid)).unwrap_or_default();
         let mut go = false;
@@ -217,9 +271,9 @@ impl DeskWidget for Weather {
                     for (label, lat, lon) in list {
                         if ui.button(&label).clicked() {
                             let short = label.split(" (").next().unwrap_or(&label).to_string();
-                            data["place"] = json!(short);
-                            data["lat"] = json!(lat);
-                            data["lon"] = json!(lon);
+                            if let Some(a) = data["places"].as_array_mut() {
+                                a.push(json!({ "place": short, "lat": lat, "lon": lon }));
+                            }
                             changed = true;
                             if let Ok(mut f) = FOUND.lock() {
                                 *f = None;

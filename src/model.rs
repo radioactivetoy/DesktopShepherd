@@ -244,6 +244,10 @@ pub struct Settings {
     pub check_updates: bool,
     /// A version the person chose to skip ("Later" on the update note).
     pub skipped_version: String,
+    /// Highlights use Windows' accent colour.
+    pub follow_accent: bool,
+    /// Keep the layout in OneDrive, shared by this user's PCs.
+    pub sync_onedrive: bool,
 }
 
 impl Default for Settings {
@@ -275,6 +279,8 @@ impl Default for Settings {
             language: 0,
             check_updates: true,
             skipped_version: String::new(),
+            follow_accent: true,
+            sync_onedrive: false,
         }
     }
 }

@@ -64,6 +64,13 @@ static HIDE_REQUESTED: AtomicBool = AtomicBool::new(false);
 /// Requests from the desktop's right-click menu (another copy of the program sent them): text
 /// like "box 812 455" (what, cursor x, y in pixels).
 static NEW_REQUESTS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+/// Windows' colours changed (accent colour, light/dark).
+static COLORS_CHANGED: AtomicBool = AtomicBool::new(false);
+
+pub fn take_colors_changed() -> bool {
+    COLORS_CHANGED.swap(false, Ordering::SeqCst)
+}
+
 /// Ctrl+Alt+B was pressed: draw a new box.
 static DRAW_REQUESTED: AtomicBool = AtomicBool::new(false);
 
@@ -373,6 +380,12 @@ unsafe extern "system" fn main_wndproc(h: HWND, m: u32, wp: WPARAM, lp: LPARAM) 
                 return LRESULT(1);
             }
             LRESULT(0)
+        }
+        // Windows' accent colour or theme changed.
+        0x0320 | WM_SETTINGCHANGE => {
+            COLORS_CHANGED.store(true, Ordering::SeqCst);
+            wake_after(Duration::from_millis(300));
+            DefWindowProcW(h, m, wp, lp)
         }
         WM_DISPLAYCHANGE => {
             DISPLAY_CHANGED.store(true, Ordering::SeqCst);

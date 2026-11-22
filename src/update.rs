@@ -46,7 +46,7 @@ pub fn newer_than(a: &str, b: &str) -> bool {
 fn fetch_latest() -> Result<Release, String> {
     let txt = crate::net::get_text(&format!("https://api.github.com/repos/{REPO}/releases/latest")).map_err(|e| {
         if e.contains("404") {
-            "no published release found (the GitHub repository must be public for updates)".to_string()
+            "no release published yet".to_string()
         } else {
             e
         }
