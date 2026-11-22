@@ -84,6 +84,20 @@ pub fn scan(extra: &[String]) -> HashMap<String, DeskItem> {
         }
     }
     for p in extra {
+        // "dir:<folder>": a folder box's folder: list what is in it (not hidden, at most 2000).
+        if let Some(dir) = p.strip_prefix("dir:") {
+            let Ok(rd) = std::fs::read_dir(dir) else { continue };
+            for e in rd.flatten().take(2000) {
+                let path = e.path();
+                if is_hidden(&path) {
+                    continue;
+                }
+                if let Some(it) = item_from_path(&path) {
+                    out.entry(it.path.to_lowercase()).or_insert(it);
+                }
+            }
+            continue;
+        }
         let key = p.to_lowercase();
         if out.contains_key(&key) {
             continue;
@@ -933,4 +947,27 @@ pub fn work_areas_px() -> Vec<[i32; 4]> {
         let _ = EnumDisplayMonitors(HDC::default(), None, Some(cb), LPARAM(&mut out as *mut _ as isize));
     }
     out
+}
+
+/// Windows' folder picker (modal; call on its own thread). Returns the chosen folder's path.
+pub fn pick_folder() -> Option<String> {
+    #[cfg(windows)]
+    unsafe {
+        use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED};
+        use windows::Win32::UI::Shell::{FileOpenDialog, IFileOpenDialog, FOS_FORCEFILESYSTEM, FOS_PICKFOLDERS, SIGDN_FILESYSPATH};
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        let dlg: IFileOpenDialog = CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER).ok()?;
+        let _ = dlg.SetOptions(FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM);
+        let _ = dlg.SetTitle(windows::core::w!("Choose a folder for the box"));
+        dlg.Show(None).ok()?;
+        let item = dlg.GetResult().ok()?;
+        let name = item.GetDisplayName(SIGDN_FILESYSPATH).ok()?;
+        let path = name.to_string().ok();
+        windows::Win32::System::Com::CoTaskMemFree(Some(name.0 as *const _));
+        path
+    }
+    #[cfg(not(windows))]
+    {
+        None
+    }
 }

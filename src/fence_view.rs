@@ -90,6 +90,20 @@ pub fn sort_items(v: &mut [DeskItem], sort: SortKind, open_counts: &HashMap<Stri
 
 /// The tabs as shown: names and the items in each, already filtered and sorted.
 pub fn visible_tabs(fence: &Fence, desk: &DeskState) -> Vec<(String, Vec<DeskItem>)> {
+    if let Some(dir) = &fence.folder {
+        // A folder box: whatever is in the folder right now.
+        let dir_l = dir.trim_end_matches(['\\', '/']).to_lowercase();
+        let mut v: Vec<DeskItem> = desk
+            .items
+            .values()
+            .filter(|it| std::path::Path::new(&it.path).parent().map(|p| p.to_string_lossy().to_lowercase() == dir_l).unwrap_or(false))
+            .cloned()
+            .collect();
+        let sort = if fence.sort == SortKind::Manual { SortKind::Name } else { fence.sort };
+        sort_items(&mut v, sort, desk.open_counts);
+        let name = std::path::Path::new(dir).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| dir.clone());
+        return vec![(name, v)];
+    }
     if fence.auto_sort {
         let mut by_tab: HashMap<String, Vec<DeskItem>> = HashMap::new();
         for (key, it) in desk.items.iter() {

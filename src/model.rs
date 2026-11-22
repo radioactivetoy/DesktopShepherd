@@ -97,6 +97,8 @@ pub struct Fence {
     pub show_captions: bool,
     /// Horizontal distance between icons in points (0 = Windows' own desktop spacing).
     pub icon_spacing: f32,
+    /// A folder box: shows the live contents of this folder instead of its own tabs.
+    pub folder: Option<String>,
 }
 
 impl Default for Fence {
@@ -135,6 +137,7 @@ impl Default for Fence {
             caption_size: 12.0,
             show_captions: true,
             icon_spacing: 0.0,
+            folder: None,
         }
     }
 }

@@ -46,6 +46,8 @@ enum Act {
     ImportOriginal,
     /// Give every box the look of this one (Personalize > Apply this look to all boxes).
     ApplyLookToAll(u64),
+    /// Pick a folder (Windows' folder picker, on its own thread) and make a folder box for it.
+    NewFolderBox,
     /// Right-click on an item: Windows' own menu (and the other selected items with it), with
     /// DeskBoxes' entries on top, shown by a helper process.
     ItemMenu { from: u64, path: String },
@@ -155,6 +157,8 @@ pub struct DeskApp {
     restack_at: Vec<Instant>,
     /// The quick-search window, while open.
     search: Option<SearchState>,
+    /// A folder chosen in the folder picker (New > Folder box…), waiting to become a box.
+    picked_folder: Arc<Mutex<Option<String>>>,
     /// The rename window (F2), while open: the item and the new name being typed.
     rename: Option<RenameState>,
     /// Files pasted with Ctrl+V that landed on the desktop, to put in the box worked in:
@@ -194,7 +198,10 @@ fn shared_ui_fingerprint(st: &UiState) -> u64 {
 }
 
 fn clean_paths(layout: &Layout) -> Vec<String> {
-    layout.fences.iter().flat_map(|f| f.tabs.iter().flat_map(|t| t.items.iter().cloned())).collect()
+    let mut v: Vec<String> = layout.fences.iter().flat_map(|f| f.tabs.iter().flat_map(|t| t.items.iter().cloned())).collect();
+    // Folder boxes: the scanner lists these folders too.
+    v.extend(layout.fences.iter().filter_map(|f| f.folder.as_ref()).map(|d| format!("dir:{d}")));
+    v
 }
 
 impl DeskApp {
@@ -336,6 +343,7 @@ impl DeskApp {
             search: None,
             menu_ctx: None,
             rename: None,
+            picked_folder: Arc::new(Mutex::new(None)),
             pasted: Arc::new(Mutex::new(Vec::new())),
             hotkey_applied: usize::MAX,
             hotkey_ok: true,
@@ -507,7 +515,7 @@ impl DeskApp {
                             let h = if f.expanded { f.rect[3] } else { ROLLED_HEIGHT };
                             Rect::from_min_size(Pos2::new(f.rect[0], f.rect[1]), Vec2::new(f.rect[2], h)).contains(at)
                         })
-                        .map(|f| (f.id, f.auto_sort, f.widget.is_some(), f.sel_tab));
+                        .map(|f| (f.id, f.auto_sort, f.widget.is_some() || f.folder.is_some(), f.sel_tab));
                     match target {
                         Some((id, _, _, _)) if id == from => {}
                         Some((_, _, true, _)) => {}
@@ -566,7 +574,7 @@ impl DeskApp {
                         .layout
                         .fences
                         .iter()
-                        .filter(|f| !f.auto_sort && f.widget.is_none() && (f.id != from || from_auto))
+                        .filter(|f| !f.auto_sort && f.widget.is_none() && f.folder.is_none() && (f.id != from || from_auto))
                         .map(|f| (f.id, f.name.clone()))
                         .collect();
                     #[cfg(windows)]
@@ -585,6 +593,22 @@ impl DeskApp {
                             let at = desktop::cursor_points(desktop::system_scale()).unwrap_or_default();
                             self.ui.menu = Some(OpenMenu { target: MenuTarget::Item(from, path.clone()), page: MenuPage::Main, at, size: Vec2::new(270.0, 120.0), frames: 0, was_focused: false, rounded: false });
                         }
+                    }
+                }
+                Act::NewFolderBox => {
+                    #[cfg(windows)]
+                    {
+                        let wake = self.scan_wake.clone();
+                        let picked = self.picked_folder.clone();
+                        let _ = std::thread::Builder::new().name("folder-picker".into()).spawn(move || {
+                            if let Some(dir) = desktop::pick_folder() {
+                                if let Ok(mut p) = picked.lock() {
+                                    *p = Some(dir);
+                                }
+                                let _ = wake.send(());
+                                crate::runloop::wake_after(Duration::ZERO);
+                            }
+                        });
                     }
                 }
                 Act::ApplyLookToAll(id) => {
@@ -832,6 +856,19 @@ impl DeskApp {
                     }
                     _ => {}
                 }
+            }
+            let _ = self.scan_wake.send(());
+        }
+        // A folder was picked: make its folder box.
+        let picked = self.picked_folder.lock().ok().and_then(|mut p| p.take());
+        if let Some(dir) = picked {
+            let id = self.layout.new_id();
+            let rect = self.new_fence_rect([520.0, 300.0]);
+            let name = std::path::Path::new(&dir).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| dir.clone());
+            self.layout.fences.push(Fence { id, rect, name, sort: SortKind::Modified, folder: Some(dir), ..Fence::default() });
+            self.mark_dirty();
+            if let Ok(mut e) = self.extra_paths.lock() {
+                *e = clean_paths(&self.layout);
             }
             let _ = self.scan_wake.send(());
         }
@@ -1108,7 +1145,7 @@ fn fence_window(
     let dropped: Vec<String> = ctx.input(|i| {
         i.raw.dropped_files.iter().filter_map(|f| f.path.as_ref().map(|p| p.to_string_lossy().to_string())).collect()
     });
-    if !dropped.is_empty() && !fence.auto_sort && fence.widget.is_none() {
+    if !dropped.is_empty() && !fence.auto_sort && fence.widget.is_none() && fence.folder.is_none() {
         for p in dropped {
             actions.push(Act::MoveItem { path: p, to: fence.id, tab: fence.sel_tab });
         }
@@ -1177,7 +1214,7 @@ fn fence_window(
         }
         // Icons being dragged over this box from another one: show where they will land.
         if let Some((from, _)) = st.item_drag.as_ref() {
-            let accepts = *from != fence.id && !fence.auto_sort && fence.widget.is_none();
+            let accepts = *from != fence.id && !fence.auto_sort && fence.widget.is_none() && fence.folder.is_none();
             if accepts && desktop::cursor_points(ppp).map(|c| current.contains(c)).unwrap_or(false) {
                 painter.rect_stroke(
                     rect.shrink(1.5),
@@ -1938,6 +1975,10 @@ fn fence_menu(ui: &mut egui::Ui, fence: &mut Fence, st: &mut UiState, page: &mut
             back(ui, page, "New");
             if row(ui, icon::VIEW, "Box", None, true).clicked() {
                 actions.push(Act::NewFence { auto: false });
+                close = true;
+            }
+            if row(ui, icon::FOLDER, "Folder box…", None, true).on_hover_text("A box that shows what is in a folder, live").clicked() {
+                actions.push(Act::NewFolderBox);
                 close = true;
             }
             sep(ui);
