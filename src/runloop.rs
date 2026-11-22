@@ -114,7 +114,8 @@ fn set_hotkey(id: i32, what: &str, index: usize) -> bool {
 /// keys and virtual-key code of each press since the last pass.
 static TYPED: Mutex<Vec<(u32, u32)>> = Mutex::new(Vec::new());
 /// The typing keys are currently borrowed.
-static TYPING_ON: AtomicBool = AtomicBool::new(false);
+/// Keys borrowed now: 0 = none, 1 = Enter, Esc, arrows, Delete, F2, Ctrl keys, 3 = also letters and digits.
+static TYPING_STATE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 /// Hotkey ids of the typing keys start here (1 = quick search).
 const TYPING_ID: i32 = 100;
 
@@ -128,19 +129,39 @@ fn typing_keys() -> impl Iterator<Item = (u32, u32)> {
         .chain([0x41u32, 0x43, 0x56, 0x58].map(|vk| (0x0002u32, vk)))
 }
 
-/// Borrows (true) or gives back (false) the letter, digit and Enter keys. Only ever on while
+/// Borrows (`on`) or gives back the desktop keys; `letters` also borrows letters and digits (type to
+/// jump / quick search; left alone when typing on the desktop "does nothing"). Only ever on while
 /// the desktop itself has the focus: then those keys would go to Explorer's hidden icon list.
 /// Ordinary hotkeys, no hook. Call from the app's thread.
-pub fn set_typing_keys(on: bool) {
+pub fn set_typing_keys(on: bool, letters: bool) {
     use windows::Win32::UI::Input::KeyboardAndMouse::{RegisterHotKey, UnregisterHotKey, HOT_KEY_MODIFIERS};
     let h = WAKE_HWND.load(Ordering::SeqCst);
-    if h == 0 || TYPING_ON.swap(on, Ordering::SeqCst) == on {
+    let want: u8 = if on { 1 | if letters { 2 } else { 0 } } else { 0 };
+    if h == 0 {
         return;
+    }
+    let was = TYPING_STATE.swap(want, Ordering::SeqCst);
+    if was == want {
+        return;
+    }
+    let on = want != 0;
+    if std::env::var_os("DESKTOPSHEPHERD_DEBUG_KEYS").is_some() {
+        crate::storage::log_line(&format!("typing keys {}", if on { "borrowed" } else { "given back" }));
     }
     let hwnd = HWND(h as *mut _);
     unsafe {
+        // Start from nothing borrowed, then borrow what is wanted now.
+        if was != 0 {
+            for (i, _) in typing_keys().enumerate() {
+                let _ = UnregisterHotKey(hwnd, TYPING_ID + i as i32);
+            }
+        }
         for (i, (mods, vk)) in typing_keys().enumerate() {
             let id = TYPING_ID + i as i32;
+            let is_letter = mods == 0 && (matches!(vk, 0x30..=0x39) || matches!(vk, 0x41..=0x5A));
+            if is_letter && !letters {
+                continue;
+            }
             if on {
                 // 0x4000 = MOD_NOREPEAT. A key another program already uses is simply skipped.
                 if RegisterHotKey(hwnd, id, HOT_KEY_MODIFIERS(mods | 0x4000), vk).is_err() {
@@ -153,8 +174,6 @@ pub fn set_typing_keys(on: bool) {
                         }
                     }
                 }
-            } else {
-                let _ = UnregisterHotKey(hwnd, id);
             }
         }
     }
@@ -245,7 +264,7 @@ unsafe extern "system" fn main_wndproc(h: HWND, m: u32, wp: WPARAM, lp: LPARAM) 
                 } else {
                     // Another window came to the front before we gave the keys back: give them
                     // back now and pass this key on, so the person's typing is never lost.
-                    set_typing_keys(false);
+                    set_typing_keys(false, false);
                     use windows::Win32::UI::Input::KeyboardAndMouse::{keybd_event, KEYEVENTF_KEYUP};
                     if mods & 0x0002 != 0 {
                         keybd_event(0x11, 0, Default::default(), 0);

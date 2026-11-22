@@ -2,8 +2,9 @@
 //!
 //! A name that starts with the text comes first, then one where a word starts with it
 //! ("re" finds "Resident Evil" before "Firefox"), then one that merely contains it, then a
-//! loose match whose letters appear in order ("vsc" finds "Visual Studio Code"). The file
-//! type also counts ("pdf" finds every PDF). Ties are sorted by name.
+//! match on the words' first letters ("vsc" finds "Visual Studio Code"), and last a loose match whose
+//! letters appear in order. Several words ("studio code") match when each starts a word. The
+//! file type also counts ("pdf" finds every PDF). Ties are sorted by name.
 
 use crate::model::DeskItem;
 
@@ -26,20 +27,33 @@ pub fn rank<'a>(items: impl IntoIterator<Item = &'a DeskItem>, query: &str, limi
     scored.into_iter().map(|(_, _, it)| it).collect()
 }
 
-/// 0 = starts with, 1 = a word starts with, 2 = contains (or file type), 3 = letters in order.
+/// True if `q` starts a word of `name` (at the start, or after a non-letter).
+fn starts_word(name: &str, q: &str) -> bool {
+    name.match_indices(q).any(|(i, _)| name[..i].chars().last().map(|c| !c.is_alphanumeric()).unwrap_or(true))
+}
+
+/// 0 = starts with, 1 = a word starts with (every word of a several-word search), 2 = contains
+/// (or file type), 3 = the words' first letters, 4 = letters in order.
 fn score(name: &str, ext: &str, q: &str) -> Option<u8> {
     if name.starts_with(q) {
         return Some(0);
     }
-    let word_start = name.match_indices(q).any(|(i, _)| name[..i].chars().last().map(|c| !c.is_alphanumeric()).unwrap_or(true));
-    if word_start {
+    if starts_word(name, q) {
+        return Some(1);
+    }
+    let words: Vec<&str> = q.split_whitespace().collect();
+    if words.len() > 1 && words.iter().all(|w| starts_word(name, w)) {
         return Some(1);
     }
     if name.contains(q) || ext == q {
         return Some(2);
     }
-    if q.chars().count() >= 2 && in_order(name, q) {
+    let initials: String = name.split(|c: char| !c.is_alphanumeric()).filter_map(|w| w.chars().next()).collect();
+    if q.chars().count() >= 2 && initials.starts_with(q) {
         return Some(3);
+    }
+    if q.chars().count() >= 2 && in_order(name, q) {
+        return Some(4);
     }
     None
 }
@@ -92,6 +106,20 @@ mod tests {
         assert_eq!(rank(&items, "pdf", 10)[0].name, "report");
         assert!(rank(&items, "", 10).is_empty());
         assert!(rank(&items, "zzz", 10).is_empty());
+    }
+
+    #[test]
+    fn initials_and_several_words() {
+        let items = [item("Visual Studio Code", "lnk"), item("Vast Sky Clouds", "lnk"), item("Viscosity", "lnk")];
+        // "vsc": both initials matches first (by name), then the loose match.
+        let names: Vec<&str> = rank(&items, "vsc", 10).iter().map(|i| i.name.as_str()).collect();
+        assert_eq!(names, ["Vast Sky Clouds", "Visual Studio Code", "Viscosity"]);
+        let names: Vec<&str> = rank(&items, "studio code", 10).iter().map(|i| i.name.as_str()).collect();
+        assert_eq!(names, ["Visual Studio Code"]);
+        // Initials beat loose letters-in-order.
+        let items = [item("Sound Tester", "lnk"), item("Crucial Storage Executive", "lnk")];
+        let names: Vec<&str> = rank(&items, "cse", 10).iter().map(|i| i.name.as_str()).collect();
+        assert_eq!(names, ["Crucial Storage Executive"]);
     }
 
     #[test]

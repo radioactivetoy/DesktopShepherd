@@ -584,6 +584,9 @@ pub fn watch_show_desktop() {
         unsafe extern "system" fn cb(_h: HWINEVENTHOOK, _ev: u32, hwnd: HWND, _o: i32, _c: i32, _t: u32, _ms: u32) {
             // Any window came to the front: the app re-checks whether the desktop has the focus.
             crate::runloop::wake_after(std::time::Duration::ZERO);
+            if let Ok(mut t) = FG_CHANGED_AT.lock() {
+                *t = Some(std::time::Instant::now());
+            }
             let mut buf = [0u16; 32];
             let n = GetClassNameW(hwnd, &mut buf);
             let class = String::from_utf16_lossy(&buf[..n.max(0) as usize]);
@@ -996,4 +999,30 @@ pub fn setup_key(monitors: &[Monitor]) -> String {
         .collect();
     parts.sort();
     parts.join(" + ")
+}
+
+/// When another program's window last came to the front (see `watch_show_desktop`).
+static FG_CHANGED_AT: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+
+/// True for a second after a window came to the front. Windows settles the focus in steps
+/// (Show desktop especially), so the app looks again a few times in that second.
+pub fn foreground_changed_recently() -> bool {
+    FG_CHANGED_AT.lock().ok().and_then(|t| *t).map(|t| t.elapsed() < std::time::Duration::from_secs(1)).unwrap_or(false)
+}
+
+/// A click in an icon box: give the keyboard to the desktop, as a click on the real desktop
+/// does, so typing goes to type-to-jump / quick search and not to whatever had it before (for
+/// example a sticky note). Allowed because the click just went to us.
+pub fn focus_desktop() {
+    #[cfg(windows)]
+    unsafe {
+        use windows::core::{w, PCWSTR};
+        use windows::Win32::UI::WindowsAndMessaging::{FindWindowW, SetForegroundWindow};
+        if foreground_is_desktop() {
+            return;
+        }
+        if let Ok(p) = FindWindowW(w!("Progman"), PCWSTR::null()) {
+            let _ = SetForegroundWindow(p);
+        }
+    }
 }

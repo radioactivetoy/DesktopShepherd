@@ -252,6 +252,10 @@ unsafe extern "system" fn wndproc(h: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LR
             LRESULT(0)
         }
         WM_LBUTTONDOWN => {
+            // An icon box is part of the desktop: a click gives the keyboard to the desktop.
+            if shared.lock().map(|s| s.no_activate).unwrap_or(false) {
+                crate::desktop::focus_desktop();
+            }
             SetCapture(h);
             button(egui::PointerButton::Primary, true);
             LRESULT(0)

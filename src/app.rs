@@ -715,7 +715,11 @@ impl DeskApp {
         if self.persist {
             let mode = self.layout.settings.desktop_typing;
             let want = self.layout.settings.hide_desktop_icons && desktop::foreground_is_desktop();
-            crate::runloop::set_typing_keys(want);
+            crate::runloop::set_typing_keys(want, mode != 0);
+            if desktop::foreground_changed_recently() {
+                // The focus may still be settling: look again shortly.
+                crate::runloop::wake_after(Duration::from_millis(150));
+            }
             for (mods, vk) in crate::runloop::take_typed() {
                 let ctrl = mods & 0x0002 != 0;
                 match (ctrl, vk) {
@@ -743,8 +747,10 @@ impl DeskApp {
                     (false, _) => {
                         if let Some(c) = char::from_u32(vk).map(|c| c.to_ascii_lowercase()).filter(|c| c.is_ascii_alphanumeric()) {
                             if mode == 2 {
-                                if self.search.is_none() {
-                                    self.search = Some(SearchState { query: c.to_string(), ..Default::default() });
+                                // Letters typed before the search window has the keyboard still count.
+                                match self.search.as_mut() {
+                                    Some(s) => s.query.push(c),
+                                    None => self.search = Some(SearchState { query: c.to_string(), ..Default::default() }),
                                 }
                             } else if mode == 1 {
                                 self.type_ahead(c);
@@ -780,6 +786,9 @@ impl DeskApp {
                 }
                 self.shown_for = Some(want);
                 self.redraw_all = true;
+                // Nothing stays selected in a box you can no longer see (Delete would remove it).
+                self.ui.selection.clear();
+                self.ui.selected = None;
             }
         }
         // Hide/show all boxes (shortcut or tray).
@@ -3448,7 +3457,9 @@ impl DeskApp {
             .flat_map(|f| f.tabs.iter().flat_map(|t| t.items.iter().map(|p| p.to_lowercase())))
             .collect();
         let desk = DeskState { items: &self.items, claimed: &claimed, spacing: self.spacing, rules: &self.layout.settings.categories, open_counts: &self.layout.open_counts };
-        let mut boxes: Vec<&Fence> = self.layout.fences.iter().filter(|f| f.expanded && f.widget.is_none()).collect();
+        // Only boxes you can see: open, on the page shown, not all hidden.
+        let (page, hidden) = (self.layout.current_page, self.boxes_hidden);
+        let mut boxes: Vec<&Fence> = self.layout.fences.iter().filter(|f| !hidden && f.page == page && f.expanded && f.widget.is_none()).collect();
         boxes.sort_by(|a, b| (a.rect[1] as i64, a.rect[0] as i64).cmp(&(b.rect[1] as i64, b.rect[0] as i64)));
         let mut order: Vec<(u64, usize, String, String)> = Vec::new();
         for f in boxes {
