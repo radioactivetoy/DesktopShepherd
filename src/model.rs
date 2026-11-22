@@ -220,6 +220,8 @@ pub struct Settings {
     pub hide_hotkey: usize,
     /// Remember box positions separately for each monitor setup (laptop alone, docked, …).
     pub per_setup: bool,
+    /// "DesktopShepherd ▸" in the desktop's right-click menu (new box / widget there).
+    pub desktop_menu: bool,
 }
 
 impl Default for Settings {
@@ -242,6 +244,7 @@ impl Default for Settings {
             desktop_typing: 1,
             hide_hotkey: 5,
             per_setup: false,
+            desktop_menu: true,
         }
     }
 }

@@ -20,6 +20,8 @@ mod fileops;
 #[cfg(windows)]
 mod install;
 #[cfg(windows)]
+mod drawbox;
+#[cfg(windows)]
 mod shellmenu;
 mod snap;
 #[cfg(windows)]
@@ -133,6 +135,14 @@ fn main() {
             None => storage::log_line("import: the original app's layout could not be read"),
         }
         return;
+    }
+    // The desktop's right-click menu ("--new box", "--new widget:clock", "--new draw"...): hand
+    // the request to the running copy; if none runs, keep it for this start.
+    #[cfg(windows)]
+    if let Some(what) = args.iter().position(|a| a == "--new").and_then(|i| args.get(i + 1)) {
+        if desktop::forward_new_request(what) {
+            return;
+        }
     }
     let worker = args.iter().any(|a| a == "--worker");
     let boot = args.iter().any(|a| a == "--boot");

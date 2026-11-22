@@ -196,6 +196,7 @@ pub fn run_uninstall() {
             let _ = run.delete_value("DeskBoxes");
         }
         let _ = hkcu.delete_subkey_all(UNINSTALL_KEY);
+        let _ = hkcu.delete_subkey_all("Software\\Classes\\DesktopBackground\\Shell\\DesktopShepherd");
     }
     if let Some(lnk) = shortcut_path() {
         let _ = std::fs::remove_file(lnk);

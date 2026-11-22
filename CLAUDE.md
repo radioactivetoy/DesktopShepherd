@@ -45,7 +45,8 @@ Start-Process .\target\debug\desktopshepherd.exe
   a drag. Display scale is 125 %: from a (DPI-unaware) PowerShell, `SetCursorPos` and
   `GetWindowRect` use scaled coordinates, but `CopyFromScreen` captures real pixels (×1.25).
   That mapping proved unreliable: call `SetProcessDPIAware()` first, then use real pixels
-  everywhere (screenshot pixel = cursor position), and check with `GetCursorPos`.
+  everywhere (screenshot pixel = cursor position), and check with `GetCursorPos`. Monitors are
+  2560×1440 px (2048×1152 points): capture the full 2560×1440, not 2048×1152.
 - CPU while hovering: `tools\measure_hover_cpu.ps1`; Win+D: `tools\measure_show_desktop_gap.ps1`
   (start with the desktop not shown).
 
@@ -91,7 +92,7 @@ for daily use.)
   not to whatever had it before (e.g. a sticky note). Keep that when changing box clicks.
 - Desktop changes come from `desktop::watch_folders` (change notifications), not polling; the
   reader thread in `app.rs` re-reads only when woken (or once a minute).
-- Hotkey ids (`runloop.rs`): 1 search, 2 hide/show, 3/4 pages, 21..29 box shortcuts
+- Hotkey ids (`runloop.rs`): 1 search, 2 hide/show, 3/4 pages, 5 draw a box (Ctrl+Alt+B), 21..29 box shortcuts
   (Ctrl+Alt+F2..F10; not Ctrl+Alt+digits = AltGr on many keyboards; F1 is often taken), 100+
   typing keys.
 - PowerShell: `FindWindow(class, $null)` passes an empty title, not NULL, so it finds nothing –

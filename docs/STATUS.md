@@ -112,6 +112,24 @@ egui font atlases, and the icon textures.
   desktop, "s" jumped to the next s-item and "s" again to the one after; a text box in another
   window received "abc1" normally; typing "xyz" right after switching from the desktop to another
   window arrived intact 3 times out of 3.
+- New (2026-11-22): creating boxes anywhere. (1) Draw: `src/drawbox.rs`, a layered GDI window over
+  the whole desktop (Ctrl+Alt+B = hotkey id 5, tray, box menu > New > Draw a new box…); the result
+  opens a "Create" menu (MenuTarget::Create) and the new box fills the rectangle. (2) Box menu
+  "New ▸" places the box at the right-click point (`UiState.new_place`, `new_fence_rect`, clamped to
+  that monitor's work area). (3) Desktop menu: registry static verbs under
+  HKCU\Software\Classes\DesktopBackground\Shell\DesktopShepherd (cascading, `desktop::set_desktop_menu`,
+  setting `desktop_menu`, default on, removed on uninstall); the started copy forwards
+  "--new <what>" + cursor position to the running one with WM_COPYDATA (`forward_new_request`,
+  SendMessageTimeout to our own hidden window) or leaves `pending-new.txt` if none runs. Windows 11
+  shows these entries only under "Show more options" (the modern menu would need a DLL loaded into
+  Explorer: rule 1). Checked live: drawn box exactly in the rectangle; "--new widget:clock" put a
+  clock at the mouse; the classic menu shows DesktopShepherd ▸ with the submenu; New ▸ Box landed at
+  the click point.
+- New (2026-11-22): Settings > Layout shows all monitors (labelled main / second… or by display in
+  fixed mode) or one at a time via dots; Settings > Monitors wording "Bind each box to: the monitor's
+  role / the monitor itself" (both modes already existed).
+- Note for tests: this PC's monitors are 2560×1440 pixels at 125 % (2048×1152 points); capture the
+  full 2560×1440 when checking anything near the right or bottom edge.
 - Fixed (2026-11-22, owner's report "typing writes into the note"): icon boxes don't take the
   focus, so whatever had it kept it (e.g. a sticky note) and desktop typing landed there. A left
   click in an icon box now gives the keyboard to the desktop (`desktop::focus_desktop`), the app

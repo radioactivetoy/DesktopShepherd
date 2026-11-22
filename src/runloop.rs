@@ -61,6 +61,28 @@ pub const SEARCH_HOTKEYS: &[(&str, u32, u32)] = &[
 /// The hide/show-all-boxes shortcut was pressed.
 static HIDE_REQUESTED: AtomicBool = AtomicBool::new(false);
 
+/// Requests from the desktop's right-click menu (another copy of the program sent them): text
+/// like "box 812 455" (what, cursor x, y in pixels).
+static NEW_REQUESTS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+/// Ctrl+Alt+B was pressed: draw a new box.
+static DRAW_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+pub fn take_new_requests() -> Vec<String> {
+    NEW_REQUESTS.lock().map(|mut v| std::mem::take(&mut *v)).unwrap_or_default()
+}
+
+pub fn take_draw_request() -> bool {
+    DRAW_REQUESTED.swap(false, Ordering::SeqCst)
+}
+
+/// A request from another copy of the program (see `take_new_requests`).
+pub fn push_new_request(s: String) {
+    if let Ok(mut v) = NEW_REQUESTS.lock() {
+        v.push(s);
+    }
+    wake_after(Duration::ZERO);
+}
+
 /// Box shortcuts pressed (1..9 = Ctrl+Alt+F2..F10; F1 is often taken by other tools) and the ones registered now.
 static BOX_KEYS: Mutex<Vec<u8>> = Mutex::new(Vec::new());
 static BOX_KEYS_SET: Mutex<Vec<u8>> = Mutex::new(Vec::new());
@@ -114,6 +136,10 @@ pub fn set_page_hotkeys() {
         let hwnd = HWND(h as *mut _);
         let _ = RegisterHotKey(hwnd, 3, HOT_KEY_MODIFIERS(0x0002 | 0x0001 | 0x4000), 0x22);
         let _ = RegisterHotKey(hwnd, 4, HOT_KEY_MODIFIERS(0x0002 | 0x0001 | 0x4000), 0x21);
+        // Ctrl+Alt+B: draw a new box.
+        if RegisterHotKey(hwnd, 5, HOT_KEY_MODIFIERS(0x0002 | 0x0001 | 0x4000), 0x42).is_err() {
+            crate::storage::log_line("draw-a-box shortcut Ctrl+Alt+B is already used by another program");
+        }
     }
 }
 
@@ -324,6 +350,8 @@ unsafe extern "system" fn main_wndproc(h: HWND, m: u32, wp: WPARAM, lp: LPARAM) 
                 if let Ok(mut k) = BOX_KEYS.lock() {
                     k.push((id - BOX_KEY_ID) as u8);
                 }
+            } else if id == 5 {
+                DRAW_REQUESTED.store(true, Ordering::SeqCst);
             } else if id == 3 || id == 4 {
                 PAGE_STEP.fetch_add(if id == 3 { 1 } else { -1 }, Ordering::SeqCst);
             } else if id == 2 {
@@ -336,6 +364,16 @@ unsafe extern "system" fn main_wndproc(h: HWND, m: u32, wp: WPARAM, lp: LPARAM) 
         }
         // Monitors changed: the app re-places the boxes and puts them back under the windows
         // (Windows rearranges windows when a monitor goes away).
+        // The desktop's right-click menu started another copy, which hands its request over.
+        WM_COPYDATA => {
+            let cds = lp.0 as *const windows::Win32::System::DataExchange::COPYDATASTRUCT;
+            if !cds.is_null() && (*cds).dwData == 0xD5 && !(*cds).lpData.is_null() && (*cds).cbData <= 1024 {
+                let bytes = std::slice::from_raw_parts((*cds).lpData as *const u8, (*cds).cbData as usize);
+                push_new_request(String::from_utf8_lossy(bytes).to_string());
+                return LRESULT(1);
+            }
+            LRESULT(0)
+        }
         WM_DISPLAYCHANGE => {
             DISPLAY_CHANGED.store(true, Ordering::SeqCst);
             wake_after(Duration::ZERO);

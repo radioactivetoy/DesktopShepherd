@@ -104,6 +104,12 @@ struct UiState {
     open_search: bool,
     /// Hide or show all boxes on the next pass (tray).
     toggle_hidden: bool,
+    /// Where the next new box goes (and when that was decided).
+    new_place: Option<(NewPlace, Instant)>,
+    /// Where the open box menu was opened (screen points).
+    menu_at: Pos2,
+    /// Start drawing a new box on the next pass (menu, tray).
+    start_draw: bool,
     /// Pages: how many there are and which is shown (for the box menu), and a switch asked
     /// for from the tray.
     page_count: u32,
@@ -123,6 +129,7 @@ struct UiState {
 pub enum TrayCmd {
     Open,
     NewBox,
+    DrawBox,
     Search,
     HideShow,
     NextPage,
@@ -206,6 +213,10 @@ pub struct DeskApp {
     page_hotkeys_set: bool,
     /// Box shortcuts registered now (numbers 1..9 = Ctrl+Alt+F2..F10).
     box_hotkeys_applied: Option<Vec<u8>>,
+    /// A request left from before the start (desktop menu while not running) was looked for.
+    pending_checked: bool,
+    /// The desktop menu entries were written for this run.
+    desktop_menu_applied: Option<bool>,
     /// Type to jump: what was typed recently on the desktop and when (a pause starts over).
     ta_buf: String,
     ta_last: Option<Instant>,
@@ -406,6 +417,8 @@ impl DeskApp {
             shown_for: None,
             page_hotkeys_set: false,
             box_hotkeys_applied: None,
+            pending_checked: false,
+            desktop_menu_applied: None,
             ta_buf: String::new(),
             ta_last: None,
             layout,
@@ -493,9 +506,29 @@ impl DeskApp {
         }
     }
 
-    fn new_fence_rect(&self, size: [f32; 2]) -> [f32; 4] {
-        let n = self.layout.fences.len() as f32;
-        [120.0 + 30.0 * (n % 8.0), 120.0 + 30.0 * (n % 8.0), size[0], size[1]]
+    /// Where a new box goes: the rectangle just drawn, or next to where the person right-clicked
+    /// (box menu / desktop menu), else a free spot near the top-left of the main monitor.
+    fn new_fence_rect(&mut self, size: [f32; 2]) -> [f32; 4] {
+        let place = self.ui.new_place.take().filter(|(_, t)| t.elapsed() < Duration::from_secs(120)).map(|(p, _)| p);
+        match place {
+            Some(NewPlace::Rect(r)) if r.width() >= 120.0 && r.height() >= 60.0 => [r.min.x, r.min.y, r.width(), r.height()],
+            Some(NewPlace::Rect(r)) => self.rect_at(r.min, size),
+            Some(NewPlace::At(p)) => self.rect_at(p, size),
+            None => {
+                let n = self.layout.fences.len() as f32;
+                [120.0 + 30.0 * (n % 8.0), 120.0 + 30.0 * (n % 8.0), size[0], size[1]]
+            }
+        }
+    }
+
+    /// A box of `size` with its corner at `p`, kept inside that monitor's work area.
+    fn rect_at(&self, p: Pos2, size: [f32; 2]) -> [f32; 4] {
+        let work = desktop::work_area_at(p, desktop::system_scale());
+        let w = size[0].min(work.width());
+        let h = size[1].min(work.height());
+        let x = p.x.clamp(work.min.x, (work.max.x - w).max(work.min.x));
+        let y = p.y.clamp(work.min.y, (work.max.y - h).max(work.min.y));
+        [x, y, w, h]
     }
 
     fn process_actions(&mut self) {
@@ -800,6 +833,72 @@ impl DeskApp {
                 }
             }
         }
+        // The desktop's right-click menu entries, whenever the setting changes (and once at start,
+        // so they point at this copy of the program).
+        #[cfg(windows)]
+        if self.persist && self.desktop_menu_applied != Some(self.layout.settings.desktop_menu) {
+            let on = self.layout.settings.desktop_menu;
+            self.desktop_menu_applied = Some(on);
+            let _ = std::thread::Builder::new().name("desktop-menu".into()).spawn(move || desktop::set_desktop_menu(on));
+        }
+        // New boxes from Ctrl+Alt+B, the menus or the desktop's right-click menu.
+        #[cfg(windows)]
+        if self.persist {
+            if crate::runloop::take_draw_request() || std::mem::take(&mut self.ui.start_draw) {
+                crate::drawbox::start();
+            }
+            let mut requests = crate::runloop::take_new_requests();
+            if !self.pending_checked {
+                self.pending_checked = true;
+                requests.extend(desktop::take_pending_new_request());
+            }
+            for req in requests {
+                let mut parts = req.split_whitespace();
+                let what = parts.next().unwrap_or("").to_string();
+                let x: f32 = parts.next().and_then(|v| v.parse().ok()).unwrap_or(200.0);
+                let y: f32 = parts.next().and_then(|v| v.parse().ok()).unwrap_or(200.0);
+                let s = desktop::system_scale();
+                let at = Pos2::new(x / s, y / s);
+                if what == "draw" {
+                    crate::drawbox::start();
+                    continue;
+                }
+                self.ui.new_place = Some((NewPlace::At(at), Instant::now()));
+                match what.as_str() {
+                    "box" => self.actions.push(Act::NewFence { auto: false }),
+                    "folder" => self.actions.push(Act::NewFolderBox),
+                    w => {
+                        if let Some(k) = w.strip_prefix("widget:").and_then(widgets::find) {
+                            self.actions.push(Act::NewWidget(k.id));
+                        }
+                    }
+                }
+                // Make sure it can be seen: the page shown, boxes not hidden.
+                if self.boxes_hidden {
+                    self.set_boxes_hidden(false);
+                }
+            }
+            if let Some(drawn) = crate::drawbox::take_result() {
+                if let Some([l, t, r, b]) = drawn {
+                    let s = desktop::system_scale();
+                    let rect = Rect::from_min_max(Pos2::new(l as f32 / s, t as f32 / s), Pos2::new(r as f32 / s, b as f32 / s));
+                    self.ui.new_place = Some((NewPlace::Rect(rect), Instant::now()));
+                    // Ask what to create, at the corner where the drag ended.
+                    self.ui.confirm_delete = None;
+                    self.ui.menu = Some(OpenMenu {
+                        target: MenuTarget::Create,
+                        page: MenuPage::Main,
+                        at: rect.max,
+                        // Its real height up front, so near the bottom edge it opens upward.
+                        size: Vec2::new(270.0, 34.0 * (2 + widgets::REGISTRY.len()) as f32 + 24.0),
+                        frames: 0,
+                        was_focused: false,
+                        rounded: false,
+                    });
+                    self.redraw_all = true;
+                }
+            }
+        }
         // Box shortcuts (Ctrl+Alt+F2..F10): bring the box into view, or roll it up / down.
         #[cfg(windows)]
         if self.persist {
@@ -976,6 +1075,7 @@ impl DeskApp {
                 TrayCmd::Search => self.ui.open_search = true,
                 TrayCmd::HideShow => self.ui.toggle_hidden = true,
                 TrayCmd::NextPage => self.ui.page_step += 1,
+                TrayCmd::DrawBox => self.ui.start_draw = true,
                 TrayCmd::Quit => self.actions.push(Act::Quit),
             }
         }
@@ -1908,6 +2008,15 @@ pub enum MenuTarget {
     Fence(u64),
     Tab(u64, usize),
     Item(u64, String),
+    /// After drawing a rectangle: what to create there.
+    Create,
+}
+
+/// Where a new box should go (see `DeskApp::new_fence_rect`).
+#[derive(Clone, Copy, Debug)]
+pub enum NewPlace {
+    At(Pos2),
+    Rect(Rect),
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -2330,6 +2439,12 @@ fn fence_menu(ui: &mut egui::Ui, fence: &mut Fence, st: &mut UiState, page: &mut
         }
         MenuPage::New => {
             back(ui, page, "New");
+            let before = actions.len();
+            if row(ui, icon::ADD, "Draw a new box…", None, true).on_hover_text("Drag a rectangle anywhere on the screen (Ctrl+Alt+B)").clicked() {
+                st.start_draw = true;
+                close = true;
+            }
+            sep(ui);
             if row(ui, icon::VIEW, "Box", None, true).clicked() {
                 actions.push(Act::NewFence { auto: false });
                 close = true;
@@ -2345,10 +2460,35 @@ fn fence_menu(ui: &mut egui::Ui, fence: &mut Fence, st: &mut UiState, page: &mut
                     close = true;
                 }
             }
+            // Created next to where the menu was opened.
+            if actions.len() > before {
+                st.new_place = Some((NewPlace::At(st.menu_at), Instant::now()));
+            }
         }
         MenuPage::MoveTo | MenuPage::MoveToTabs(_) => *page = MenuPage::Main,
     }
     (dirty, close)
+}
+
+/// The menu after drawing a rectangle: what to create in it. Returns true to close the menu.
+fn create_menu(ui: &mut egui::Ui, actions: &mut Vec<Act>) -> bool {
+    let mut close = false;
+    if row(ui, icon::VIEW, "Box", None, true).clicked() {
+        actions.push(Act::NewFence { auto: false });
+        close = true;
+    }
+    if row(ui, icon::FOLDER, "Folder box…", None, true).clicked() {
+        actions.push(Act::NewFolderBox);
+        close = true;
+    }
+    sep(ui);
+    for k in widgets::REGISTRY {
+        if row(ui, k.icon, k.label, None, true).clicked() {
+            actions.push(Act::NewWidget(k.id));
+            close = true;
+        }
+    }
+    close
 }
 
 fn tab_menu(ui: &mut egui::Ui, fence: &mut Fence, tab: usize, st: &mut UiState, _ctx_for_box: &egui::Context) -> (bool, bool) {
@@ -2520,7 +2660,11 @@ impl DeskApp {
                 ui.spacing_mut().item_spacing.y = 0.0;
                 ui.set_width(m.size.x - 12.0);
                 let top = ui.cursor().min.y;
+                self.ui.menu_at = m.at;
                 match m.target.clone() {
+                    MenuTarget::Create => {
+                        *close |= create_menu(ui, &mut self.actions);
+                    }
                     MenuTarget::Fence(id) => {
                         let Layout { fences, .. } = &mut self.layout;
                         if let Some(f) = fences.iter_mut().find(|f| f.id == id) {
@@ -2862,6 +3006,8 @@ impl DeskApp {
         let mut dirty = false;
         let mut icons_changed = false;
         ui.heading("Desktop");
+        dirty |= ui.checkbox(&mut s.desktop_menu, "Add \"DesktopShepherd\" to the desktop's right-click menu (new box or widget where you click)").changed();
+        ui.label(egui::RichText::new("On Windows 11 it is under \"Show more options\". Or press Ctrl+Alt+B anywhere and drag a rectangle.").color(Color32::from_gray(150)).size(12.0));
         if ui.checkbox(&mut s.hide_desktop_icons, "Hide Windows' own desktop icons (the boxes show them)").changed() {
             dirty = true;
             icons_changed = true;
@@ -2940,16 +3086,19 @@ impl DeskApp {
             }
         }
         let before = s.monitor_mode;
+        ui.add_space(4.0);
+        ui.label(egui::RichText::new("Bind each box to:").strong());
         ui.radio_value(
             &mut s.monitor_mode,
             crate::model::MonitorMode::Role,
-            "Boxes follow the monitor's role: if you change the main monitor, boxes move with it",
+            "The monitor's role (main, second…): when the roles change, the boxes move with them",
         );
         ui.radio_value(
             &mut s.monitor_mode,
             crate::model::MonitorMode::Fixed,
-            "Boxes stay on the same physical monitor, whatever its role",
+            "The monitor itself: boxes always stay on the monitor where they were created or moved",
         );
+        ui.label(egui::RichText::new("Moving a box to another monitor binds it there. Settings > Layout shows each monitor.").color(Color32::from_gray(150)).size(12.0));
         let monitors_changed = s.monitor_mode != before;
         dirty |= monitors_changed;
         for (i, m) in self.monitors.iter().enumerate() {
@@ -3437,9 +3586,10 @@ fn make_tray(ctx: &egui::Context, cmds: Arc<Mutex<Vec<TrayCmd>>>) -> Option<tray
     let search = MenuItem::new("Search desktop", true, None);
     let hide = MenuItem::new("Hide / show boxes", true, None);
     let next_page = MenuItem::new("Next page of boxes", true, None);
+    let draw_box = MenuItem::new("Draw a new box…  (Ctrl+Alt+B)", true, None);
     let quit = MenuItem::new("Quit", true, None);
-    let _ = menu.append_items(&[&open, &search, &hide, &next_page, &new_box, &PredefinedMenuItem::separator(), &quit]);
-    let (open_id, new_id, quit_id, search_id, hide_id, page_id) = (open.id().clone(), new_box.id().clone(), quit.id().clone(), search.id().clone(), hide.id().clone(), next_page.id().clone());
+    let _ = menu.append_items(&[&open, &search, &hide, &next_page, &new_box, &draw_box, &PredefinedMenuItem::separator(), &quit]);
+    let (open_id, new_id, quit_id, search_id, hide_id, page_id, draw_id) = (open.id().clone(), new_box.id().clone(), quit.id().clone(), search.id().clone(), hide.id().clone(), next_page.id().clone(), draw_box.id().clone());
     {
         let cmds = cmds.clone();
         let ctx = ctx.clone();
@@ -3454,6 +3604,8 @@ fn make_tray(ctx: &egui::Context, cmds: Arc<Mutex<Vec<TrayCmd>>>) -> Option<tray
                 Some(TrayCmd::HideShow)
             } else if e.id == page_id {
                 Some(TrayCmd::NextPage)
+            } else if e.id == draw_id {
+                Some(TrayCmd::DrawBox)
             } else if e.id == quit_id {
                 Some(TrayCmd::Quit)
             } else {

@@ -60,6 +60,13 @@ an original Rust program; its behaviour was modelled on an existing desktop orga
 - When icons don't fit a box: scroll (default) or "pages with dots" (box menu > View); the wheel
   or the dots flip pages.
 - Remember box positions per monitor setup (laptop alone / docked), Settings > Monitors.
+- Create a box or widget anywhere: **Ctrl+Alt+B** (or tray / box menu "Draw a new box…") dims the
+  screen, drag a rectangle, then pick Box, Folder box or a widget; it fills that rectangle. "New ▸"
+  in a box menu creates it where you right-clicked. The desktop's own right-click menu gets
+  "DesktopShepherd ▸" (draw, new box / folder box / widget here; on Windows 11 under "Show more
+  options"; Settings > Desktop to turn off). These are plain registry menu entries that start the
+  program: nothing runs inside Explorer.
+- Settings > Layout: all monitors together or one at a time (dots), labelled by role or display.
 - Keyboard shortcut per box (box menu > Keyboard shortcut: Ctrl+Alt+F2..F10) brings the box into
   view (switching page or showing hidden boxes), pressed again rolls it up or down.
 - New, renamed and removed desktop files show up within about a second (Windows change

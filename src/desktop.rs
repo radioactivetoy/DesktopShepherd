@@ -1200,3 +1200,98 @@ pub fn pick_picture() -> Option<String> {
         None
     }
 }
+
+/// Started from the desktop's right-click menu with "--new <what>": hands "<what> <x> <y>"
+/// (mouse position in pixels) to the running DesktopShepherd. Returns false if none runs; then
+/// the request is kept in a file and this copy starts normally and does it.
+pub fn forward_new_request(what: &str) -> bool {
+    #[cfg(windows)]
+    unsafe {
+        use windows::core::{w, PCWSTR};
+        use windows::Win32::Foundation::{LPARAM, POINT, WPARAM};
+        use windows::Win32::UI::HiDpi::{SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2};
+        use windows::Win32::UI::WindowsAndMessaging::{
+            AllowSetForegroundWindow, FindWindowW, GetCursorPos, SendMessageTimeoutW, ASFW_ANY, SMTO_ABORTIFHUNG, WM_COPYDATA,
+        };
+        use windows::Win32::System::DataExchange::COPYDATASTRUCT;
+        let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+        let mut p = POINT::default();
+        let _ = GetCursorPos(&mut p);
+        let msg = format!("{} {} {}", what.trim(), p.x, p.y);
+        // Our own hidden window, found by its class (not Explorer's; never blocks: timeout).
+        if let Ok(main) = FindWindowW(w!("DesktopShepherdMain"), PCWSTR::null()) {
+            if !main.0.is_null() {
+                // Let it bring its menu or drawing layer to the front.
+                let _ = AllowSetForegroundWindow(ASFW_ANY);
+                let cds = COPYDATASTRUCT { dwData: 0xD5, cbData: msg.len() as u32, lpData: msg.as_ptr() as *mut _ };
+                let mut res = 0usize;
+                let ok = SendMessageTimeoutW(main, WM_COPYDATA, WPARAM(0), LPARAM(&cds as *const _ as isize), SMTO_ABORTIFHUNG, 3000, Some(&mut res));
+                if ok.0 != 0 && res == 1 {
+                    return true;
+                }
+            }
+        }
+        let _ = std::fs::create_dir_all(crate::storage::data_dir());
+        let _ = std::fs::write(crate::storage::data_dir().join("pending-new.txt"), msg);
+        false
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = what;
+        false
+    }
+}
+
+/// A request left by `forward_new_request` when the program wasn't running (taken once).
+pub fn take_pending_new_request() -> Option<String> {
+    let f = crate::storage::data_dir().join("pending-new.txt");
+    let s = std::fs::read_to_string(&f).ok()?;
+    let _ = std::fs::remove_file(&f);
+    // Only a fresh one (the program was started by that click).
+    Some(s).filter(|s| !s.trim().is_empty())
+}
+
+const DESKTOP_MENU_KEY: &str = "Software\\Classes\\DesktopBackground\\Shell\\DesktopShepherd";
+
+/// Adds (or removes) "DesktopShepherd ▸" to the desktop's right-click menu: plain menu entries
+/// in the registry that start this program (Windows shows them itself; nothing of ours runs in
+/// Explorer). On Windows 11 they appear under "Show more options".
+pub fn set_desktop_menu(on: bool) {
+    #[cfg(windows)]
+    {
+        use winreg::enums::HKEY_CURRENT_USER;
+        let hkcu = winreg::RegKey::predef(HKEY_CURRENT_USER);
+        let _ = hkcu.delete_subkey_all(DESKTOP_MENU_KEY);
+        if !on {
+            return;
+        }
+        let Ok(exe) = std::env::current_exe() else { return };
+        let exe = exe.display().to_string();
+        let Ok((root, _)) = hkcu.create_subkey(DESKTOP_MENU_KEY) else { return };
+        let _ = root.set_value("MUIVerb", &"DesktopShepherd");
+        let _ = root.set_value("Icon", &format!("\"{exe}\",0"));
+        let _ = root.set_value("SubCommands", &"");
+        let item = |parent: &winreg::RegKey, key: &str, label: &str, arg: &str| {
+            if let Ok((k, _)) = parent.create_subkey(format!("shell\\{key}")) {
+                let _ = k.set_value("MUIVerb", &label);
+                if let Ok((c, _)) = k.create_subkey("command") {
+                    let _ = c.set_value("", &format!("\"{exe}\" --new {arg}"));
+                }
+            }
+        };
+        item(&root, "01draw", "Draw a new box…", "draw");
+        item(&root, "02box", "New box here", "box");
+        item(&root, "03folder", "New folder box here…", "folder");
+        if let Ok((w, _)) = root.create_subkey("shell\\04widgets") {
+            let _ = w.set_value("MUIVerb", &"New widget here");
+            let _ = w.set_value("SubCommands", &"");
+            for (i, k) in crate::widgets::REGISTRY.iter().enumerate() {
+                item(&w, &format!("{i:02}{}", k.id), k.label, &format!("widget:{}", k.id));
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = on;
+    }
+}
