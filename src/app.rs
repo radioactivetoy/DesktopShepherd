@@ -46,6 +46,8 @@ enum Act {
     ImportOriginal,
     /// Give every box the look of this one (Personalize > Apply this look to all boxes).
     ApplyLookToAll(u64),
+    /// Windows' own right-click menu for an item (and the other selected items with it).
+    ShellMenu(String),
     Quit,
 }
 
@@ -91,6 +93,8 @@ struct UiState {
     snap_grid: f32,
     /// Open the quick-search window on the next pass (box menu, tray, shortcut).
     open_search: bool,
+    /// Scroll this icon (lower-case path) into view in its box (type to jump).
+    scroll_to: Option<String>,
     /// Commands for box windows from elsewhere (menus, monitor changes): box id, command.
     box_cmds: Vec<(u64, ViewportCommand)>,
     /// Boxes whose next position update comes from a move or resize by the person.
@@ -151,6 +155,9 @@ pub struct DeskApp {
     /// whether Windows accepted it.
     hotkey_applied: usize,
     hotkey_ok: bool,
+    /// Type to jump: what was typed recently on the desktop and when (a pause starts over).
+    ta_buf: String,
+    ta_last: Option<Instant>,
 }
 
 /// Passes and box frames drawn (for DESKBOXES_DEBUG_DRAWS).
@@ -318,6 +325,8 @@ impl DeskApp {
             search: None,
             hotkey_applied: usize::MAX,
             hotkey_ok: true,
+            ta_buf: String::new(),
+            ta_last: None,
             layout,
         };
         if app.persist {
@@ -528,6 +537,22 @@ impl DeskApp {
                         self.apply_icon_hiding();
                     }
                 }
+                Act::ShellMenu(path) => {
+                    // The right-clicked item, plus the other selected ones if it is part of the selection.
+                    let key = path.to_lowercase();
+                    let mut paths = vec![path.clone()];
+                    if self.ui.selection.contains(&key) {
+                        for k in self.ui.selection.iter().filter(|k| **k != key) {
+                            if let Some(it) = self.items.get(k) {
+                                paths.push(it.path.clone());
+                            }
+                        }
+                    }
+                    #[cfg(windows)]
+                    crate::shellmenu::show(crate::runloop::main_hwnd(), &paths);
+                    // The command may have renamed, deleted or added files: read the desktop again.
+                    let _ = self.scan_wake.send(());
+                }
                 Act::ApplyLookToAll(id) => {
                     if let Some(src) = self.layout.fences.iter().find(|f| f.id == id).cloned() {
                         for f in self.layout.fences.iter_mut().filter(|f| f.id != id) {
@@ -569,6 +594,32 @@ impl DeskApp {
             let keep: HashSet<String> = self.items.keys().cloned().collect();
             self.icons.forget_missing(&keep);
             self.redraw_all = true;
+        }
+        // Typing on the desktop: while the desktop itself has the focus (and Windows' icons are
+        // hidden, so Explorer's own type-to-select isn't needed), borrow the letter keys.
+        #[cfg(windows)]
+        if self.persist {
+            let mode = self.layout.settings.desktop_typing;
+            let want = mode != 0 && self.layout.settings.hide_desktop_icons && desktop::foreground_is_desktop();
+            crate::runloop::set_typing_keys(want);
+            for vk in crate::runloop::take_typed() {
+                if vk == 0x0D {
+                    // Enter opens what was just found.
+                    let recent = self.ta_last.map(|t| t.elapsed() < Duration::from_secs(30)).unwrap_or(false);
+                    if let (true, Some(p)) = (recent, self.ui.selected.clone()) {
+                        desktop::open_item(&p);
+                        self.actions.push(Act::Opened(p));
+                    }
+                } else if let Some(c) = char::from_u32(vk).map(|c| c.to_ascii_lowercase()) {
+                    if mode == 2 {
+                        if self.search.is_none() {
+                            self.search = Some(SearchState { query: c.to_string(), ..Default::default() });
+                        }
+                    } else {
+                        self.type_ahead(c);
+                    }
+                }
+            }
         }
         // The quick-search shortcut: (re)register it when the setting changes; a press toggles
         // the search window.
@@ -1209,6 +1260,10 @@ fn fence_window(
                     for (i, it) in items.iter().enumerate() {
                         let (c, r) = (i % cols, i / cols);
                         let cr = Rect::from_min_size(grid.min + Vec2::new(pad + c as f32 * cell.x, r as f32 * cell.y), cell);
+                        if st.scroll_to.as_deref().map(|k| it.path.eq_ignore_ascii_case(k)).unwrap_or(false) {
+                            ui.scroll_to_rect(cr, Some(Align::Center));
+                            st.scroll_to = None;
+                        }
                         if !cr.intersects(clip) {
                             continue; // off-screen: skip work
                         }
@@ -1874,6 +1929,10 @@ fn item_menu(ui: &mut egui::Ui, from: u64, from_auto: bool, it: &DeskItem, targe
                 desktop::show_in_folder(&it.path);
                 close = true;
             }
+            if row(ui, icon::MORE, "More options…", None, true).on_hover_text("Windows' own menu for this item (Open with, Send to, …)").clicked() {
+                actions.push(Act::ShellMenu(it.path.clone()));
+                close = true;
+            }
             sep(ui);
             if sub(ui, icon::MOVE, "Move to") {
                 *page = MenuPage::MoveTo;
@@ -1914,6 +1973,11 @@ impl DeskApp {
             hosts.panel(MENU_PANEL, crate::host::PanelKind::Menu, "DeskBoxes menu", rect_px, true, force, |pctx| {
                 self.menu_body(pctx, &mut m, targets, &root_ctx, &mut close, &mut dirty, &mut measured);
             });
+            // "More options…": Windows' menu needs its owner in front. Move the focus to our hidden
+            // window while this menu still has it (afterwards Windows would refuse).
+            if close && self.actions.iter().any(|a| matches!(a, Act::ShellMenu(_))) {
+                crate::runloop::bring_main_to_front();
+            }
             if close {
                 hosts.close_panel(MENU_PANEL);
             }
@@ -2242,6 +2306,17 @@ impl DeskApp {
         if !self.hotkey_ok {
             ui.label(egui::RichText::new("That shortcut is already used by another program: pick another one.").color(Color32::from_rgb(255, 160, 120)).size(12.0));
         }
+        #[cfg(windows)]
+        ui.horizontal_wrapped(|ui| {
+            ui.label("Typing on the desktop:");
+            for (i, label) in ["Does nothing", "Jumps to the icon that starts with it", "Starts a quick search"].iter().enumerate() {
+                if ui.selectable_label(s.desktop_typing as usize == i, *label).clicked() && s.desktop_typing as usize != i {
+                    s.desktop_typing = i as u8;
+                    dirty = true;
+                }
+            }
+        });
+        ui.label(egui::RichText::new("Click an empty part of the desktop, then type: the same letter again goes to the next match, Enter opens it.").color(Color32::from_gray(150)).size(12.0));
         ui.label(egui::RichText::new("Frosted glass: set each box's blur in its menu (Personalize > Blur).").color(Color32::from_gray(150)).size(12.0));
         ui.add_space(10.0);
         ui.heading("Monitors");
@@ -2698,6 +2773,7 @@ mod icon {
     pub const CHECK: char = '\u{E73E}';
     pub const BACK: char = '\u{E72B}';
     pub const SEARCH: char = '\u{E721}';
+    pub const MORE: char = '\u{E712}';
 }
 
 #[cfg(windows)]
@@ -2952,5 +3028,61 @@ impl DeskApp {
         if !close {
             self.search = Some(s);
         }
+    }
+}
+
+impl DeskApp {
+    /// Type to jump (like the Windows desktop): a letter selects the next icon whose name starts
+    /// with it; the same letter again goes on to the next one; letters typed quickly (within a
+    /// second) narrow it down ("st" → "Steam"). Looks through the open boxes, top to bottom and
+    /// left to right, every tab, and switches to the tab and scrolls the icon into view.
+    fn type_ahead(&mut self, c: char) {
+        let now = Instant::now();
+        if self.ta_last.map(|t| now - t > Duration::from_millis(1000)).unwrap_or(true) {
+            self.ta_buf.clear();
+        }
+        self.ta_buf.push(c);
+        self.ta_last = Some(now);
+        // Every icon in the open boxes, in reading order: (box id, tab, path, name).
+        let claimed: HashSet<String> = self
+            .layout
+            .fences
+            .iter()
+            .filter(|f| !f.auto_sort && f.widget.is_none())
+            .flat_map(|f| f.tabs.iter().flat_map(|t| t.items.iter().map(|p| p.to_lowercase())))
+            .collect();
+        let desk = DeskState { items: &self.items, claimed: &claimed, spacing: self.spacing, rules: &self.layout.settings.categories, open_counts: &self.layout.open_counts };
+        let mut boxes: Vec<&Fence> = self.layout.fences.iter().filter(|f| f.expanded && f.widget.is_none()).collect();
+        boxes.sort_by(|a, b| (a.rect[1] as i64, a.rect[0] as i64).cmp(&(b.rect[1] as i64, b.rect[0] as i64)));
+        let mut order: Vec<(u64, usize, String, String)> = Vec::new();
+        for f in boxes {
+            for (ti, (_, items)) in fv::visible_tabs(f, &desk).into_iter().enumerate() {
+                for it in items {
+                    order.push((f.id, ti, it.path, it.name.to_lowercase()));
+                }
+            }
+        }
+        if order.is_empty() {
+            return;
+        }
+        let cur = self.ui.selected.as_ref().and_then(|p| order.iter().position(|o| o.2.eq_ignore_ascii_case(p)));
+        // "s", "ss", "sss": next item starting with s. Otherwise: the typed text, from the current one.
+        let same = self.ta_buf.chars().all(|x| x == c);
+        let (prefix, start) = if same { (c.to_string(), cur.map(|i| i + 1).unwrap_or(0)) } else { (self.ta_buf.clone(), cur.unwrap_or(0)) };
+        let n = order.len();
+        let Some(i) = (0..n).map(|k| (start + k) % n).find(|&i| order[i].3.starts_with(&prefix)) else { return };
+        let (id, tab, path, _) = order[i].clone();
+        if let Some(f) = self.layout.fences.iter_mut().find(|f| f.id == id) {
+            if f.sel_tab != tab {
+                f.sel_tab = tab;
+                self.mark_dirty();
+            }
+        }
+        let key = path.to_lowercase();
+        self.ui.selection.clear();
+        self.ui.selection.insert(key.clone());
+        self.ui.selected = Some(path);
+        self.ui.scroll_to = Some(key);
+        self.redraw_all = true;
     }
 }

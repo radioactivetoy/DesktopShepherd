@@ -37,6 +37,12 @@ an original Rust program; its behaviour was modelled on an existing desktop orga
   (also by file type, or by letters in order, e.g. "vsc" finds Visual Studio Code) and shows the
   box each item is in. Enter opens it, Ctrl+Enter opens its folder, Esc closes. Also in the tray
   menu and the box menu ("Search desktop").
+- "More options..." in the icon right-click menu opens Windows' own context menu for the item
+  (7-Zip, Defender, OneDrive, Send to, Open with...). With several icons selected, the others in
+  the same folder are included. It runs inside DeskBoxes, never inside Explorer.
+- Type to jump: when the desktop itself is in front, typing a letter or digit jumps to the next
+  icon that starts with it (same letter again = next one), Enter opens the selected icon. Settings >
+  Desktop "Typing on the desktop": does nothing / jumps to the icon (default) / starts a quick search.
 - Look options per box (box menu > Personalize): any colour with opacity, border thickness and
   colour, text colour, text shadow, title and text size, font, names under icons on/off, icon
   size and spacing, and "Apply this look to all boxes".

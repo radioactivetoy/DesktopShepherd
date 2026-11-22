@@ -73,6 +73,15 @@ for daily use.)
 - Moving boxes by re-rendering every frame caused jitter/flashes; boxes move themselves via
   `SetWindowPos` on a helper thread – keep it that way.
 - Right-click on empty box area is handled by the selection band (`secondary_clicked`).
+- `TrackPopupMenu` (Windows' own menu, `shellmenu.rs`) needs its owner window in front. Our own
+  menu panel is closed first, which would hand focus to another app, so `runloop::bring_main_to_front()`
+  is called while our menu still has focus (`show_menu` in `app.rs`). Also: any window of ours
+  that activates ends "Show desktop" mode, and destroying our foreground panel hands focus to
+  another app.
+- Type to jump borrows keys with `RegisterHotKey` only while the desktop is in front; give them
+  back the moment another window (even our own) comes forward, and re-send a key that arrives
+  late (`keybd_event`) so typing is never lost. Still no hooks: `RegisterHotKey` and a foreground
+  WinEvent callback only.
 - PowerShell: `FindWindow(class, $null)` passes an empty title, not NULL, so it finds nothing –
   use `[NullString]::Value` or enumerate the windows instead.
 
@@ -86,6 +95,8 @@ for daily use.)
   `MenuPage::Look`).
 - Quick search → `src/search.rs` (ranking, unit tests) + `show_search` in `app.rs`; the shortcut
   is in `runloop.rs` (`SEARCH_HOTKEYS`, `take_search_request`).
+- Windows' right-click menu → `src/shellmenu.rs`.
+- Typing on the desktop → `runloop.rs` `set_typing_keys` + `app.rs` `type_ahead`.
 - Icon selection/drag/drop → `app.rs` `fence_window`, `ghost::begin_icon_drag`.
 - Monitor handling → `app.rs` (bind/relayout), `desktop::monitors`.
 - Snapping (incl. optional grid) → `src/snap.rs` (+ `snap_targets` in `app.rs`).

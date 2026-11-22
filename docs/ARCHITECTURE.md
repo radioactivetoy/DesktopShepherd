@@ -32,6 +32,18 @@ There is no eframe, no GL and no main window to draw on any more.
   - `WM_HOTKEY` for the quick-search shortcut (`RegisterHotKey`, choices in
     `runloop::SEARCH_HOTKEYS`, `Settings.search_hotkey`): it only sets a flag, which `app.rs`
     reads with `take_search_request`.
+  - Type to jump (`Settings.desktop_typing`: 0 nothing, 1 jump (default), 2 quick search). While
+    the desktop itself is the foreground window (`desktop::foreground_is_desktop`: Progman/WorkerW)
+    and Windows' icons are hidden, the window borrows the digit, letter and Enter keys with
+    `RegisterHotKey` (`runloop::set_typing_keys`, ids 100+). `WM_HOTKEY` pushes the key to a queue
+    that `app.rs` reads with `take_typed`. A foreground WinEvent callback wakes the app on every
+    foreground change, so it re-checks each pass and gives the keys back as soon as another window
+    (including our own settings, menu or search windows) comes forward. Safety: if a borrowed key
+    arrives while the desktop is not in front (a race), the keys are released at once and that key
+    is re-sent with `keybd_event`, so typing is never lost. Still no hook.
+  - The same window is the owner of Windows' own item menu (see `shellmenu.rs`) and forwards
+    `WM_INITMENUPOPUP` / `WM_DRAWITEM` / `WM_MEASUREITEM` / `WM_MENUCHAR` to it
+    (`main_wndproc` -> `shellmenu::handle_menu_msg`) so the "Send to" and "Open with" submenus fill in.
   - `WM_DISPLAYCHANGE` (monitor switched off/on, resolution change): it sets a flag read with
     `take_display_changed`. The app then re-reads the monitors, re-places the boxes and puts
     every box back just above the desktop at once, after 1.5 s and after 4 s
@@ -144,7 +156,8 @@ a second) or a wake-up posted by another thread.
 |---|---|
 | `main.rs` | arg parsing, supervisor, panic hook, start of the worker |
 | `runloop.rs` | the Win32 message loop, hidden `DeskBoxesMain` window, wake-ups, shutdown notice, quit |
-| `app.rs` | `DeskApp` state, update pass, boxes UI (`fence_window`), menus, settings page, selection/drag/drop, multi-monitor binding, `place_box` / `place_all_boxes`, layout migrations (v2/v3), `Act` command queue |
+| `app.rs` | `DeskApp` state, update pass, boxes UI (`fence_window`), menus, settings page, selection/drag/drop, multi-monitor binding, `place_box` / `place_all_boxes`, layout migrations (v2/v3), `Act` command queue; `type_ahead` (type to jump: open boxes in reading order, all tabs; same letter again = next match; letters within 1 s narrow the prefix; selects, switches tab, scrolls into view via `UiState.scroll_to`; Enter opens the selection within 30 s; mode 2 opens quick search with the typed letter) |
+| `shellmenu.rs` | Windows' own context menu for desktop items ("More options..."): `SHParseDisplayName` -> `SHBindToParent` -> `IShellFolder::GetUIObjectOf(IContextMenu)` -> `QueryContextMenu` -> `TrackPopupMenuEx` (owner: the hidden `DeskBoxesMain` window) -> `InvokeCommand`. Items of a multi-selection in the same folder are included. Runs in our process, not Explorer's: a faulty third-party menu add-on can only crash DeskBoxes (the supervisor restarts it), never Explorer. The owner must be in front, so `runloop::bring_main_to_front()` is called from `show_menu` while our own menu still has focus. The desktop is re-read after a command. |
 | `host.rs` | DirectX/composition box and panel windows, input mapping, look (`Look`), device-lost recovery, `move_with_mouse` |
 | `d3d.rs` | D3D11 egui renderer (hardware or WARP device, textures, swap chains, draw, `render_offscreen` for `--screenshot`) |
 | `comp_trial.rs` | stand-alone composition diagnostic (`--composition-trial`) |

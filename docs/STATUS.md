@@ -102,6 +102,16 @@ egui font atlases, and the icon textures.
   re-reads monitors, re-places boxes and re-stacks them just above the desktop at once, after 1.5 s
   and after 4 s. Checked with a simulated display-change message (a box pushed above a test window
   went back under it). A **real monitor switch-off was not tested** here.
+- New (2026-11-22): "More options..." in the icon right-click menu shows Windows' own menu for
+  the item (`src/shellmenu.rs`; details in ARCHITECTURE). Checked live: the full menu appeared
+  (7-Zip, Defender, OneDrive, PowerRename...) and was dismissed with Esc. **No menu command was
+  run** in testing.
+- New (2026-11-22): type to jump (Settings > Desktop "Typing on the desktop": does nothing / jumps
+  to the icon that starts with the typed letter (default) / starts a quick search). Uses
+  `RegisterHotKey` only while the desktop is in front, no hook. Checked live: after clicking the
+  desktop, "s" jumped to the next s-item and "s" again to the one after; a text box in another
+  window received "abc1" normally; typing "xyz" right after switching from the desktop to another
+  window arrived intact 3 times out of 3.
 - Tests: all 11 unit tests pass (`cargo test`). Worker memory after start ~88 MB.
 - Names: exe/data folder still `DeskBoxes`.
 - Synthetic drags (SetCursorPos + mouse_event) don't start a drag on a *rolled-up* box's title

@@ -14,6 +14,8 @@ mod icons;
 mod import_original;
 mod model;
 mod search;
+#[cfg(windows)]
+mod shellmenu;
 mod snap;
 #[cfg(windows)]
 mod runloop;

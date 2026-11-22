@@ -524,6 +524,31 @@ pub fn send_to_bottom(hwnd: isize) {
     }
 }
 
+/// True when the window in front is the desktop (Progman / WorkerW), e.g. right after a click on
+/// an empty part of the desktop. Only then may the app borrow the letter keys (see runloop.rs).
+pub fn foreground_is_desktop() -> bool {
+    #[cfg(windows)]
+    unsafe {
+        use windows::Win32::UI::WindowsAndMessaging::{GetAncestor, GetClassNameW, GetForegroundWindow, GA_ROOT};
+        let class_of = |h: windows::Win32::Foundation::HWND| {
+            let mut buf = [0u16; 32];
+            let n = GetClassNameW(h, &mut buf);
+            String::from_utf16_lossy(&buf[..n.max(0) as usize])
+        };
+        let fg = GetForegroundWindow();
+        if fg.0.is_null() {
+            return false;
+        }
+        let c = class_of(fg);
+        let root = class_of(GetAncestor(fg, GA_ROOT));
+        c == "Progman" || c == "WorkerW" || root == "Progman" || root == "WorkerW"
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
 /// Watches which window comes to the front (an ordinary notification from Windows, nothing is
 /// put inside Explorer). When the desktop comes forward ("Show desktop", Win+D, or a click on
 /// it), every box is placed just above it so the boxes stay visible. Call once from the UI
@@ -541,6 +566,8 @@ pub fn watch_show_desktop() {
             return;
         }
         unsafe extern "system" fn cb(_h: HWINEVENTHOOK, _ev: u32, hwnd: HWND, _o: i32, _c: i32, _t: u32, _ms: u32) {
+            // Any window came to the front: the app re-checks whether the desktop has the focus.
+            crate::runloop::wake_after(std::time::Duration::ZERO);
             let mut buf = [0u16; 32];
             let n = GetClassNameW(hwnd, &mut buf);
             let class = String::from_utf16_lossy(&buf[..n.max(0) as usize]);

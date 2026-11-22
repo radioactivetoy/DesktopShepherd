@@ -69,6 +69,47 @@ pub fn set_search_hotkey(index: usize) -> bool {
     }
 }
 
+/// Keys borrowed while the desktop has the focus (type to jump to an icon): virtual-key codes
+/// pressed since the last pass.
+static TYPED: Mutex<Vec<u32>> = Mutex::new(Vec::new());
+/// The typing keys are currently borrowed.
+static TYPING_ON: AtomicBool = AtomicBool::new(false);
+/// Hotkey ids of the typing keys start here (1 = quick search).
+const TYPING_ID: i32 = 100;
+
+/// The keys borrowed for typing on the desktop: digits, letters and Enter.
+fn typing_keys() -> impl Iterator<Item = u32> {
+    (0x30..=0x39u32).chain(0x41..=0x5Au32).chain(std::iter::once(0x0Du32))
+}
+
+/// Borrows (true) or gives back (false) the letter, digit and Enter keys. Only ever on while
+/// the desktop itself has the focus: then those keys would go to Explorer's hidden icon list.
+/// Ordinary hotkeys, no hook. Call from the app's thread.
+pub fn set_typing_keys(on: bool) {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{RegisterHotKey, UnregisterHotKey, HOT_KEY_MODIFIERS};
+    let h = WAKE_HWND.load(Ordering::SeqCst);
+    if h == 0 || TYPING_ON.swap(on, Ordering::SeqCst) == on {
+        return;
+    }
+    let hwnd = HWND(h as *mut _);
+    unsafe {
+        for (i, vk) in typing_keys().enumerate() {
+            let id = TYPING_ID + i as i32;
+            if on {
+                // 0x4000 = MOD_NOREPEAT. A key another program already uses is simply skipped.
+                let _ = RegisterHotKey(hwnd, id, HOT_KEY_MODIFIERS(0x4000), vk);
+            } else {
+                let _ = UnregisterHotKey(hwnd, id);
+            }
+        }
+    }
+}
+
+/// Keys typed on the desktop since the last call (virtual-key codes).
+pub fn take_typed() -> Vec<u32> {
+    TYPED.lock().map(|mut t| std::mem::take(&mut *t)).unwrap_or_default()
+}
+
 /// True once after each display change (see WM_DISPLAYCHANGE below).
 pub fn take_display_changed() -> bool {
     DISPLAY_CHANGED.swap(false, Ordering::SeqCst)
@@ -124,10 +165,48 @@ pub fn request_quit() {
     post_wake();
 }
 
+/// Gives the keyboard focus to the hidden main window (before showing Windows' menu).
+pub fn bring_main_to_front() {
+    let h = WAKE_HWND.load(Ordering::SeqCst);
+    if h != 0 {
+        unsafe {
+            let _ = SetForegroundWindow(HWND(h as *mut _));
+        }
+    }
+}
+
+/// The hidden main window (owner of Windows' right-click menu, see shellmenu.rs); 0 if none.
+pub fn main_hwnd() -> isize {
+    WAKE_HWND.load(Ordering::SeqCst)
+}
+
 unsafe extern "system" fn main_wndproc(h: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    // Windows' right-click menu, while open, draws its submenus through its owner (us).
+    if let Some(r) = crate::shellmenu::handle_menu_msg(m, wp, lp) {
+        return r;
+    }
     match m {
         WM_APP_WAKE => LRESULT(0),
         WM_HOTKEY => {
+            let id = wp.0 as i32;
+            if id >= TYPING_ID {
+                let vk = ((lp.0 >> 16) & 0xFFFF) as u32;
+                if crate::desktop::foreground_is_desktop() {
+                    if let Ok(mut t) = TYPED.lock() {
+                        t.push(vk);
+                    }
+                    wake_after(Duration::ZERO);
+                } else {
+                    // Another window came to the front before we gave the keys back: give them
+                    // back now and pass this key on, so the person's typing is never lost.
+                    set_typing_keys(false);
+                    use windows::Win32::UI::Input::KeyboardAndMouse::{keybd_event, KEYEVENTF_KEYUP};
+                    keybd_event(vk as u8, 0, Default::default(), 0);
+                    keybd_event(vk as u8, 0, KEYEVENTF_KEYUP, 0);
+                    wake_after(Duration::ZERO);
+                }
+                return LRESULT(0);
+            }
             SEARCH_REQUESTED.store(true, Ordering::SeqCst);
             wake_after(Duration::ZERO);
             LRESULT(0)
