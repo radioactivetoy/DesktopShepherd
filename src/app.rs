@@ -1645,9 +1645,10 @@ fn fence_window(
             .unwrap_or_else(|| Rect::from_min_size(Pos2::new(fence.rect[0], fence.rect[1]), rect.size()));
         let screen = current;
         if st.glass {
-            // Only the border: Windows draws the glass, tint and rounded corners.
+            // Only the border: Windows draws the glass, tint and rounded corners. Drawn on the very
+            // edge, so no glass shows outside it.
             painter.rect_stroke(
-                rect.shrink(0.5),
+                rect,
                 egui::CornerRadius::same(fence.corner.round().clamp(0.0, 40.0) as u8),
                 fv::border_stroke(fence, 1.0),
                 egui::StrokeKind::Inside,
@@ -2406,10 +2407,25 @@ fn look_right(ui: &mut egui::Ui, fence: &mut Fence, actions: &mut Vec<Act>) -> b
                     });
                     pick
                 };
-                if let Some(left) = switch(ui, "Title", "Left side", "Top", fence.title_pos == TitlePos::Left) {
-                    fence.title_pos = if left { TitlePos::Left } else { TitlePos::Top };
-                    dirty = true;
-                }
+                // Title: off, left side, top or bottom.
+                ui.horizontal(|ui| {
+                    ui.add_space(14.0);
+                    let (lr, _) = ui.allocate_exact_size(Vec2::new(70.0, 30.0), Sense::hover());
+                    ui.painter().text(Pos2::new(lr.min.x, lr.center().y), egui::Align2::LEFT_CENTER, "Title", FontId::proportional(14.0), Color32::from_gray(225));
+                    ui.spacing_mut().item_spacing.x = 4.0;
+                    for (pos, text) in [(TitlePos::Hidden, "Off"), (TitlePos::Left, "Left"), (TitlePos::Top, "Top"), (TitlePos::Bottom, "Bottom")] {
+                        let on = fence.title_pos == pos;
+                        let fill = if on { Color32::from_rgb(76, 194, 255).linear_multiply(0.35) } else { Color32::from_white_alpha(10) };
+                        let b = egui::Button::new(egui::RichText::new(text).size(13.0).color(if on { Color32::WHITE } else { Color32::from_gray(200) }))
+                            .fill(fill)
+                            .corner_radius(egui::CornerRadius::same(4))
+                            .min_size(Vec2::new(54.0, 26.0));
+                        if ui.add(b).clicked() && !on {
+                            fence.title_pos = pos;
+                            dirty = true;
+                        }
+                    }
+                });
                 if let Some(right) = switch(ui, "Tabs", "Right side", "Top", fence.tab_pos == TabPos::Right) {
                     fence.tab_pos = if right { TabPos::Right } else { TabPos::Top };
                     dirty = true;

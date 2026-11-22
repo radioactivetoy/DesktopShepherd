@@ -170,6 +170,15 @@ pub fn areas(fence: &Fence, rect: Rect, tab_count: usize, scale: f32) -> FenceAr
             Rect::from_min_max(rect.min, Pos2::new(rect.max.x, rect.min.y + ts)),
             Rect::from_min_max(Pos2::new(rect.min.x, rect.min.y + ts), rect.max),
         ),
+        TitlePos::Bottom => (
+            Rect::from_min_max(Pos2::new(rect.min.x, rect.max.y - ts), rect.max),
+            Rect::from_min_max(rect.min, Pos2::new(rect.max.x, rect.max.y - ts)),
+        ),
+        TitlePos::Hidden => {
+            // A thin grab strip at the top (no text).
+            let g = 10.0 * scale;
+            (Rect::from_min_max(rect.min, Pos2::new(rect.max.x, rect.min.y + g)), Rect::from_min_max(Pos2::new(rect.min.x, rect.min.y + g), rect.max))
+        }
     };
     let tabs = if tab_count > 1 {
         Some(match fence.tab_pos {
@@ -194,7 +203,7 @@ pub fn paint_background(painter: &egui::Painter, fence: &Fence, rect: Rect, scal
     let [r, g, b] = fence.color;
     let fill = Color32::from_rgba_unmultiplied(r, g, b, fence.alpha);
     let radius = CornerRadius::same((fence.corner * scale).round().clamp(0.0, 40.0) as u8);
-    painter.rect(rect.shrink(0.5), radius, fill, border_stroke(fence, scale), egui::StrokeKind::Inside);
+    painter.rect(rect, radius, fill, border_stroke(fence, scale), egui::StrokeKind::Inside);
 }
 
 /// The box's border (its colour and thickness; none at thickness 0).
@@ -227,6 +236,15 @@ pub fn vertical_text(painter: &egui::Painter, strip: Rect, text: &str, font: Fon
 
 pub fn paint_title(painter: &egui::Painter, fence: &Fence, title: Rect, scale: f32, hovered: bool) {
     let color = if hovered { text_color(fence, 1.0) } else { text_color(fence, 0.85) };
+    if fence.expanded && fence.title_pos == TitlePos::Hidden {
+        // No title: only a faint handle while the mouse is over the strip.
+        if hovered {
+            let w = (title.width() * 0.2).clamp(24.0 * scale, 80.0 * scale);
+            let bar = Rect::from_center_size(title.center(), Vec2::new(w, 3.0 * scale));
+            painter.rect_filled(bar, 2.0 * scale, text_color(fence, 0.6));
+        }
+        return;
+    }
     let font = FontId::new(fence.title_size * scale, family(fence));
     if fence.expanded && fence.title_pos == TitlePos::Left {
         vertical_text(painter, title, &fence.name, font, color);

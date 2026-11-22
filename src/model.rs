@@ -8,6 +8,9 @@ pub enum TitlePos {
     #[default]
     Left,
     Top,
+    Bottom,
+    /// No title shown: a thin strip at the top still moves the box (and rolls it up).
+    Hidden,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
