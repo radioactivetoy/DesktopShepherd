@@ -1410,6 +1410,7 @@ fn fence_window(
         if let Some(wc) = fence.widget.as_mut() {
             let mut child = ui.new_child(UiBuilder::new().max_rect(a.content).layout(egui::Layout::top_down(Align::Min)));
             match widgets::find(&wc.kind) {
+                Some(_) if wc.kind == "search" => search_widget(&mut child, fence.id, desk, icons, actions),
                 Some(kind) => {
                     let out = (kind.make)().ui(&mut child, &mut wc.data);
                     dirty |= out.changed;
@@ -3702,4 +3703,79 @@ impl DeskApp {
             None => self.relayout_monitors(),
         }
     }
+}
+
+/// The search box widget: type, and the matching desktop items show underneath; click one or
+/// press Enter to open it (arrow keys pick, Esc clears). Uses the same ranking as quick search.
+fn search_widget(ui: &mut egui::Ui, id: u64, desk: &DeskState, icons: &mut IconCache, actions: &mut Vec<Act>) {
+    let qid = egui::Id::new(("search-widget", id));
+    let mut q: String = ui.ctx().data(|d| d.get_temp(qid)).unwrap_or_default();
+    let mut sel: usize = ui.ctx().data(|d| d.get_temp(qid.with("sel"))).unwrap_or(0);
+    let r = ui.add(
+        egui::TextEdit::singleline(&mut q)
+            .hint_text(format!("{}  Search the desktop", icon::SEARCH))
+            .desired_width(f32::INFINITY)
+            .margin(egui::Margin::symmetric(8, 6)),
+    );
+    if r.changed() {
+        sel = 0;
+    }
+    let row_h = 28.0;
+    let fits = ((ui.available_height() - 6.0) / row_h).floor().max(1.0) as usize;
+    let results: Vec<&DeskItem> = if q.trim().is_empty() { Vec::new() } else { crate::search::rank(desk.items.values(), &q, fits) };
+    let (up, down, enter, esc) = ui.input(|i| (i.key_pressed(egui::Key::ArrowUp), i.key_pressed(egui::Key::ArrowDown), i.key_pressed(egui::Key::Enter), i.key_pressed(egui::Key::Escape)));
+    let mut open: Option<String> = None;
+    if r.has_focus() || r.lost_focus() {
+        if down && !results.is_empty() {
+            sel = (sel + 1).min(results.len() - 1);
+        }
+        if up {
+            sel = sel.saturating_sub(1);
+        }
+        if esc {
+            q.clear();
+        }
+    }
+    if r.lost_focus() && enter {
+        open = results.get(sel).map(|it| it.path.clone());
+        r.request_focus();
+    }
+    ui.add_space(6.0);
+    if !q.trim().is_empty() && results.is_empty() {
+        ui.label(egui::RichText::new("Nothing found").size(13.0).color(Color32::from_gray(150)));
+    }
+    let px = (20.0 * ui.ctx().pixels_per_point()).round() as u32;
+    for (i, it) in results.iter().enumerate() {
+        let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), row_h), Sense::click());
+        if resp.hovered() {
+            sel = i;
+        }
+        if i == sel {
+            ui.painter().rect_filled(rect, 4.0, Color32::from_rgba_unmultiplied(60, 130, 230, 150));
+        }
+        let ir = Rect::from_center_size(Pos2::new(rect.min.x + 16.0, rect.center().y), Vec2::splat(20.0));
+        match icons.get(&it.path, px) {
+            Some(tex) => {
+                ui.painter().image(tex, ir, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
+            }
+            None => {
+                ui.painter().rect_filled(ir.shrink(3.0), 3.0, Color32::from_gray(110));
+            }
+        }
+        let text = ui.painter().layout(it.name.clone(), FontId::proportional(13.5), Color32::from_gray(235), rect.width() - 40.0);
+        ui.painter().with_clip_rect(rect).galley(Pos2::new(rect.min.x + 34.0, rect.center().y - text.size().y / 2.0), text, Color32::WHITE);
+        if resp.clicked() {
+            open = Some(it.path.clone());
+        }
+    }
+    if let Some(p) = open {
+        desktop::open_item(&p);
+        actions.push(Act::Opened(p));
+        q.clear();
+        sel = 0;
+    }
+    ui.ctx().data_mut(|d| {
+        d.insert_temp(qid, q);
+        d.insert_temp(qid.with("sel"), sel);
+    });
 }
