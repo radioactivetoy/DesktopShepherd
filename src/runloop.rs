@@ -28,6 +28,51 @@ static WAKE_HWND: AtomicIsize = AtomicIsize::new(0);
 static DEADLINE: Mutex<Option<Instant>> = Mutex::new(None);
 /// Quit was chosen (tray, settings, menu).
 static QUIT: AtomicBool = AtomicBool::new(false);
+/// Windows reported a display change (monitor added, removed, switched off, resolution).
+static DISPLAY_CHANGED: AtomicBool = AtomicBool::new(false);
+
+/// The quick-search shortcut was pressed.
+static SEARCH_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+/// True once after each press of the quick-search shortcut.
+pub fn take_search_request() -> bool {
+    SEARCH_REQUESTED.swap(false, Ordering::SeqCst)
+}
+
+/// Shortcuts offered for quick search: label, modifier keys, key. Index 0 = off.
+pub const SEARCH_HOTKEYS: &[(&str, u32, u32)] = &[
+    ("Off", 0, 0),
+    ("Ctrl+Shift+Space", 0x0002 | 0x0004, 0x20),
+    ("Ctrl+Alt+Space", 0x0002 | 0x0001, 0x20),
+    ("Win+Shift+Space", 0x0008 | 0x0004, 0x20),
+    ("Ctrl+Alt+F", 0x0002 | 0x0001, 0x46),
+];
+
+/// (Re)registers the quick-search shortcut with Windows (an ordinary hotkey, no hook). Returns
+/// false if another program already uses it. Call from the app's thread.
+pub fn set_search_hotkey(index: usize) -> bool {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{RegisterHotKey, UnregisterHotKey, HOT_KEY_MODIFIERS};
+    let h = WAKE_HWND.load(Ordering::SeqCst);
+    if h == 0 {
+        return false;
+    }
+    let hwnd = HWND(h as *mut _);
+    unsafe {
+        let _ = UnregisterHotKey(hwnd, 1);
+        let Some(&(label, mods, vk)) = SEARCH_HOTKEYS.get(index).filter(|_| index > 0) else { return true };
+        // 0x4000 = MOD_NOREPEAT: holding the keys doesn't repeat.
+        let ok = RegisterHotKey(hwnd, 1, HOT_KEY_MODIFIERS(mods | 0x4000), vk).is_ok();
+        if !ok {
+            crate::storage::log_line(&format!("quick search shortcut {label} is already used by another program"));
+        }
+        ok
+    }
+}
+
+/// True once after each display change (see WM_DISPLAYCHANGE below).
+pub fn take_display_changed() -> bool {
+    DISPLAY_CHANGED.swap(false, Ordering::SeqCst)
+}
 const WM_APP_WAKE: u32 = WM_APP + 1;
 
 thread_local! {
@@ -82,6 +127,18 @@ pub fn request_quit() {
 unsafe extern "system" fn main_wndproc(h: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     match m {
         WM_APP_WAKE => LRESULT(0),
+        WM_HOTKEY => {
+            SEARCH_REQUESTED.store(true, Ordering::SeqCst);
+            wake_after(Duration::ZERO);
+            LRESULT(0)
+        }
+        // Monitors changed: the app re-places the boxes and puts them back under the windows
+        // (Windows rearranges windows when a monitor goes away).
+        WM_DISPLAYCHANGE => {
+            DISPLAY_CHANGED.store(true, Ordering::SeqCst);
+            wake_after(Duration::ZERO);
+            LRESULT(0)
+        }
         // Windows is shutting down or the person signs out: allow it, and save first.
         WM_QUERYENDSESSION => LRESULT(1),
         WM_ENDSESSION => {

@@ -82,6 +82,21 @@ pub struct Fence {
     pub monitor_role: usize,
     pub monitor_name: String,
     pub monitor_offset: [f32; 2],
+    /// Border thickness in points (0 = no border).
+    pub border_width: f32,
+    /// Colour of the title, tabs and icon captions.
+    pub text_color: [u8; 3],
+    /// A dark shadow behind captions (easier to read on light glass).
+    pub text_shadow: bool,
+    /// Font name from `fence_view::FONTS` (empty = Segoe UI, the default).
+    pub font: String,
+    /// Text sizes in points: the title, and the tabs and icon captions.
+    pub title_size: f32,
+    pub caption_size: f32,
+    /// Show the names under the icons (false = icons only).
+    pub show_captions: bool,
+    /// Horizontal distance between icons in points (0 = Windows' own desktop spacing).
+    pub icon_spacing: f32,
 }
 
 impl Default for Fence {
@@ -112,11 +127,40 @@ impl Default for Fence {
             monitor_role: 0,
             monitor_name: String::new(),
             monitor_offset: [0.0, 0.0],
+            border_width: 1.0,
+            text_color: [255, 255, 255],
+            text_shadow: true,
+            font: String::new(),
+            title_size: 13.0,
+            caption_size: 12.0,
+            show_captions: true,
+            icon_spacing: 0.0,
         }
     }
 }
 
 impl Fence {
+    /// Takes over another box's whole look (colours, glass, border, text, icon size and
+    /// spacing, title and tab placement) — for "Apply this look to all boxes".
+    pub fn copy_look_from(&mut self, o: &Fence) {
+        self.color = o.color;
+        self.alpha = o.alpha;
+        self.border_color = o.border_color;
+        self.border_width = o.border_width;
+        self.corner = o.corner;
+        self.blur = o.blur;
+        self.text_color = o.text_color;
+        self.text_shadow = o.text_shadow;
+        self.font = o.font.clone();
+        self.title_size = o.title_size;
+        self.caption_size = o.caption_size;
+        self.show_captions = o.show_captions;
+        self.icon_size = o.icon_size;
+        self.icon_spacing = o.icon_spacing;
+        self.title_pos = o.title_pos;
+        self.tab_pos = o.tab_pos;
+    }
+
     pub fn remove_item(&mut self, path: &str) {
         for t in &mut self.tabs {
             t.items.retain(|p| !p.eq_ignore_ascii_case(path));
@@ -149,6 +193,12 @@ pub struct Settings {
     pub snap: bool,
     /// Space left between snapped boxes and inside the screen edges, in points.
     pub snap_gap: f32,
+    /// Also snap to an invisible grid (when no box or screen edge is close), and its size in
+    /// points.
+    pub snap_grid: bool,
+    pub grid_size: f32,
+    /// Quick-search shortcut: index into `runloop::SEARCH_HOTKEYS` (0 = off).
+    pub search_hotkey: usize,
 }
 
 impl Default for Settings {
@@ -165,6 +215,9 @@ impl Default for Settings {
             rescan_secs: 4,
             snap: true,
             snap_gap: 8.0,
+            snap_grid: false,
+            grid_size: 20.0,
+            search_hotkey: 1,
         }
     }
 }

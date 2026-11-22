@@ -73,13 +73,20 @@ for daily use.)
 - Moving boxes by re-rendering every frame caused jitter/flashes; boxes move themselves via
   `SetWindowPos` on a helper thread – keep it that way.
 - Right-click on empty box area is handled by the selection band (`secondary_clicked`).
+- PowerShell: `FindWindow(class, $null)` passes an empty title, not NULL, so it finds nothing –
+  use `[NullString]::Value` or enumerate the windows instead.
 
 ## Where to start for common tasks
 
 - New widget → `src/widgets.rs` (`REGISTRY`).
 - Box look (tint/blur/corners) → `host.rs` `Look` + `HostSystem::apply`; settings UI in
   `app.rs` (Personalize page).
+- Box look options (colour, border, fonts, text, icon size/spacing) → `Fence` fields in
+  `model.rs`, drawing in `fence_view.rs`, Personalize page in `app.rs` (`fence_menu`,
+  `MenuPage::Look`).
+- Quick search → `src/search.rs` (ranking, unit tests) + `show_search` in `app.rs`; the shortcut
+  is in `runloop.rs` (`SEARCH_HOTKEYS`, `take_search_request`).
 - Icon selection/drag/drop → `app.rs` `fence_window`, `ghost::begin_icon_drag`.
 - Monitor handling → `app.rs` (bind/relayout), `desktop::monitors`.
-- Snapping → `src/snap.rs` (+ `snap_targets` in `app.rs`).
+- Snapping (incl. optional grid) → `src/snap.rs` (+ `snap_targets` in `app.rs`).
 - Next suggested work: see "Improvement ideas" in `docs/STATUS.md`.

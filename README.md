@@ -31,6 +31,15 @@ an original Rust program; its behaviour was modelled on an existing desktop orga
 - Snapping: while you move or resize a box, its edges jump onto other boxes (side by side, or
   lined up) and onto the screen edges, with an adjustable gap (default 8 pt). Hold Alt to place a
   box freely; both options are in Settings > Desktop.
+  Optionally also snap to a grid (Settings > Desktop, off by default, 20 pt).
+- Quick search: a global shortcut (default Ctrl+Shift+Space, changeable or off in Settings >
+  Desktop) opens a search box at the top of the main monitor. It finds any desktop item by name
+  (also by file type, or by letters in order, e.g. "vsc" finds Visual Studio Code) and shows the
+  box each item is in. Enter opens it, Ctrl+Enter opens its folder, Esc closes. Also in the tray
+  menu and the box menu ("Search desktop").
+- Look options per box (box menu > Personalize): any colour with opacity, border thickness and
+  colour, text colour, text shadow, title and text size, font, names under icons on/off, icon
+  size and spacing, and "Apply this look to all boxes".
 - Multi-monitor: boxes follow a monitor **role** (main/second…) or stay on a **fixed** monitor.
 - Tray icon, Windows 11 style menus and settings page, start with Windows, low CPU priority,
   layout backups.

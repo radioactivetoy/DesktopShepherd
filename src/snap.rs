@@ -35,6 +35,9 @@ pub struct Snap {
     pub dist: f32,
     /// Space left between neighbouring boxes and inside the screen edges.
     pub gap: f32,
+    /// Optional grid (0 = off): when no box or screen edge is close, edges land on multiples
+    /// of this size.
+    pub grid: f32,
 }
 
 impl Snap {
@@ -81,15 +84,24 @@ impl Snap {
         }
     }
 
+    /// The shift that puts `v` on the nearest grid line (0 when the grid is off).
+    fn to_grid(&self, v: f32) -> f32 {
+        if self.grid >= 2.0 {
+            (v / self.grid).round() * self.grid - v
+        } else {
+            0.0
+        }
+    }
+
     /// Where a box being moved should go: `m` is where the mouse puts it; returns its snapped
     /// top-left corner (its size never changes).
     pub fn snap_move(&self, m: R) -> (f32, f32) {
         let mut lines = Vec::new();
         self.lines_x(m.t, m.b, &mut lines);
-        let dx = best(&lines, m.l, m.r, self.dist);
+        let dx = best(&lines, m.l, m.r, self.dist).unwrap_or_else(|| self.to_grid(m.l));
         lines.clear();
         self.lines_y(m.l, m.r, &mut lines);
-        let dy = best(&lines, m.t, m.b, self.dist);
+        let dy = best(&lines, m.t, m.b, self.dist).unwrap_or_else(|| self.to_grid(m.t));
         (m.l + dx, m.t + dy)
     }
 
@@ -97,14 +109,14 @@ impl Snap {
     pub fn snap_right(&self, x: f32, t: f32, b: f32) -> f32 {
         let mut lines = Vec::new();
         self.lines_x(t, b, &mut lines);
-        x + best_one(&lines, x, Side::High, self.dist)
+        x + best_one(&lines, x, Side::High, self.dist).unwrap_or_else(|| self.to_grid(x))
     }
 
     /// Where the bottom edge of a box being resized should go (`y`; the box spans `l..r`).
     pub fn snap_bottom(&self, y: f32, l: f32, r: f32) -> f32 {
         let mut lines = Vec::new();
         self.lines_y(l, r, &mut lines);
-        y + best_one(&lines, y, Side::High, self.dist)
+        y + best_one(&lines, y, Side::High, self.dist).unwrap_or_else(|| self.to_grid(y))
     }
 }
 
@@ -117,23 +129,23 @@ enum Side {
 }
 
 /// The smallest shift (within `dist`) that puts the low edge `lo` or the high edge `hi` on a
-/// line meant for it; 0 if none is close enough.
-fn best(lines: &[(f32, Side)], lo: f32, hi: f32, dist: f32) -> f32 {
-    let mut shift = 0.0;
+/// line meant for it; None if none is close enough.
+fn best(lines: &[(f32, Side)], lo: f32, hi: f32, dist: f32) -> Option<f32> {
+    let mut shift = None;
     let mut found = dist;
     for &(v, side) in lines {
         let edge = if side == Side::Low { lo } else { hi };
         let d = v - edge;
         if d.abs() <= found {
             found = d.abs();
-            shift = d;
+            shift = Some(d);
         }
     }
     shift
 }
 
-fn best_one(lines: &[(f32, Side)], edge: f32, want: Side, dist: f32) -> f32 {
-    let mut shift = 0.0;
+fn best_one(lines: &[(f32, Side)], edge: f32, want: Side, dist: f32) -> Option<f32> {
+    let mut shift = None;
     let mut found = dist;
     for &(v, side) in lines {
         if side != want {
@@ -142,7 +154,7 @@ fn best_one(lines: &[(f32, Side)], edge: f32, want: Side, dist: f32) -> f32 {
         let d = v - edge;
         if d.abs() <= found {
             found = d.abs();
-            shift = d;
+            shift = Some(d);
         }
     }
     shift
@@ -153,7 +165,7 @@ mod tests {
     use super::*;
 
     fn snap() -> Snap {
-        Snap { boxes: vec![R::new(100.0, 100.0, 300.0, 300.0)], screens: vec![R::new(0.0, 0.0, 1000.0, 800.0)], dist: 10.0, gap: 8.0 }
+        Snap { boxes: vec![R::new(100.0, 100.0, 300.0, 300.0)], screens: vec![R::new(0.0, 0.0, 1000.0, 800.0)], dist: 10.0, gap: 8.0, grid: 0.0 }
     }
 
     #[test]
@@ -186,6 +198,17 @@ mod tests {
     fn nothing_close_means_no_change() {
         let (x, y) = snap().snap_move(R::new(500.0, 500.0, 560.0, 560.0));
         assert_eq!((x, y), (500.0, 500.0));
+    }
+
+    #[test]
+    fn grid_when_nothing_is_close() {
+        let mut s = snap();
+        s.grid = 20.0;
+        // Far from everything: the top-left lands on the 20 grid.
+        assert_eq!(s.snap_move(R::new(507.0, 493.0, 567.0, 553.0)), (500.0, 500.0));
+        // Next to the other box: the box edge wins over the grid (x), grid for y.
+        assert_eq!(s.snap_move(R::new(313.0, 151.0, 363.0, 201.0)), (308.0, 160.0));
+        assert_eq!(s.snap_right(611.0, 500.0, 560.0), 620.0);
     }
 
     #[test]

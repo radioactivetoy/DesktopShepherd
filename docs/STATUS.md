@@ -82,6 +82,27 @@ egui font atlases, and the icon textures.
 - New (2026-11-22): snapping (`src/snap.rs`, `cargo test snap` passes). Checked live: a box
   dropped about 5 px off snaps into line with the box below; with Alt it stays; moving back
   snaps again. Settings > Desktop: "Snap boxes to each other and to the screen edges" and "gap".
+- New (2026-11-22): quick search (`src/search.rs`, window code `show_search` in `app.rs`). A global
+  shortcut (`RegisterHotKey` on the hidden window, no hook) opens a search box near the top of the
+  main monitor; typing filters all desktop items (12 results with icon and box name), arrows move,
+  Enter opens, Ctrl+Enter opens the folder, Esc or a click elsewhere closes, the shortcut toggles.
+  Also in the tray menu and box menu ("Search desktop"). Settings > Desktop: Off / Ctrl+Shift+Space
+  (default) / Ctrl+Alt+Space / Win+Shift+Space / Ctrl+Alt+F; a warning shows if another program
+  already uses the choice. Checked live: Ctrl+Shift+Space opened it with focus, "ste" listed Steam
+  and SteamVR with box names, Down moved, Esc closed.
+- New (2026-11-22): more look options per box (box menu > Personalize, now scrollable): any
+  colour with opacity, border thickness/colour, text colour, text shadow, title size, text size,
+  font, names under icons on/off, icon size 16-128, icon spacing (0 = Windows spacing), "Apply this
+  look to all boxes". Old layouts still load (new fields have defaults). Checked live: colour
+  picker works; switching a box to Bahnschrift redraws at once, saves, and switching back works.
+- New (2026-11-22): optional grid snapping (Settings > Desktop "Also snap to a grid", default off,
+  20 pt). Unit test added (`snap.rs` now 7 tests).
+- Fixed (2026-11-22, owner's report): turning off the primary monitor moved boxes to the new
+  primary but left some above app windows. The hidden window now handles `WM_DISPLAYCHANGE`; the app
+  re-reads monitors, re-places boxes and re-stacks them just above the desktop at once, after 1.5 s
+  and after 4 s. Checked with a simulated display-change message (a box pushed above a test window
+  went back under it). A **real monitor switch-off was not tested** here.
+- Tests: all 11 unit tests pass (`cargo test`). Worker memory after start ~88 MB.
 - Names: exe/data folder still `DeskBoxes`.
 - Synthetic drags (SetCursorPos + mouse_event) don't start a drag on a *rolled-up* box's title
   (same before and after phase C); untested by hand.
@@ -105,5 +126,4 @@ egui font atlases, and the icon textures.
 5. Rename to DesktopShepherd (exe, mutex name, Run key, data folder with migration of
    `%APPDATA%\DeskBoxes`).
 6. Features: more widgets (calendar, system monitor, image frame), per-box hotkeys, quick
-   search. (Snapping boxes to each other and to the screen edges is done, 2026-11-22; a fixed
-   grid is not.)
+   (Quick search, snapping to boxes/screen edges and an optional grid are done, 2026-11-22.)

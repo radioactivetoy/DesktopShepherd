@@ -44,6 +44,8 @@ enum Act {
     RestoreBackup(PathBuf),
     /// Replace the boxes with the ones from the original organizer's saved layout.
     ImportOriginal,
+    /// Give every box the look of this one (Personalize > Apply this look to all boxes).
+    ApplyLookToAll(u64),
     Quit,
 }
 
@@ -85,6 +87,10 @@ struct UiState {
     /// Snapping while moving/resizing (from the settings) and the gap between boxes (points).
     snap_on: bool,
     snap_gap: f32,
+    /// Grid size in points (0 = grid snapping off).
+    snap_grid: f32,
+    /// Open the quick-search window on the next pass (box menu, tray, shortcut).
+    open_search: bool,
     /// Commands for box windows from elsewhere (menus, monitor changes): box id, command.
     box_cmds: Vec<(u64, ViewportCommand)>,
     /// Boxes whose next position update comes from a move or resize by the person.
@@ -94,6 +100,7 @@ struct UiState {
 pub enum TrayCmd {
     Open,
     NewBox,
+    Search,
     Quit,
 }
 
@@ -134,6 +141,16 @@ pub struct DeskApp {
     redraw_all: bool,
     /// Icon sizes (pixels) the boxes showed last pass (see `IconCache::keep_only_sizes`).
     icon_sizes: Vec<u32>,
+    /// Fonts the boxes use, loaded into the drawing context (see `setup_style`).
+    font_names: Vec<String>,
+    /// When to put all boxes back just above the desktop after a display change.
+    restack_at: Vec<Instant>,
+    /// The quick-search window, while open.
+    search: Option<SearchState>,
+    /// The quick-search shortcut registered with Windows (index into SEARCH_HOTKEYS) and
+    /// whether Windows accepted it.
+    hotkey_applied: usize,
+    hotkey_ok: bool,
 }
 
 /// Passes and box frames drawn (for DESKBOXES_DEBUG_DRAWS).
@@ -169,7 +186,7 @@ impl DeskApp {
         let ctx = root.clone();
         let persist = screenshot.is_none();
         if !persist {
-            setup_style(&ctx);
+            setup_style(&ctx, &[]);
         }
         if persist {
             // Keep the boxes visible when Show desktop (Win+D) brings the desktop forward.
@@ -250,7 +267,7 @@ impl DeskApp {
         let hosts = if persist {
             match crate::host::HostSystem::new(&ctx) {
                 Ok(h) => {
-                    setup_style(&h.ctx);
+                    setup_style(&h.ctx, &[]);
                     Some(h)
                 }
                 Err(e) => {
@@ -296,6 +313,11 @@ impl DeskApp {
             focus_settings: false,
             redraw_all: true,
             icon_sizes: Vec::new(),
+            font_names: Vec::new(),
+            restack_at: Vec::new(),
+            search: None,
+            hotkey_applied: usize::MAX,
+            hotkey_ok: true,
             layout,
         };
         if app.persist {
@@ -506,6 +528,14 @@ impl DeskApp {
                         self.apply_icon_hiding();
                     }
                 }
+                Act::ApplyLookToAll(id) => {
+                    if let Some(src) = self.layout.fences.iter().find(|f| f.id == id).cloned() {
+                        for f in self.layout.fences.iter_mut().filter(|f| f.id != id) {
+                            f.copy_look_from(&src);
+                        }
+                        self.mark_dirty();
+                    }
+                }
                 Act::Quit => {
                     self.save_now();
                     // Ends the run loop cleanly (exit code 0: the supervisor stops too).
@@ -540,6 +570,24 @@ impl DeskApp {
             self.icons.forget_missing(&keep);
             self.redraw_all = true;
         }
+        // The quick-search shortcut: (re)register it when the setting changes; a press toggles
+        // the search window.
+        #[cfg(windows)]
+        if self.persist {
+            let want = self.layout.settings.search_hotkey;
+            if self.hotkey_applied != want {
+                self.hotkey_ok = crate::runloop::set_search_hotkey(want);
+                self.hotkey_applied = want;
+            }
+            if crate::runloop::take_search_request() {
+                if self.search.is_some() {
+                    self.search = None;
+                } else {
+                    self.ui.open_search = true;
+                }
+                self.redraw_all = true;
+            }
+        }
         // Icon sizes in use (pixels): when they change (View > Small/Medium/Large), drop the
         // icons of sizes no box shows any more.
         let s = desktop::system_scale();
@@ -554,6 +602,20 @@ impl DeskApp {
                 self.icons.keep_only_sizes(&sizes.iter().copied().collect());
             }
             self.icon_sizes = sizes;
+        }
+        // Fonts chosen in boxes: load the ones in use (before any box draws this pass).
+        let mut wanted: Vec<String> = self.layout.fences.iter().filter(|f| !f.font.is_empty()).map(|f| f.font.clone()).collect();
+        wanted.sort();
+        wanted.dedup();
+        if wanted != self.font_names {
+            #[cfg(windows)]
+            let draw = self.hosts.as_ref().map(|h| h.ctx.clone()).unwrap_or_else(|| ctx.clone());
+            #[cfg(not(windows))]
+            let draw = ctx.clone();
+            setup_style(&draw, &wanted);
+            fv::set_loaded_fonts(&wanted);
+            self.font_names = wanted;
+            self.redraw_all = true;
         }
         #[cfg(windows)]
         let icons_arrived = match self.hosts.as_ref() {
@@ -573,17 +635,45 @@ impl DeskApp {
                     self.manager_open = true;
                 }
                 TrayCmd::NewBox => self.actions.push(Act::NewFence { auto: false }),
+                TrayCmd::Search => self.ui.open_search = true,
                 TrayCmd::Quit => self.actions.push(Act::Quit),
             }
         }
 
 
         if self.persist {
-            if self.monitors_changed.swap(false, std::sync::atomic::Ordering::SeqCst) {
-                if let Ok(m) = self.monitors_shared.lock() {
-                    self.monitors = m.clone();
+            // Displays changed: Windows told us at once (WM_DISPLAYCHANGE), or the watcher noticed.
+            #[cfg(windows)]
+            let told = crate::runloop::take_display_changed();
+            #[cfg(not(windows))]
+            let told = false;
+            let noticed = self.monitors_changed.swap(false, std::sync::atomic::Ordering::SeqCst);
+            if told || noticed {
+                let now_monitors = if told { desktop::monitors() } else { self.monitors_shared.lock().map(|m| m.clone()).unwrap_or_default() };
+                if !now_monitors.is_empty() {
+                    if let Ok(mut m) = self.monitors_shared.lock() {
+                        *m = now_monitors.clone();
+                    }
+                    self.monitors = now_monitors;
                 }
                 self.relayout_monitors();
+                // When a monitor goes away Windows rearranges windows, and boxes can end up above
+                // some apps: put them back just above the desktop now and again as things settle.
+                let now = Instant::now();
+                self.restack_at = vec![now, now + Duration::from_millis(1500), now + Duration::from_secs(4)];
+            }
+            if !self.restack_at.is_empty() {
+                let now = Instant::now();
+                if self.restack_at.iter().any(|t| *t <= now) {
+                    self.restack_at.retain(|t| *t > now);
+                    storage::log_line(&format!("display change: re-stacking {} boxes", self.ui.hwnds.len()));
+                    for h in self.ui.hwnds.values() {
+                        desktop::send_to_bottom(*h);
+                    }
+                }
+                if let Some(next) = self.restack_at.iter().min() {
+                    ctx.request_repaint_after(next.saturating_duration_since(now));
+                }
             }
             self.bind_unassigned();
             let rebind: Vec<u64> = self.ui.rebind.drain().collect();
@@ -662,7 +752,7 @@ impl DeskApp {
             let ok = self.hosts.as_mut().map(|h| h.recover(ctx)).unwrap_or(false);
             if ok {
                 if let Some(h) = self.hosts.as_ref() {
-                    setup_style(&h.ctx);
+                    setup_style(&h.ctx, &self.font_names);
                 }
                 self.icons.clear();
                 self.ui.hwnds.clear();
@@ -681,6 +771,7 @@ impl DeskApp {
             self.ui.glass = hosts.has_glass();
             self.ui.snap_on = self.layout.settings.snap;
             self.ui.snap_gap = self.layout.settings.snap_gap;
+            self.ui.snap_grid = if self.layout.settings.snap_grid { self.layout.settings.grid_size.clamp(4.0, 200.0) } else { 0.0 };
             let ids: Vec<u64> = self.layout.fences.iter().map(|f| f.id).collect();
             hosts.retain(&ids);
             for fence in self.layout.fences.iter_mut() {
@@ -729,6 +820,18 @@ impl DeskApp {
             #[cfg(windows)]
             if let Some(h) = self.hosts.as_mut() {
                 h.close_panel(MENU_PANEL);
+            }
+        }
+        // Quick search (shortcut, tray, box menu).
+        #[cfg(windows)]
+        {
+            if std::mem::take(&mut self.ui.open_search) && self.persist && self.search.is_none() {
+                self.search = Some(SearchState::default());
+            }
+            if self.search.is_some() {
+                self.show_search(ctx);
+            } else if let Some(h) = self.hosts.as_mut() {
+                h.close_panel(SEARCH_PANEL);
             }
         }
         // Commands for box windows from the menus (focus for renaming, roll up/down).
@@ -884,12 +987,11 @@ fn fence_window(
             .unwrap_or_else(|| Rect::from_min_size(Pos2::new(fence.rect[0], fence.rect[1]), rect.size()));
         let screen = current;
         if st.glass {
-            // Only the thin border: Windows draws the glass, tint and rounded corners.
-            let [br, bg, bb, ba] = fence.border_color;
+            // Only the border: Windows draws the glass, tint and rounded corners.
             painter.rect_stroke(
                 rect.shrink(0.5),
                 egui::CornerRadius::same(fence.corner.round().clamp(0.0, 40.0) as u8),
-                egui::Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(br, bg, bb, ba)),
+                fv::border_stroke(fence, 1.0),
                 egui::StrokeKind::Inside,
             );
         } else {
@@ -1062,6 +1164,7 @@ fn fence_window(
         } else if let Some((_, items)) = tabs.get(sel) {
             // Icon grid.
             let cell = fv::cell_size(fence, desk.spacing);
+            let style = fv::text_style(fence);
             let icon = fence.icon_size as f32;
             let manual = fence.sort == SortKind::Manual && !fence.auto_sort;
             let mut child = ui.new_child(UiBuilder::new().max_rect(a.content).layout(egui::Layout::top_down(Align::Min)));
@@ -1118,7 +1221,7 @@ fn fence_window(
                         }
                         let selected = st.selection.contains(&key);
                         let hl = if selected { 50 } else if resp.hovered() { 22 } else { 0 };
-                        fv::paint_item(ui.painter(), icons, it, cr, icon, 1.0, hl);
+                        fv::paint_item(ui.painter(), icons, it, cr, icon, 1.0, hl, &style);
                         if resp.clicked() {
                             // Click: just this icon; Ctrl+click: add or remove it.
                             if ui.input(|i| i.modifiers.ctrl) {
@@ -1387,6 +1490,26 @@ fn sep(ui: &mut egui::Ui) {
     ui.painter().hline(r.x_range().shrink(4.0), r.center().y, egui::Stroke::new(1.0_f32, Color32::from_white_alpha(22)));
 }
 
+/// A row that opens an inline colour picker (no pop-up: it would be cut off by the menu window).
+/// The row starts with a square of the current colour. Returns true when the colour changed.
+fn color_row(ui: &mut egui::Ui, id: &str, label: &str, color: &mut Color32, alpha: bool) -> bool {
+    let mut changed = false;
+    let mut job = egui::text::LayoutJob::default();
+    job.append("\u{25A0}  ", 0.0, egui::TextFormat { font_id: FontId::proportional(16.0), color: color.to_opaque(), ..Default::default() });
+    job.append(label, 0.0, egui::TextFormat { font_id: FontId::proportional(14.0), color: Color32::from_gray(225), ..Default::default() });
+    ui.horizontal(|ui| {
+        ui.add_space(8.0);
+        ui.vertical(|ui| {
+            egui::CollapsingHeader::new(job).id_salt(id).show(ui, |ui| {
+                ui.spacing_mut().slider_width = 190.0;
+                let mode = if alpha { egui::widgets::color_picker::Alpha::OnlyBlend } else { egui::widgets::color_picker::Alpha::Opaque };
+                changed = egui::widgets::color_picker::color_picker_color32(ui, color, mode);
+            });
+        });
+    });
+    changed
+}
+
 fn heading(ui: &mut egui::Ui, text: &str) {
     ui.add_space(4.0);
     ui.horizontal(|ui| {
@@ -1454,6 +1577,10 @@ fn fence_menu(ui: &mut egui::Ui, fence: &mut Fence, st: &mut UiState, page: &mut
             if sub(ui, icon::ADD, "New") {
                 *page = MenuPage::New;
             }
+            if row(ui, icon::SEARCH, "Search desktop", None, true).clicked() {
+                st.open_search = true;
+                close = true;
+            }
             if row(ui, icon::SETTINGS, "DeskBoxes settings", None, true).clicked() {
                 actions.push(Act::OpenManager);
                 close = true;
@@ -1492,90 +1619,165 @@ fn fence_menu(ui: &mut egui::Ui, fence: &mut Fence, st: &mut UiState, page: &mut
         }
         MenuPage::Look => {
             back(ui, page, "Personalize");
-            heading(ui, "Colour");
-            // One row of swatches; the clear-glass one is drawn as see-through (a checkerboard).
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 2.0;
-                ui.add_space(12.0);
-                for (name, rgb, alpha) in COLORS {
-                    let (r, resp) = ui.allocate_exact_size(Vec2::new(28.0, 30.0), Sense::click());
-                    let p = ui.painter();
-                    let c = r.center();
-                    let selected = fence.color == *rgb && fence.alpha == *alpha;
-                    if *alpha < 60 {
-                        // Clear glass: checkerboard inside the circle.
-                        p.circle_filled(c, 10.0, Color32::from_gray(200));
-                        for (dx, dy) in [(-4.0, -4.0), (4.0, 4.0)] {
-                            p.rect_filled(Rect::from_center_size(c + Vec2::new(dx, dy), Vec2::splat(7.0)), 0.0, Color32::from_gray(120));
+            // Taller than a menu should be: it scrolls.
+            ScrollArea::vertical().max_height(540.0).auto_shrink([false, true]).show(ui, |ui| {
+                heading(ui, "Colour");
+                // One row of swatches; the clear-glass one is drawn as see-through (a checkerboard).
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 2.0;
+                    ui.add_space(12.0);
+                    for (name, rgb, alpha) in COLORS {
+                        let (r, resp) = ui.allocate_exact_size(Vec2::new(28.0, 30.0), Sense::click());
+                        let p = ui.painter();
+                        let c = r.center();
+                        let selected = fence.color == *rgb && fence.alpha == *alpha;
+                        if *alpha < 60 {
+                            // Clear glass: checkerboard inside the circle.
+                            p.circle_filled(c, 10.0, Color32::from_gray(200));
+                            for (dx, dy) in [(-4.0, -4.0), (4.0, 4.0)] {
+                                p.rect_filled(Rect::from_center_size(c + Vec2::new(dx, dy), Vec2::splat(7.0)), 0.0, Color32::from_gray(120));
+                            }
+                        } else {
+                            p.circle_filled(c, 10.0, Color32::from_rgb(rgb[0], rgb[1], rgb[2]));
                         }
-                    } else {
-                        p.circle_filled(c, 10.0, Color32::from_rgb(rgb[0], rgb[1], rgb[2]));
+                        p.circle_stroke(c, 10.0, egui::Stroke::new(1.0_f32, Color32::from_white_alpha(70)));
+                        if selected {
+                            p.circle_stroke(c, 13.0, egui::Stroke::new(2.0_f32, Color32::from_rgb(76, 194, 255)));
+                        } else if resp.hovered() {
+                            p.circle_stroke(c, 13.0, egui::Stroke::new(1.0_f32, Color32::from_white_alpha(90)));
+                        }
+                        if resp.on_hover_text(*name).clicked() {
+                            fence.color = *rgb;
+                            fence.alpha = *alpha;
+                            dirty = true;
+                        }
                     }
-                    p.circle_stroke(c, 10.0, egui::Stroke::new(1.0_f32, Color32::from_white_alpha(70)));
-                    if selected {
-                        p.circle_stroke(c, 13.0, egui::Stroke::new(2.0_f32, Color32::from_rgb(76, 194, 255)));
-                    } else if resp.hovered() {
-                        p.circle_stroke(c, 13.0, egui::Stroke::new(1.0_f32, Color32::from_white_alpha(90)));
-                    }
-                    if resp.on_hover_text(*name).clicked() {
-                        fence.color = *rgb;
-                        fence.alpha = *alpha;
-                        dirty = true;
-                    }
+                });
+                // Any colour (with its opacity), picked by hand.
+                let mut tint = Color32::from_rgba_unmultiplied(fence.color[0], fence.color[1], fence.color[2], fence.alpha);
+                if color_row(ui, "box-colour", "Any colour…", &mut tint, true) {
+                    let [r, g, b, a] = tint.to_srgba_unmultiplied();
+                    fence.color = [r, g, b];
+                    fence.alpha = a;
+                    dirty = true;
                 }
-            });
-            sep(ui);
-            // Aligned rows: name, slider, value.
-            let row = |ui: &mut egui::Ui, label: &str, value: String, slider: &mut dyn FnMut(&mut egui::Ui) -> bool| -> bool {
-                let mut changed = false;
+                sep(ui);
+                // Aligned rows: name, slider, value.
+                let slider_row = |ui: &mut egui::Ui, label: &str, value: String, slider: &mut dyn FnMut(&mut egui::Ui) -> bool| -> bool {
+                    let mut changed = false;
+                    ui.horizontal(|ui| {
+                        ui.add_space(14.0);
+                        let (lr, _) = ui.allocate_exact_size(Vec2::new(70.0, 30.0), Sense::hover());
+                        ui.painter().text(Pos2::new(lr.min.x, lr.center().y), egui::Align2::LEFT_CENTER, label, FontId::proportional(14.0), Color32::from_gray(225));
+                        ui.spacing_mut().slider_width = 120.0;
+                        changed = slider(ui);
+                        ui.add_sized([36.0, 30.0], egui::Label::new(egui::RichText::new(value).size(13.0).color(Color32::from_gray(180))).halign(Align::Max));
+                    });
+                    changed
+                };
+                let alpha_pct = format!("{}%", (fence.alpha as f32 / 2.55).round());
+                dirty |= slider_row(ui, "Opacity", alpha_pct, &mut |ui| ui.add(egui::Slider::new(&mut fence.alpha, 0..=255).show_value(false)).changed());
+                let corner_txt = format!("{}", fence.corner.round());
+                dirty |= slider_row(ui, "Corners", corner_txt, &mut |ui| ui.add(egui::Slider::new(&mut fence.corner, 0.0..=16.0).step_by(1.0).show_value(false)).changed());
+                let blur_txt = format!("{}", fence.blur);
+                dirty |= slider_row(ui, "Blur", blur_txt, &mut |ui| ui.add(egui::Slider::new(&mut fence.blur, 0..=40).show_value(false)).changed());
+                sep(ui);
+                heading(ui, "Border");
+                let bw = format!("{}", fence.border_width);
+                dirty |= slider_row(ui, "Thickness", bw, &mut |ui| ui.add(egui::Slider::new(&mut fence.border_width, 0.0..=6.0).step_by(0.5).show_value(false)).changed());
+                let [r, g, b, a] = fence.border_color;
+                let mut border = Color32::from_rgba_unmultiplied(r, g, b, a);
+                if color_row(ui, "border-colour", "Border colour…", &mut border, true) {
+                    fence.border_color = border.to_srgba_unmultiplied();
+                    dirty = true;
+                }
+                sep(ui);
+                heading(ui, "Text");
+                let [r, g, b] = fence.text_color;
+                let mut text = Color32::from_rgb(r, g, b);
+                if color_row(ui, "text-colour", "Text colour…", &mut text, false) {
+                    let [r, g, b, _] = text.to_srgba_unmultiplied();
+                    fence.text_color = [r, g, b];
+                    dirty = true;
+                }
                 ui.horizontal(|ui| {
                     ui.add_space(14.0);
-                    let (lr, _) = ui.allocate_exact_size(Vec2::new(70.0, 30.0), Sense::hover());
-                    ui.painter().text(Pos2::new(lr.min.x, lr.center().y), egui::Align2::LEFT_CENTER, label, FontId::proportional(14.0), Color32::from_gray(225));
-                    ui.spacing_mut().slider_width = 120.0;
-                    changed = slider(ui);
-                    ui.add_sized([36.0, 30.0], egui::Label::new(egui::RichText::new(value).size(13.0).color(Color32::from_gray(180))).halign(Align::Max));
+                    dirty |= ui.checkbox(&mut fence.text_shadow, "Shadow behind the text").changed();
                 });
-                changed
-            };
-            let alpha_pct = format!("{}%", (fence.alpha as f32 / 2.55).round());
-            dirty |= row(ui, "Opacity", alpha_pct, &mut |ui| ui.add(egui::Slider::new(&mut fence.alpha, 0..=255).show_value(false)).changed());
-            let corner_txt = format!("{}", fence.corner.round());
-            dirty |= row(ui, "Corners", corner_txt, &mut |ui| ui.add(egui::Slider::new(&mut fence.corner, 0.0..=16.0).step_by(1.0).show_value(false)).changed());
-            let blur_txt = format!("{}", fence.blur);
-            dirty |= row(ui, "Blur", blur_txt, &mut |ui| ui.add(egui::Slider::new(&mut fence.blur, 0..=40).show_value(false)).changed());
-            sep(ui);
-            // Two-way switches for where the title and the tabs go.
-            let switch = |ui: &mut egui::Ui, label: &str, first: &str, second: &str, is_first: bool| -> Option<bool> {
-                let mut pick = None;
+                let ts = format!("{}", fence.title_size.round());
+                dirty |= slider_row(ui, "Title size", ts, &mut |ui| ui.add(egui::Slider::new(&mut fence.title_size, 8.0..=32.0).step_by(1.0).show_value(false)).changed());
+                let cs = format!("{}", fence.caption_size.round());
+                dirty |= slider_row(ui, "Text size", cs, &mut |ui| ui.add(egui::Slider::new(&mut fence.caption_size, 7.0..=24.0).step_by(1.0).show_value(false)).changed());
+                // Fonts: only those installed on this PC are offered.
                 ui.horizontal(|ui| {
                     ui.add_space(14.0);
-                    let (lr, _) = ui.allocate_exact_size(Vec2::new(70.0, 30.0), Sense::hover());
-                    ui.painter().text(Pos2::new(lr.min.x, lr.center().y), egui::Align2::LEFT_CENTER, label, FontId::proportional(14.0), Color32::from_gray(225));
-                    ui.spacing_mut().item_spacing.x = 4.0;
-                    for (i, text) in [first, second].into_iter().enumerate() {
-                        let on = (i == 0) == is_first;
-                        let fill = if on { Color32::from_rgb(76, 194, 255).linear_multiply(0.35) } else { Color32::from_white_alpha(10) };
-                        let b = egui::Button::new(egui::RichText::new(text).size(13.0).color(if on { Color32::WHITE } else { Color32::from_gray(200) }))
-                            .fill(fill)
-                            .corner_radius(egui::CornerRadius::same(4))
-                            .min_size(Vec2::new(78.0, 26.0));
-                        if ui.add(b).clicked() {
-                            pick = Some(i == 0);
+                    ui.label(egui::RichText::new("Font").size(14.0).color(Color32::from_gray(225)));
+                });
+                ui.horizontal_wrapped(|ui| {
+                    ui.add_space(14.0);
+                    ui.spacing_mut().item_spacing = Vec2::new(4.0, 4.0);
+                    for (name, file) in fv::FONTS {
+                        if !std::path::Path::new("C:/Windows/Fonts").join(file).exists() {
+                            continue;
+                        }
+                        let is_default = *name == "Segoe UI";
+                        let on = if is_default { fence.font.is_empty() } else { fence.font == *name };
+                        if ui.selectable_label(on, egui::RichText::new(*name).size(12.5)).clicked() && !on {
+                            fence.font = if is_default { String::new() } else { name.to_string() };
+                            dirty = true;
                         }
                     }
                 });
-                pick
-            };
-            if let Some(left) = switch(ui, "Title", "Left side", "Top", fence.title_pos == TitlePos::Left) {
-                fence.title_pos = if left { TitlePos::Left } else { TitlePos::Top };
-                dirty = true;
-            }
-            if let Some(right) = switch(ui, "Tabs", "Right side", "Top", fence.tab_pos == TabPos::Right) {
-                fence.tab_pos = if right { TabPos::Right } else { TabPos::Top };
-                dirty = true;
-            }
-            ui.add_space(4.0);
+                if fence.widget.is_none() {
+                    sep(ui);
+                    heading(ui, "Icons");
+                    ui.horizontal(|ui| {
+                        ui.add_space(14.0);
+                        dirty |= ui.checkbox(&mut fence.show_captions, "Show names under the icons").changed();
+                    });
+                    let is = format!("{}", fence.icon_size);
+                    dirty |= slider_row(ui, "Size", is, &mut |ui| ui.add(egui::Slider::new(&mut fence.icon_size, 16..=128).step_by(4.0).show_value(false)).changed());
+                    let sp = if fence.icon_spacing <= 0.0 { "auto".to_string() } else { format!("{}", fence.icon_spacing.round()) };
+                    dirty |= slider_row(ui, "Spacing", sp, &mut |ui| ui.add(egui::Slider::new(&mut fence.icon_spacing, 0.0..=200.0).step_by(2.0).show_value(false)).changed());
+                }
+                sep(ui);
+                // Two-way switches for where the title and the tabs go.
+                let switch = |ui: &mut egui::Ui, label: &str, first: &str, second: &str, is_first: bool| -> Option<bool> {
+                    let mut pick = None;
+                    ui.horizontal(|ui| {
+                        ui.add_space(14.0);
+                        let (lr, _) = ui.allocate_exact_size(Vec2::new(70.0, 30.0), Sense::hover());
+                        ui.painter().text(Pos2::new(lr.min.x, lr.center().y), egui::Align2::LEFT_CENTER, label, FontId::proportional(14.0), Color32::from_gray(225));
+                        ui.spacing_mut().item_spacing.x = 4.0;
+                        for (i, text) in [first, second].into_iter().enumerate() {
+                            let on = (i == 0) == is_first;
+                            let fill = if on { Color32::from_rgb(76, 194, 255).linear_multiply(0.35) } else { Color32::from_white_alpha(10) };
+                            let b = egui::Button::new(egui::RichText::new(text).size(13.0).color(if on { Color32::WHITE } else { Color32::from_gray(200) }))
+                                .fill(fill)
+                                .corner_radius(egui::CornerRadius::same(4))
+                                .min_size(Vec2::new(78.0, 26.0));
+                            if ui.add(b).clicked() {
+                                pick = Some(i == 0);
+                            }
+                        }
+                    });
+                    pick
+                };
+                if let Some(left) = switch(ui, "Title", "Left side", "Top", fence.title_pos == TitlePos::Left) {
+                    fence.title_pos = if left { TitlePos::Left } else { TitlePos::Top };
+                    dirty = true;
+                }
+                if let Some(right) = switch(ui, "Tabs", "Right side", "Top", fence.tab_pos == TabPos::Right) {
+                    fence.tab_pos = if right { TabPos::Right } else { TabPos::Top };
+                    dirty = true;
+                }
+                sep(ui);
+                if row(ui, icon::COLOR, "Apply this look to all boxes", None, true).clicked() {
+                    actions.push(Act::ApplyLookToAll(fence.id));
+                    close = true;
+                }
+                ui.add_space(4.0);
+            });
         }
         MenuPage::New => {
             back(ui, page, "New");
@@ -2020,7 +2222,26 @@ impl DeskApp {
             ui.label("gap");
             dirty |= ui.add(egui::DragValue::new(&mut s.snap_gap).range(0.0..=40.0).speed(0.5).suffix(" pt")).changed();
         });
+        ui.horizontal(|ui| {
+            dirty |= ui.checkbox(&mut s.snap_grid, "Also snap to a grid").changed();
+            ui.label("size");
+            dirty |= ui.add(egui::DragValue::new(&mut s.grid_size).range(4.0..=200.0).speed(1.0).suffix(" pt")).changed();
+        });
         ui.label(egui::RichText::new("Hold Alt while moving or resizing a box to place it freely.").color(Color32::from_gray(150)).size(12.0));
+        #[cfg(windows)]
+        ui.horizontal_wrapped(|ui| {
+            ui.label("Quick search shortcut:");
+            for (i, (label, _, _)) in crate::runloop::SEARCH_HOTKEYS.iter().enumerate() {
+                if ui.selectable_label(s.search_hotkey == i, *label).clicked() && s.search_hotkey != i {
+                    s.search_hotkey = i;
+                    dirty = true;
+                }
+            }
+        });
+        #[cfg(windows)]
+        if !self.hotkey_ok {
+            ui.label(egui::RichText::new("That shortcut is already used by another program: pick another one.").color(Color32::from_rgb(255, 160, 120)).size(12.0));
+        }
         ui.label(egui::RichText::new("Frosted glass: set each box's blur in its menu (Personalize > Blur).").color(Color32::from_gray(150)).size(12.0));
         ui.add_space(10.0);
         ui.heading("Monitors");
@@ -2351,6 +2572,14 @@ fn sanitize(layout: &mut Layout) {
         }
         f.icon_size = f.icon_size.clamp(16, 256);
         f.corner = f.corner.clamp(0.0, 40.0);
+        let fix = |v: f32, lo: f32, hi: f32, def: f32| if v.is_finite() { v.clamp(lo, hi) } else { def };
+        f.border_width = fix(f.border_width, 0.0, 6.0, 1.0);
+        f.title_size = fix(f.title_size, 8.0, 32.0, 13.0);
+        f.caption_size = fix(f.caption_size, 7.0, 24.0, 12.0);
+        f.icon_spacing = fix(f.icon_spacing, 0.0, 300.0, 0.0);
+        if !f.font.is_empty() && !fv::FONTS.iter().any(|(n, _)| *n == f.font) {
+            f.font.clear();
+        }
         for t in &mut f.tabs {
             let mut seen_items = HashSet::new();
             t.items.retain(|p| !p.is_empty() && seen_items.insert(p.to_lowercase()));
@@ -2358,7 +2587,9 @@ fn sanitize(layout: &mut Layout) {
     }
 }
 
-fn setup_style(ctx: &egui::Context) {
+/// Fonts and the Windows 11 dark look for a drawing context. `extra_fonts`: the fonts boxes use
+/// (names from `fence_view::FONTS`), each loaded from the Windows Fonts folder as its own family.
+fn setup_style(ctx: &egui::Context, extra_fonts: &[String]) {
     let mut fonts = egui::FontDefinitions::default();
     // Use Windows' own UI font when present, for the same look as desktop captions.
     if let Ok(bytes) = std::fs::read("C:\\Windows\\Fonts\\segoeui.ttf") {
@@ -2376,6 +2607,18 @@ fn setup_style(ctx: &egui::Context) {
                 f.push("win-icons".into());
             }
             break;
+        }
+    }
+    // The fonts chosen in boxes (Personalize > Font): each falls back to the default fonts for
+    // characters it lacks (icons, other scripts).
+    let fallback: Vec<String> = fonts.families.get(&egui::FontFamily::Proportional).cloned().unwrap_or_default();
+    for name in extra_fonts {
+        let Some((_, file)) = fv::FONTS.iter().find(|(n, _)| *n == name.as_str()) else { continue };
+        if let Ok(bytes) = std::fs::read(std::path::Path::new("C:/Windows/Fonts").join(file)) {
+            fonts.font_data.insert(name.clone(), Arc::new(egui::FontData::from_owned(bytes)));
+            let mut chain = vec![name.clone()];
+            chain.extend(fallback.iter().cloned());
+            fonts.families.insert(egui::FontFamily::Name(name.as_str().into()), chain);
         }
     }
     ctx.set_fonts(fonts);
@@ -2454,6 +2697,7 @@ mod icon {
     pub const CHEVRON: char = '\u{E76C}';
     pub const CHECK: char = '\u{E73E}';
     pub const BACK: char = '\u{E72B}';
+    pub const SEARCH: char = '\u{E721}';
 }
 
 #[cfg(windows)]
@@ -2479,9 +2723,10 @@ fn make_tray(ctx: &egui::Context, cmds: Arc<Mutex<Vec<TrayCmd>>>) -> Option<tray
     let menu = Menu::new();
     let open = MenuItem::new("Open DeskBoxes", true, None);
     let new_box = MenuItem::new("New box", true, None);
+    let search = MenuItem::new("Search desktop", true, None);
     let quit = MenuItem::new("Quit", true, None);
-    let _ = menu.append_items(&[&open, &new_box, &PredefinedMenuItem::separator(), &quit]);
-    let (open_id, new_id, quit_id) = (open.id().clone(), new_box.id().clone(), quit.id().clone());
+    let _ = menu.append_items(&[&open, &search, &new_box, &PredefinedMenuItem::separator(), &quit]);
+    let (open_id, new_id, quit_id, search_id) = (open.id().clone(), new_box.id().clone(), quit.id().clone(), search.id().clone());
     {
         let cmds = cmds.clone();
         let ctx = ctx.clone();
@@ -2490,6 +2735,8 @@ fn make_tray(ctx: &egui::Context, cmds: Arc<Mutex<Vec<TrayCmd>>>) -> Option<tray
                 Some(TrayCmd::Open)
             } else if e.id == new_id {
                 Some(TrayCmd::NewBox)
+            } else if e.id == search_id {
+                Some(TrayCmd::Search)
             } else if e.id == quit_id {
                 Some(TrayCmd::Quit)
             } else {
@@ -2533,5 +2780,177 @@ fn snap_targets(st: &UiState, own: u64, px_per_unit: f32) -> Option<crate::snap:
     let boxes = st.hwnds.iter().filter(|(id, _)| **id != own).filter_map(|(_, h)| desktop::window_rect_px(*h)).map(to).collect();
     let screens = desktop::work_areas_px().into_iter().map(to).collect();
     let s = desktop::system_scale();
-    Some(crate::snap::Snap { boxes, screens, dist: 10.0 * s / k, gap: st.snap_gap.max(0.0) * s / k })
+    Some(crate::snap::Snap { boxes, screens, dist: 10.0 * s / k, gap: st.snap_gap.max(0.0) * s / k, grid: st.snap_grid * s / k })
+}
+
+/// The quick-search window's state while it is open.
+#[derive(Default)]
+struct SearchState {
+    query: String,
+    /// Highlighted result (arrow keys / mouse).
+    sel: usize,
+    /// The window had the keyboard focus once (losing it then closes the window).
+    was_focused: bool,
+    /// Measured height of the contents, in points.
+    height: f32,
+}
+
+#[cfg(windows)]
+const SEARCH_PANEL: u64 = u64::MAX - 3;
+
+impl DeskApp {
+    /// The box an item is shown in, by lower-case path (items in no box: the auto-sort box).
+    fn item_homes(&self) -> HashMap<String, String> {
+        let mut m = HashMap::new();
+        for f in self.layout.fences.iter().filter(|f| !f.auto_sort && f.widget.is_none()) {
+            for t in &f.tabs {
+                for p in &t.items {
+                    m.entry(p.to_lowercase()).or_insert_with(|| f.name.clone());
+                }
+            }
+        }
+        m
+    }
+
+    /// Quick search: a box at the top of the main monitor; typing filters every desktop item.
+    /// Enter opens the highlighted one (and selects it in its box), Ctrl+Enter opens its
+    /// folder, arrow keys move, Esc or clicking elsewhere closes.
+    #[cfg(windows)]
+    fn show_search(&mut self, ctx: &egui::Context) {
+        let Some(mut s) = self.search.take() else { return };
+        if s.height < 60.0 {
+            s.height = 120.0;
+        }
+        let scale = desktop::system_scale();
+        let [sw, sh] = desktop::primary_screen_points();
+        let w = 600.0_f32.min(sw - 40.0);
+        let (x, y) = (((sw - w) / 2.0).max(0.0), (sh * 0.16).max(0.0));
+        let rect_px = [(x * scale) as i32, (y * scale) as i32, (w * scale) as i32, (s.height * scale) as i32];
+        let results: Vec<DeskItem> = crate::search::rank(self.items.values(), &s.query, 12).into_iter().cloned().collect();
+        let homes = self.item_homes();
+        let other = self.layout.fences.iter().find(|f| f.auto_sort).map(|f| f.name.clone()).unwrap_or_else(|| "Desktop".into());
+        if s.sel >= results.len() {
+            s.sel = results.len().saturating_sub(1);
+        }
+        let mut close = false;
+        let mut open: Option<(String, bool)> = None;
+        let mut measured = s.height;
+        let force = self.panel_force;
+        if let Some(mut hosts) = self.hosts.take() {
+            let icons = &mut self.icons;
+            hosts.panel(SEARCH_PANEL, crate::host::PanelKind::Menu, "DeskBoxes search", rect_px, true, force, |pctx| {
+                match pctx.input(|i| i.viewport().focused) {
+                    Some(true) => s.was_focused = true,
+                    Some(false) if s.was_focused => close = true,
+                    _ => {}
+                }
+                // Keys first (the text field would swallow some of them).
+                let (esc, up, down, enter, ctrl) = pctx.input(|i| {
+                    (
+                        i.key_pressed(egui::Key::Escape) || i.viewport().close_requested(),
+                        i.key_pressed(egui::Key::ArrowUp),
+                        i.key_pressed(egui::Key::ArrowDown),
+                        i.key_pressed(egui::Key::Enter),
+                        i.modifiers.ctrl,
+                    )
+                });
+                if esc {
+                    close = true;
+                }
+                if down && !results.is_empty() {
+                    s.sel = (s.sel + 1).min(results.len() - 1);
+                }
+                if up {
+                    s.sel = s.sel.saturating_sub(1);
+                }
+                if enter {
+                    if let Some(it) = results.get(s.sel) {
+                        open = Some((it.path.clone(), ctrl));
+                    }
+                }
+                let ppp = pctx.pixels_per_point();
+                let frame = egui::Frame::new()
+                    .fill(Color32::from_rgb(40, 40, 43))
+                    .stroke(egui::Stroke::new(1.0_f32, Color32::from_white_alpha(30)))
+                    .inner_margin(egui::Margin::same(10));
+                egui::CentralPanel::default().frame(frame).show(pctx, |ui| {
+                    let top = ui.cursor().min.y;
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new(icon::SEARCH.to_string()).size(18.0).color(Color32::from_gray(190)));
+                        let te = ui.add(
+                            egui::TextEdit::singleline(&mut s.query)
+                                .hint_text("Search the desktop…")
+                                .font(FontId::proportional(18.0))
+                                .frame(false)
+                                .desired_width(f32::INFINITY),
+                        );
+                        if !te.has_focus() && !close && open.is_none() {
+                            te.request_focus();
+                        }
+                        if te.changed() {
+                            s.sel = 0;
+                        }
+                    });
+                    ui.add_space(6.0);
+                    if s.query.trim().is_empty() {
+                        ui.label(egui::RichText::new("Type part of a name. Enter opens, Ctrl+Enter opens its folder, Esc closes.").size(12.5).color(Color32::from_gray(150)));
+                    } else if results.is_empty() {
+                        ui.label(egui::RichText::new("Nothing on the desktop matches.").size(13.0).color(Color32::from_gray(160)));
+                    }
+                    for (i, it) in results.iter().enumerate() {
+                        let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 34.0), Sense::click());
+                        if resp.hovered() && ui.input(|inp| inp.pointer.delta() != Vec2::ZERO) {
+                            s.sel = i;
+                        }
+                        let p = ui.painter();
+                        if i == s.sel {
+                            p.rect_filled(rect, egui::CornerRadius::same(5), Color32::from_rgb(76, 194, 255).linear_multiply(0.28));
+                        }
+                        let ir = Rect::from_min_size(Pos2::new(rect.min.x + 6.0, rect.center().y - 11.0), Vec2::splat(22.0));
+                        match icons.get(&it.path, (22.0 * ppp).round() as u32) {
+                            Some(t) => {
+                                p.image(t, ir, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
+                            }
+                            None => {
+                                p.rect_filled(ir.shrink(3.0), egui::CornerRadius::same(3), Color32::from_gray(110));
+                            }
+                        }
+                        let home = homes.get(&it.path.to_lowercase()).cloned().unwrap_or_else(|| other.clone());
+                        p.text(Pos2::new(rect.min.x + 38.0, rect.center().y), egui::Align2::LEFT_CENTER, &it.name, FontId::proportional(14.5), Color32::from_gray(240));
+                        p.text(Pos2::new(rect.max.x - 8.0, rect.center().y), egui::Align2::RIGHT_CENTER, home, FontId::proportional(12.0), Color32::from_gray(150));
+                        if resp.clicked() {
+                            open = Some((it.path.clone(), ctrl));
+                        }
+                    }
+                    measured = ui.cursor().min.y - top + 22.0;
+                });
+            });
+            if close || open.is_some() {
+                hosts.close_panel(SEARCH_PANEL);
+            }
+            self.hosts = Some(hosts);
+        }
+        if let Some((path, folder)) = open {
+            if folder {
+                desktop::show_in_folder(&path);
+            } else {
+                desktop::open_item(&path);
+                self.actions.push(Act::Opened(path.clone()));
+            }
+            // Show it in its box too.
+            self.ui.selection.clear();
+            self.ui.selection.insert(path.to_lowercase());
+            self.ui.selected = Some(path);
+            self.redraw_all = true;
+            close = true;
+        }
+        let measured = measured.clamp(80.0, 540.0);
+        if (measured - s.height).abs() > 1.0 {
+            s.height = measured;
+            ctx.request_repaint();
+        }
+        if !close {
+            self.search = Some(s);
+        }
+    }
 }

@@ -28,6 +28,14 @@ There is no eframe, no GL and no main window to draw on any more.
   receives wake-ups (`WM_APP`) posted by other threads (desktop scan, icon loader, tray...) and
   Windows' shutdown notice (`WM_QUERYENDSESSION` / `WM_ENDSESSION`): on shutdown the app saves
   and puts the desktop icons back.
+- The hidden window also handles two more things, both without any hook:
+  - `WM_HOTKEY` for the quick-search shortcut (`RegisterHotKey`, choices in
+    `runloop::SEARCH_HOTKEYS`, `Settings.search_hotkey`): it only sets a flag, which `app.rs`
+    reads with `take_search_request`.
+  - `WM_DISPLAYCHANGE` (monitor switched off/on, resolution change): it sets a flag read with
+    `take_display_changed`. The app then re-reads the monitors, re-places the boxes and puts
+    every box back just above the desktop at once, after 1.5 s and after 4 s
+    (`DeskApp.restack_at`; log line "display change: re-stacking N boxes").
 - The loop sleeps in `MsgWaitForMultipleObjectsEx` until a message arrives or the next due
   pass. Idle = blocked in the wait = 0 % CPU.
 - A "root" `egui::Context` is kept only for scheduling: its repaint callback calls
@@ -43,7 +51,9 @@ There is no eframe, no GL and no main window to draw on any more.
 
 - **Menus and settings**: `host::Panel` windows (class `DeskBoxesPanel`): plain Win32 windows
   with an ordinary flip swap chain, drawn by the boxes' renderer and egui context
-  (`HostSystem::panel`, ids `MENU_PANEL` / `SETTINGS_PANEL` in `app.rs`). Same input mapping
+  (`HostSystem::panel`, ids `MENU_PANEL` / `SETTINGS_PANEL` / `SEARCH_PANEL` in `app.rs`). The quick
+  search box (`show_search`) is such a topmost panel near the top of the main monitor; ranking
+  is in `search.rs`. Same input mapping
   as boxes plus clipboard (Ctrl+C/X/V), close button (`WM_CLOSE` → egui close request) and a
   minimum size. The settings page scrolls.
 - **Boxes (`host.rs` + `d3d.rs`)**: one plain Win32 window per box
@@ -70,7 +80,10 @@ There is no eframe, no GL and no main window to draw on any more.
     (a) another box's edge with a gap between (side by side / stacked), (b) another box's same
     edge (lined up), (c) the monitor's usable area, with the gap inside its edges. Other boxes
     only count when near in the other direction. Alt = no snapping. Settings: `Settings.snap`
-    (default on) and `Settings.snap_gap` (default 8 pt, 0-40), both with serde defaults. Moving:
+    (default on) and `Settings.snap_gap` (default 8 pt, 0-40), both with serde defaults.
+    Optional grid: `Settings.snap_grid` (default off) and `grid_size` (default 20 pt); when no
+    box or screen edge is within reach, the moved box's top-left / resized edge lands on a
+    multiple of the grid (needs snapping on). Moving:
     `host::move_with_mouse(hwnd, grab, Option<Snap>)` snaps in pixels on its helper thread, and
     keeps the exact spot where the box was grabbed (egui's press origin). Resizing: the grip code
     in `app.rs` snaps the right/bottom edge in points. `app.rs` `snap_targets()` gathers the other
@@ -136,11 +149,12 @@ a second) or a wake-up posted by another thread.
 | `d3d.rs` | D3D11 egui renderer (hardware or WARP device, textures, swap chains, draw, `render_offscreen` for `--screenshot`) |
 | `comp_trial.rs` | stand-alone composition diagnostic (`--composition-trial`) |
 | `desktop.rs` | Win32 helpers: desktop scan, open item, hide/show icons, autostart Run key, single instance, monitors, work areas, z-order, rounding |
-| `fence_view.rs` | sorting/grid layout of items inside a box |
+| `fence_view.rs` | sorting/grid layout of items inside a box; the font list (`FONTS`, `family`, `set_loaded_fonts`): only installed fonts are offered, only fonts in use are loaded (`setup_style(ctx, extra_fonts)` in `app.rs`), each falling back to the default fonts |
 | `ghost.rs` | only the flying icon picture while dragging icons between boxes (`begin_icon_drag` returns a `DragImage`; `DragImage::destroy`) and `primary_button_down()` |
 | `icons.rs` | icon cache (`get(path, px)`, `keep_only_sizes`); loader watchdog: a load over 5 s is marked failed (placeholder) and a fresh loader thread takes the other pending icons (at most one restart per 5 s) |
-| `snap.rs` | box snapping arithmetic (pure, 6 unit tests: `cargo test snap`) |
-| `model.rs` | saved data types: `Layout`, `Fence`, `Tab`, `Settings`, `CategoryRule`, widgets config |
+| `snap.rs` | box snapping arithmetic (pure, 7 unit tests: `cargo test snap`) |
+| `search.rs` | quick-search ranking (pure, 4 unit tests): name starts with text, then a word starts with it, then contains it (or file type), then letters in order; 12 results |
+| `model.rs` | saved data types: `Layout`, `Fence`, `Tab`, `Settings`, `CategoryRule`, widgets config. Look fields on `Fence` (all with defaults; `sanitize()` repairs odd values): `border_width`, `text_color`, `text_shadow`, `font`, `title_size`, `caption_size`, `show_captions`, `icon_spacing`; `Fence::copy_look_from` backs "Apply this look to all boxes" (`Act::ApplyLookToAll`) |
 | `storage.rs` | load/save/backups/log |
 | `widgets.rs` | widget registry (clock, note, sketch) – add new widgets here |
 

@@ -10,6 +10,56 @@ pub const TITLE_STRIP: f32 = 26.0; // width of the vertical title strip / height
 pub const TAB_STRIP: f32 = 26.0;
 pub const ROLLED_HEIGHT: f32 = 30.0;
 
+/// Fonts a box can use: the name shown in the menu and its file in the Windows Fonts folder.
+/// Only the fonts boxes actually use are loaded (see `setup_style` in app.rs).
+pub const FONTS: &[(&str, &str)] = &[
+    ("Segoe UI", "segoeui.ttf"),
+    ("Segoe UI Light", "segoeuil.ttf"),
+    ("Segoe UI Semibold", "seguisb.ttf"),
+    ("Bahnschrift", "bahnschrift.ttf"),
+    ("Calibri", "calibri.ttf"),
+    ("Arial", "arial.ttf"),
+    ("Verdana", "verdana.ttf"),
+    ("Tahoma", "tahoma.ttf"),
+    ("Trebuchet MS", "trebuc.ttf"),
+    ("Georgia", "georgia.ttf"),
+    ("Consolas", "consola.ttf"),
+    ("Segoe Print", "segoepr.ttf"),
+];
+
+/// Fonts already loaded into the drawing context. A box asking for one that isn't loaded yet
+/// draws in the default font: egui must never be asked for a font it doesn't have.
+static LOADED_FONTS: std::sync::RwLock<Vec<String>> = std::sync::RwLock::new(Vec::new());
+
+pub fn set_loaded_fonts(names: &[String]) {
+    if let Ok(mut l) = LOADED_FONTS.write() {
+        *l = names.to_vec();
+    }
+}
+
+/// The font family a box's text uses.
+pub fn family(fence: &Fence) -> egui::FontFamily {
+    if !fence.font.is_empty() && LOADED_FONTS.read().map(|l| l.iter().any(|n| *n == fence.font)).unwrap_or(false) {
+        egui::FontFamily::Name(fence.font.as_str().into())
+    } else {
+        egui::FontFamily::Proportional
+    }
+}
+
+/// How a box draws its icon captions.
+pub struct TextStyle {
+    pub family: egui::FontFamily,
+    pub color: Color32,
+    pub shadow: bool,
+    pub captions: bool,
+    pub size: f32,
+}
+
+pub fn text_style(fence: &Fence) -> TextStyle {
+    let [r, g, b] = fence.text_color;
+    TextStyle { family: family(fence), color: Color32::from_rgb(r, g, b), shadow: fence.text_shadow, captions: fence.show_captions, size: fence.caption_size }
+}
+
 /// Everything about the desktop a box needs to draw itself.
 pub struct DeskState<'a> {
     pub items: &'a HashMap<String, DeskItem>,
@@ -76,10 +126,12 @@ pub fn visible_tabs(fence: &Fence, desk: &DeskState) -> Vec<(String, Vec<DeskIte
 }
 pub fn cell_size(fence: &Fence, spacing: (f32, f32)) -> Vec2 {
     let icon = fence.icon_size as f32;
-    // Horizontal pitch = Windows desktop icon spacing (75 px by default); vertical pitch fits
-    // the icon plus two lines of caption (≈100 px at 48 px icons, measured on the original's
-    // layout picture).
-    Vec2::new(spacing.0.max(icon + 20.0), icon + 52.0)
+    // Horizontal pitch = the box's own spacing, or Windows desktop icon spacing (75 px by
+    // default); vertical pitch fits the icon plus two lines of caption (≈100 px at 48 px icons
+    // and 12 pt text, measured on the original's layout picture), or just the icon without captions.
+    let x = if fence.icon_spacing > 0.0 { fence.icon_spacing.max(icon + 8.0) } else { spacing.0.max(icon + 20.0) };
+    let y = if fence.show_captions { icon + 28.0 + 2.0 * fence.caption_size } else { icon + 16.0 };
+    Vec2::new(x, y)
 }
 
 /// Areas of a box: where title, tabs and content go.
@@ -127,21 +179,31 @@ pub fn areas(fence: &Fence, rect: Rect, tab_count: usize, scale: f32) -> FenceAr
 pub fn paint_background(painter: &egui::Painter, fence: &Fence, rect: Rect, scale: f32) {
     let [r, g, b] = fence.color;
     let fill = Color32::from_rgba_unmultiplied(r, g, b, fence.alpha);
-    let [br, bg, bb, ba] = fence.border_color;
     let radius = CornerRadius::same((fence.corner * scale).round().clamp(0.0, 40.0) as u8);
-    painter.rect(
-        rect.shrink(0.5),
-        radius,
-        fill,
-        Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(br, bg, bb, ba)),
-        egui::StrokeKind::Inside,
-    );
+    painter.rect(rect.shrink(0.5), radius, fill, border_stroke(fence, scale), egui::StrokeKind::Inside);
+}
+
+/// The box's border (its colour and thickness; none at thickness 0).
+pub fn border_stroke(fence: &Fence, scale: f32) -> Stroke {
+    let [br, bg, bb, ba] = fence.border_color;
+    if fence.border_width <= 0.0 {
+        Stroke::NONE
+    } else {
+        Stroke::new(fence.border_width * scale, Color32::from_rgba_unmultiplied(br, bg, bb, ba))
+    }
+}
+
+/// The box's text colour, dimmed (`f` < 1) for less important text.
+fn text_color(fence: &Fence, f: f32) -> Color32 {
+    let [r, g, b] = fence.text_color;
+    let m = |v: u8| (v as f32 * f).round().clamp(0.0, 255.0) as u8;
+    Color32::from_rgb(m(r), m(g), m(b))
 }
 
 /// Text rotated a quarter turn clockwise, centred in `strip`, read top to bottom
 /// (like the original's vertical titles and tabs).
-pub fn vertical_text(painter: &egui::Painter, strip: Rect, text: &str, size: f32, color: Color32) {
-    let galley = painter.layout_no_wrap(text.to_string(), FontId::proportional(size), color);
+pub fn vertical_text(painter: &egui::Painter, strip: Rect, text: &str, font: FontId, color: Color32) {
+    let galley = painter.layout_no_wrap(text.to_string(), font, color);
     let w = galley.size().x.min(strip.height() - 6.0);
     let h = galley.size().y;
     let pos = Pos2::new(strip.center().x + h / 2.0, strip.center().y - w / 2.0);
@@ -150,18 +212,18 @@ pub fn vertical_text(painter: &egui::Painter, strip: Rect, text: &str, size: f32
 }
 
 pub fn paint_title(painter: &egui::Painter, fence: &Fence, title: Rect, scale: f32, hovered: bool) {
-    let color = if hovered { Color32::WHITE } else { Color32::from_gray(215) };
-    let size = 13.0 * scale;
+    let color = if hovered { text_color(fence, 1.0) } else { text_color(fence, 0.85) };
+    let font = FontId::new(fence.title_size * scale, family(fence));
     if fence.expanded && fence.title_pos == TitlePos::Left {
-        vertical_text(painter, title, &fence.name, size, color);
+        vertical_text(painter, title, &fence.name, font, color);
     } else {
-        let galley = painter.layout_no_wrap(fence.name.clone(), FontId::proportional(size), color);
+        let galley = painter.layout_no_wrap(fence.name.clone(), font, color);
         let pos = Pos2::new(title.center().x - galley.size().x / 2.0, title.center().y - galley.size().y / 2.0);
         painter.with_clip_rect(title).galley(pos, galley, color);
     }
     if fence.locked {
         let p = Pos2::new(title.max.x - 9.0 * scale, title.min.y + 9.0 * scale);
-        painter.circle_stroke(p, 3.0 * scale, Stroke::new(1.0_f32, Color32::from_gray(160)));
+        painter.circle_stroke(p, 3.0 * scale, Stroke::new(1.0_f32, text_color(fence, 0.65)));
     }
 }
 
@@ -169,6 +231,7 @@ pub fn paint_title(painter: &egui::Painter, fence: &Fence, title: Rect, scale: f
 pub fn paint_tabs(painter: &egui::Painter, fence: &Fence, strip: Rect, names: &[String], sel: usize, scale: f32) -> Vec<Rect> {
     let n = names.len().max(1) as f32;
     let mut rects = Vec::new();
+    let font = FontId::new(fence.caption_size * scale, family(fence));
     for (i, name) in names.iter().enumerate() {
         let r = match fence.tab_pos {
             TabPos::Right => {
@@ -181,25 +244,26 @@ pub fn paint_tabs(painter: &egui::Painter, fence: &Fence, strip: Rect, names: &[
             }
         };
         let active = i == sel;
-        let color = if active { Color32::WHITE } else { Color32::from_gray(170) };
+        let color = if active { text_color(fence, 1.0) } else { text_color(fence, 0.67) };
+        let mark = text_color(fence, 0.9);
         match fence.tab_pos {
             TabPos::Right => {
-                vertical_text(painter, r, name, 12.0 * scale, color);
+                vertical_text(painter, r, name, font.clone(), color);
                 if active {
                     painter.line_segment(
                         [Pos2::new(r.min.x + 1.0, r.min.y + 4.0), Pos2::new(r.min.x + 1.0, r.max.y - 4.0)],
-                        Stroke::new(1.5 * scale, Color32::from_gray(230)),
+                        Stroke::new(1.5 * scale, mark),
                     );
                 }
             }
             TabPos::Top => {
-                let g = painter.layout_no_wrap(name.clone(), FontId::proportional(12.0 * scale), color);
+                let g = painter.layout_no_wrap(name.clone(), font.clone(), color);
                 let pos = Pos2::new(r.center().x - g.size().x / 2.0, r.center().y - g.size().y / 2.0);
                 painter.with_clip_rect(r).galley(pos, g, color);
                 if active {
                     painter.line_segment(
                         [Pos2::new(r.min.x + 6.0, r.max.y - 1.0), Pos2::new(r.max.x - 6.0, r.max.y - 1.0)],
-                        Stroke::new(1.5 * scale, Color32::from_gray(230)),
+                        Stroke::new(1.5 * scale, mark),
                     );
                 }
             }
@@ -209,8 +273,8 @@ pub fn paint_tabs(painter: &egui::Painter, fence: &Fence, strip: Rect, names: &[
     rects
 }
 
-pub fn caption_galley(painter: &egui::Painter, text: &str, width: f32, size: f32) -> std::sync::Arc<egui::Galley> {
-    let mut job = LayoutJob::simple(text.to_string(), FontId::proportional(size), Color32::WHITE, width);
+pub fn caption_galley(painter: &egui::Painter, text: &str, width: f32, font: FontId) -> std::sync::Arc<egui::Galley> {
+    let mut job = LayoutJob::simple(text.to_string(), font, Color32::WHITE, width);
     job.wrap.max_rows = 2;
     job.wrap.break_anywhere = true;
     job.halign = Align::Center;
@@ -218,7 +282,8 @@ pub fn caption_galley(painter: &egui::Painter, text: &str, width: f32, size: f32
 }
 
 /// Paints one icon cell (icon + caption). Returns nothing; interaction is done by the caller.
-pub fn paint_item(painter: &egui::Painter, icons: &mut IconCache, item: &DeskItem, cell: Rect, icon: f32, scale: f32, highlight: u8) {
+#[allow(clippy::too_many_arguments)]
+pub fn paint_item(painter: &egui::Painter, icons: &mut IconCache, item: &DeskItem, cell: Rect, icon: f32, scale: f32, highlight: u8, style: &TextStyle) {
     if highlight > 0 {
         painter.rect_filled(cell.shrink(2.0 * scale), CornerRadius::same((4.0 * scale) as u8), Color32::from_white_alpha(highlight));
     }
@@ -235,12 +300,17 @@ pub fn paint_item(painter: &egui::Painter, icons: &mut IconCache, item: &DeskIte
             painter.rect_filled(icon_rect.shrink(icon * 0.12), CornerRadius::same((3.0 * scale) as u8), c);
         }
     }
-    let size = 12.0 * scale;
-    let galley = caption_galley(painter, &item.name, cell.width() - 4.0 * scale, size);
+    if !style.captions {
+        return;
+    }
+    let font = FontId::new(style.size * scale, style.family.clone());
+    let galley = caption_galley(painter, &item.name, cell.width() - 4.0 * scale, font);
     let pos = Pos2::new(cell.center().x, icon_rect.max.y + 4.0 * scale);
     let clip = painter.with_clip_rect(cell);
-    clip.galley_with_override_text_color(pos + Vec2::splat(1.0 * scale.max(0.6)), galley.clone(), Color32::from_black_alpha(220));
-    clip.galley(pos, galley, Color32::WHITE);
+    if style.shadow {
+        clip.galley_with_override_text_color(pos + Vec2::splat(1.0 * scale.max(0.6)), galley.clone(), Color32::from_black_alpha(220));
+    }
+    clip.galley(pos, galley, style.color);
 }
 
 /// Non-interactive drawing of a whole box at `rect` (used by the layout preview).
@@ -266,6 +336,7 @@ pub fn paint_static(painter: &egui::Painter, icons: &mut IconCache, fence: &Fenc
         paint_tabs(painter, fence, strip, &names, sel, scale);
     }
     let cell = cell_size(fence, desk.spacing) * scale;
+    let style = text_style(fence);
     let cols = ((a.content.width() / cell.x).floor() as usize).max(1);
     let clip = painter.with_clip_rect(a.content);
     if let Some((_, items)) = tabs.get(sel) {
@@ -275,7 +346,7 @@ pub fn paint_static(painter: &egui::Painter, icons: &mut IconCache, fence: &Fenc
             if min.y > a.content.max.y {
                 break;
             }
-            paint_item(&clip, icons, it, Rect::from_min_size(min, cell), fence.icon_size as f32 * scale, scale, 0);
+            paint_item(&clip, icons, it, Rect::from_min_size(min, cell), fence.icon_size as f32 * scale, scale, 0, &style);
         }
     }
 }
