@@ -112,6 +112,19 @@ egui font atlases, and the icon textures.
   desktop, "s" jumped to the next s-item and "s" again to the one after; a text box in another
   window received "abc1" normally; typing "xyz" right after switching from the desktop to another
   window arrived intact 3 times out of 3.
+- New (2026-11-22, evening): internet allowed (CLAUDE.md rule 3). Widgets "Laptop status"
+  (GetSystemPowerStatus, WLAN API, Bluetooth API; helper thread every 5 s while shown) and "Now
+  playing" (Windows media session API: title, artist, cover, play/pause/next/previous, progress;
+  helper thread every 2 s while shown; blank when nothing plays). Quick search also lists Start
+  menu programs (`src/apps.rs`, setting `search_apps`). Undo for deleted boxes (toast panel
+  UNDO_PANEL, tray, Settings > Boxes) and layout export/import (Settings > Layout). Optional fading
+  (`HostSystem::set_box_opacity`, composition animation on the box's container; settings
+  fade_idle/opacity/delay). Virtual desktops (`src/vdesk.rs`: registry change notification;
+  IVirtualDesktopManager moves our windows to the desktop shown; setting `link_vdesks` = page per
+  desktop) — checked live with a temporary second desktop. Box title Off / Left / Top / Bottom.
+  Border drawn on the window edge (glass no longer shows outside it). Translations (`src/i18n.rs`,
+  setting `language`, default automatic from GetUserDefaultUILanguage). GitHub Actions release
+  workflow + portable mode.
 - New (2026-11-22): creating boxes anywhere. (1) Draw: `src/drawbox.rs`, a layered GDI window over
   the whole desktop (Ctrl+Alt+B = hotkey id 5, tray, box menu > New > Draw a new box…); the result
   opens a "Create" menu (MenuTarget::Create) and the new box fills the rectangle. (2) Box menu

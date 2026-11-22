@@ -101,6 +101,9 @@ for daily use.)
 
 ## Where to start for common tasks
 
+- Every visible text goes through `crate::i18n::t("English")` / `tf("… {} …", &[&x])` with
+  entries in the ES and CA tables of `src/i18n.rs` (a test checks both tables match). Dates:
+  `i18n::long_date`, `month_year`, `weekday_short`…
 - New widget → `src/widgets.rs` (`REGISTRY`). Widget options go in `DeskWidget::settings` (shown in the
   Personalize window's "Widget settings" tab, opened from the box menu): **no buttons or edit
   views on the widgets themselves**, and no right-click menus inside them (the box menu takes the
@@ -117,6 +120,8 @@ for daily use.)
 - Icon selection/drag/drop → `app.rs` `fence_window`, `ghost::begin_icon_drag`.
 - Monitor handling → `app.rs` (bind/relayout), `desktop::monitors`.
 - Snapping (incl. optional grid) → `src/snap.rs` (+ `snap_targets` in `app.rs`).
+- Releases: `.github/workflows/release.yml` (tag vX.Y.Z = GitHub Release with installer and
+  portable zip; built with MSVC on GitHub, so this PC's GNU workarounds don't apply there).
 - Installer / uninstaller → `src/install.rs`; build the setup file with `scripts\make-setup.ps1`.
 - Pages of boxes → `Fence.page`, `Layout.current_page`, page block in `update_inner` (`app.rs`).
 - Next suggested work: see "Improvement ideas" in `docs/STATUS.md`.

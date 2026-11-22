@@ -67,12 +67,21 @@ an original Rust program; its behaviour was modelled on an existing desktop orga
   options"; Settings > Desktop to turn off). These are plain registry menu entries that start the
   program: nothing runs inside Explorer.
 - Settings > Layout: all monitors together or one at a time (dots), labelled by role or display.
+- Undo: a deleted box can be brought back ("Undo" note for 8 s, tray, Settings > Boxes). Settings >
+  Layout: export / import the whole layout as a file.
+- Optional: boxes fade while the mouse is away (level and delay in Settings > Desktop).
+- Optional: each Windows virtual desktop shows its own page of boxes; boxes always come along to
+  the desktop shown.
+- Box title off, on the left, at the top or at the bottom (Personalize).
+- Quick search also finds Start menu programs (optional).
+- English, Spanish and Catalan; "Automatic" follows Windows' display language (Settings).
 - Keyboard shortcut per box (box menu > Keyboard shortcut: Ctrl+Alt+F2..F10) brings the box into
   view (switching page or showing hidden boxes), pressed again rolls it up or down.
 - New, renamed and removed desktop files show up within about a second (Windows change
   notifications, no polling).
 - Widgets: clock, sticky note, drawing pad, picture frame (PNG/JPEG, fit or fill), system monitor
-  (CPU, RAM, drives), calendar, to-do
+  (CPU, RAM, drives), laptop status (battery, Wi-Fi, Bluetooth), now playing (Spotify, Apple Music,
+  browsers… with cover, controls and progress), calendar, to-do
   list, search box, agenda (online calendars: iCal / .ics links from Google, Outlook…; repeating
   events supported). Three views (month, week, agenda list) switched with the dots at the
   bottom; a click on an event or a day shows its details (time, calendar, place, description). Widget options: box menu > "Widget settings…". Each redraws only when needed (clock: each minute, monitor: every 2 s,
@@ -100,6 +109,11 @@ of the program whose file name contains "setup" acts as the installer: it asks, 
 entry in Settings > Apps > Installed apps, turns on start with Windows and starts it. Running it
 again updates. Uninstalling (from Installed apps, i.e. `DesktopShepherd.exe --uninstall`) stops
 the program, removes everything and asks whether to keep the saved boxes (default: keep).
+
+Releases: `.github/workflows/release.yml` builds on GitHub (MSVC). Push a tag `vX.Y.Z` to publish a
+Release with `DesktopShepherd-Setup-X.Y.Z.exe` and `DesktopShepherd-Portable-X.Y.Z.zip`; "Run
+workflow" on the Actions page builds the same files as artifacts only. Portable: a `portable.txt`
+next to the exe keeps all settings in a `data` folder beside it.
 
 Stop it safely (worker first, then supervisor, so icons are restored):
 
