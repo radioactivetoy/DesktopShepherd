@@ -165,3 +165,8 @@ mod tests {
         assert!(!newer_than("0.1", "0.1.0"));
     }
 }
+
+/// A check has finished at least once in this run.
+pub fn checked() -> bool {
+    STATE.lock().ok().and_then(|g| g.as_ref().map(|s| s.checked_at.is_some())).unwrap_or(false)
+}

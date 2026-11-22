@@ -4,6 +4,10 @@
 mod agenda;
 mod apps;
 mod i18n;
+mod net;
+mod timer;
+mod update;
+mod weather;
 mod app;
 mod comp_trial;
 #[cfg(windows)]

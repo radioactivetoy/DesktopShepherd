@@ -226,6 +226,8 @@ pub struct DeskApp {
     box_hotkeys_applied: Option<Vec<u8>>,
     /// A request left from before the start (desktop menu while not running) was looked for.
     pending_checked: bool,
+    /// When this run started (the first update check waits a little).
+    started_at: Instant,
     /// The virtual desktop last seen (index).
     vdesk_seen: Option<usize>,
     /// The desktop menu entries were written for this run.
@@ -436,6 +438,7 @@ impl DeskApp {
             picked_layout: Arc::new(Mutex::new(None)),
             box_hotkeys_applied: None,
             pending_checked: false,
+            started_at: Instant::now(),
             vdesk_seen: None,
             desktop_menu_applied: None,
             ta_buf: String::new(),
@@ -909,6 +912,14 @@ impl DeskApp {
             let on = self.layout.settings.desktop_menu;
             self.desktop_menu_applied = Some(on);
             let _ = std::thread::Builder::new().name("desktop-menu".into()).spawn(move || desktop::set_desktop_menu(on));
+        }
+        // New versions on GitHub (Settings > Updates): at start (after 20 s) and once a day.
+        if self.persist && self.layout.settings.check_updates {
+            if self.started_at.elapsed() >= Duration::from_secs(20) {
+                crate::update::check(Duration::from_secs(24 * 3600), false);
+            } else {
+                crate::runloop::wake_after(Duration::from_secs(21) - self.started_at.elapsed().min(Duration::from_secs(20)));
+            }
         }
         crate::apps::set_enabled(self.layout.settings.search_apps);
         if let Some(p) = self.picked_layout.lock().ok().and_then(|mut p| p.take()) {
@@ -1435,9 +1446,13 @@ impl DeskApp {
                             self.ui.hwnds.insert(id, hw);
                         }
                     }
-                    let want = fence.corner.round() as i32;
-                    if self.ui.rounded.get(&id) != Some(&want) && desktop::round_window(hw, 0.0) {
-                        self.ui.rounded.insert(id, want);
+                    // (the shadow setting is part of what was applied)
+                    let want = fence.corner.round() as i32 * 2 + fence.shadow as i32;
+                    if self.ui.rounded.get(&id) != Some(&want) {
+                        let ok = if fence.shadow { desktop::set_shadow(hw, true) } else { desktop::set_shadow(hw, false) && desktop::round_window(hw, 0.0) };
+                        if ok {
+                            self.ui.rounded.insert(id, want);
+                        }
                     }
                 }
                 if drew {
@@ -1484,6 +1499,13 @@ impl DeskApp {
                 self.show_rename(ctx);
             } else if let Some(h) = self.hosts.as_mut() {
                 h.close_panel(RENAME_PANEL);
+            }
+            // "Version x is available · Update · Later", once per version.
+            let offer = crate::update::status().0.filter(|r| r.version != self.layout.settings.skipped_version && self.layout.settings.check_updates);
+            if let Some(rel) = offer {
+                self.show_update_toast(ctx, rel);
+            } else if let Some(h) = self.hosts.as_mut() {
+                h.close_panel(UPDATE_PANEL);
             }
             // "Box deleted · Undo" for 8 seconds after a delete.
             if self.deleted.last().map(|(_, t)| t.elapsed() < Duration::from_secs(8)).unwrap_or(false) {
@@ -2328,6 +2350,10 @@ fn look_left(ui: &mut egui::Ui, fence: &mut Fence) -> bool {
                 dirty |= slider_row(ui, t("Thickness"), bw, &mut |ui| ui.add(egui::Slider::new(&mut fence.border_width, 0.0..=6.0).step_by(0.5).show_value(false)).changed());
                 let [r, g, b, a] = fence.border_color;
                 let mut border = Color32::from_rgba_unmultiplied(r, g, b, a);
+                ui.horizontal(|ui| {
+                    ui.add_space(14.0);
+                    dirty |= ui.checkbox(&mut fence.shadow, t("Soft shadow (drawn by Windows)")).changed();
+                });
                 if color_row(ui, "border-colour", t("Border colour…"), &mut border, true) {
                     fence.border_color = border.to_srgba_unmultiplied();
                     dirty = true;
@@ -3373,6 +3399,35 @@ impl DeskApp {
             dirty = true;
         }
         ui.label(egui::RichText::new(t("New, renamed and removed desktop files show up as soon as Windows reports them.")).color(Color32::from_gray(150)).size(12.0));
+        ui.add_space(10.0);
+        ui.heading(t("Updates"));
+        {
+            let (newer, err, busy, note) = crate::update::status();
+            ui.horizontal(|ui| {
+                ui.label(tf("This is version {}.", &[&env!("CARGO_PKG_VERSION")]));
+                if busy {
+                    ui.label(egui::RichText::new(t("Checking…")).color(Color32::from_gray(160)));
+                } else if ui.button(t("Check now")).clicked() {
+                    crate::update::check(Duration::ZERO, true);
+                }
+            });
+            dirty |= ui.checkbox(&mut s.check_updates, t("Look for new versions automatically (once a day)")).changed();
+            if let Some(rel) = newer {
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new(tf("Version {} is available.", &[&rel.version])).strong().color(Color32::from_rgb(120, 210, 130)));
+                    if ui.button(t("Update now")).clicked() {
+                        crate::update::install(rel.clone());
+                    }
+                });
+            } else if let Some(e) = err {
+                ui.label(egui::RichText::new(e).size(12.0).color(Color32::from_rgb(255, 190, 130)));
+            } else if !busy && crate::update::checked() {
+                ui.label(egui::RichText::new(t("You have the newest version.")).size(12.0).color(Color32::from_gray(160)));
+            }
+            if let Some(n) = note {
+                ui.label(egui::RichText::new(n).size(12.0).color(Color32::from_gray(190)));
+            }
+        }
         ui.add_space(10.0);
         ui.heading(t("Saved layouts"));
         ui.label(egui::RichText::new(t("A copy of your layout is kept each time DesktopShepherd starts (the last 10).")).color(Color32::from_gray(150)).size(12.0));
@@ -4547,5 +4602,49 @@ impl DeskApp {
         // Close it on time.
         ctx.request_repaint_after(left + Duration::from_millis(50));
         crate::runloop::wake_after(left + Duration::from_millis(50));
+    }
+}
+
+#[cfg(windows)]
+const UPDATE_PANEL: u64 = u64::MAX - 7;
+
+impl DeskApp {
+    /// A small note at the bottom right of the main monitor: a new version is available.
+    #[cfg(windows)]
+    fn show_update_toast(&mut self, _ctx: &egui::Context, rel: crate::update::Release) {
+        let scale = desktop::system_scale();
+        let work = desktop::work_area_at(Pos2::new(10.0, 10.0), scale);
+        let (w, h) = (420.0_f32, 56.0_f32);
+        let (x, y) = (work.max.x - w - 24.0, work.max.y - h - 24.0);
+        let rect_px = [(x * scale) as i32, (y * scale) as i32, (w * scale) as i32, (h * scale) as i32];
+        let force = self.panel_force;
+        let (mut update, mut later) = (false, false);
+        if let Some(mut hosts) = self.hosts.take() {
+            hosts.panel(UPDATE_PANEL, crate::host::PanelKind::Menu, "DesktopShepherd update", rect_px, true, force, |pctx| {
+                let frame = egui::Frame::new().fill(Color32::from_rgb(44, 44, 46)).stroke(egui::Stroke::new(1.0_f32, Color32::from_white_alpha(30))).inner_margin(egui::Margin::symmetric(14, 10));
+                egui::CentralPanel::default().frame(frame).show(pctx, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new(tf("DesktopShepherd {} is available", &[&rel.version])).size(14.0).color(Color32::WHITE));
+                        ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                            if ui.button(t("Later")).clicked() {
+                                later = true;
+                            }
+                            if ui.button(egui::RichText::new(t("Update")).strong()).clicked() {
+                                update = true;
+                            }
+                        });
+                    });
+                });
+            });
+            self.hosts = Some(hosts);
+        }
+        if update || later {
+            // Either way the note goes; "Update" starts the download and the setup.
+            self.layout.settings.skipped_version = rel.version.clone();
+            self.mark_dirty();
+            if update {
+                crate::update::install(rel);
+            }
+        }
     }
 }

@@ -1355,3 +1355,36 @@ static RESTACK_ASKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicB
 pub fn take_restack_request() -> bool {
     RESTACK_ASKED.swap(false, std::sync::atomic::Ordering::SeqCst)
 }
+
+/// Windows' own soft shadow around a box (it comes with Windows 11's rounded corners), or none.
+/// Drawn by Windows itself: costs nothing.
+pub fn set_shadow(handle: isize, on: bool) -> bool {
+    #[cfg(windows)]
+    unsafe {
+        use windows::Win32::Foundation::HWND;
+        use windows::Win32::Graphics::Dwm::{
+            DwmExtendFrameIntoClientArea, DwmSetWindowAttribute, DWMNCRP_DISABLED, DWMNCRP_ENABLED, DWMWA_BORDER_COLOR, DWMWA_NCRENDERING_POLICY,
+            DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND, DWMWCP_ROUND,
+        };
+        use windows::Win32::UI::Controls::MARGINS;
+        let hwnd = HWND(handle as *mut _);
+        if hwnd.0.is_null() {
+            return false;
+        }
+        let policy = if on { DWMNCRP_ENABLED } else { DWMNCRP_DISABLED };
+        let _ = DwmSetWindowAttribute(hwnd, DWMWA_NCRENDERING_POLICY, &policy as *const _ as *const _, std::mem::size_of_val(&policy) as u32);
+        let pref = if on { DWMWCP_ROUND } else { DWMWCP_DONOTROUND };
+        let _ = DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &pref as *const _ as *const _, std::mem::size_of_val(&pref) as u32);
+        // A frame of 1 pixel lets Windows draw its shadow around a window without a border.
+        let m = if on { MARGINS { cxLeftWidth: 1, cxRightWidth: 1, cyTopHeight: 1, cyBottomHeight: 1 } } else { MARGINS::default() };
+        let _ = DwmExtendFrameIntoClientArea(hwnd, &m);
+        let none: u32 = 0xFFFF_FFFE; // DWMWA_COLOR_NONE: no Windows border line (the box draws its own)
+        let _ = DwmSetWindowAttribute(hwnd, DWMWA_BORDER_COLOR, &none as *const _ as *const _, 4);
+        true
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (handle, on);
+        false
+    }
+}

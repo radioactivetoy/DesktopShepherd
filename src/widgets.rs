@@ -46,6 +46,8 @@ pub const REGISTRY: &[WidgetKind] = &[
     WidgetKind { id: "sysmon", label: "System monitor", icon: '\u{E9D9}', default_size: [310.0, 270.0], make: || Box::new(SysMon) },
     WidgetKind { id: "laptop", label: "Laptop status", icon: '\u{E83F}', default_size: [300.0, 150.0], make: || Box::new(Laptop) },
     WidgetKind { id: "media", label: "Now playing", icon: '\u{E8D6}', default_size: [360.0, 140.0], make: || Box::new(Media) },
+    WidgetKind { id: "weather", label: "Weather", icon: '\u{E706}', default_size: [330.0, 160.0], make: || Box::new(crate::weather::Weather) },
+    WidgetKind { id: "timer", label: "Timer", icon: '\u{E916}', default_size: [260.0, 190.0], make: || Box::new(crate::timer::Timer) },
     WidgetKind { id: "calendar", label: "Calendar", icon: '\u{E787}', default_size: [290.0, 270.0], make: || Box::new(Calendar) },
     WidgetKind { id: "todo", label: "To-do list", icon: '\u{E73A}', default_size: [290.0, 280.0], make: || Box::new(Todo) },
     WidgetKind { id: "agenda", label: "Agenda (online calendars)", icon: '\u{E8BF}', default_size: [320.0, 300.0], make: || Box::new(Agenda) },

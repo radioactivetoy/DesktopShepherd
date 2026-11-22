@@ -109,6 +109,8 @@ pub struct Fence {
     /// Keyboard shortcut of this box: 0 = none, 1..9 = Ctrl+Alt+F2..F10 (brings it into view, then
     /// rolls it up or down).
     pub hotkey: u8,
+    /// Windows' soft shadow around the box.
+    pub shadow: bool,
 }
 
 impl Default for Fence {
@@ -151,6 +153,7 @@ impl Default for Fence {
             page: 0,
             overflow: 0,
             hotkey: 0,
+            shadow: false,
         }
     }
 }
@@ -176,6 +179,7 @@ impl Fence {
         self.title_pos = o.title_pos;
         self.tab_pos = o.tab_pos;
         self.overflow = o.overflow;
+        self.shadow = o.shadow;
     }
 
     pub fn remove_item(&mut self, path: &str) {
@@ -236,6 +240,10 @@ pub struct Settings {
     pub link_vdesks: bool,
     /// Language: 0 = automatic (Windows), 1 = English, 2 = Spanish, 3 = Catalan.
     pub language: u8,
+    /// Look for new versions on GitHub (at start and once a day).
+    pub check_updates: bool,
+    /// A version the person chose to skip ("Later" on the update note).
+    pub skipped_version: String,
 }
 
 impl Default for Settings {
@@ -265,6 +273,8 @@ impl Default for Settings {
             fade_delay: 3,
             link_vdesks: false,
             language: 0,
+            check_updates: true,
+            skipped_version: String::new(),
         }
     }
 }

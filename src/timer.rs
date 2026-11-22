@@ -16,7 +16,8 @@ fn now_ms() -> i64 {
 fn chime() {
     #[cfg(windows)]
     unsafe {
-        use windows::Win32::UI::WindowsAndMessaging::{MessageBeep, MB_ICONASTERISK};
+        use windows::Win32::System::Diagnostics::Debug::MessageBeep;
+        use windows::Win32::UI::WindowsAndMessaging::MB_ICONASTERISK;
         let _ = MessageBeep(MB_ICONASTERISK);
     }
 }
