@@ -801,7 +801,11 @@ fn start_picture_load(path: String) {
         })
         .unwrap_or_else(|_| Err("can't read that picture".to_string()));
         if let Ok(mut g) = PICTURES.lock() {
-            g.get_or_insert_with(Default::default).insert(p, result.map(Some));
+            // Only if still wanted (the picture wasn't changed meanwhile): else it is dropped here.
+            let map = g.get_or_insert_with(Default::default);
+            if matches!(map.get(&p), Some(Ok(None))) {
+                map.insert(p, result.map(Some));
+            }
         }
         #[cfg(windows)]
         crate::runloop::wake_after(Duration::ZERO);
@@ -827,9 +831,10 @@ impl DeskWidget for Picture {
             return out;
         }
         // The texture, once made, lives in this box's memory; the decoded copy is dropped.
-        let tid = egui::Id::new(("picture-tex", &path));
-        let tex: Option<egui::TextureHandle> = ui.ctx().data(|d| d.get_temp(tid));
-        let tex = match tex {
+        // One texture per picture frame: replaced (the old one freed) when the picture changes.
+        let tid = ui.make_persistent_id("picture-tex");
+        let held: Option<(String, egui::TextureHandle)> = ui.ctx().data(|d| d.get_temp(tid));
+        let tex = match held.filter(|(p, _)| *p == path).map(|(_, t)| t) {
             Some(t) => Some(t),
             None => {
                 let mut error = None;
@@ -844,7 +849,7 @@ impl DeskWidget for Picture {
                         Some(Ok(slot)) => {
                             if let Some(img) = slot.take() {
                                 let t = ui.ctx().load_texture(format!("picture:{path}"), img, egui::TextureOptions::LINEAR);
-                                ui.ctx().data_mut(|d| d.insert_temp(tid, t.clone()));
+                                ui.ctx().data_mut(|d| d.insert_temp(tid, (path.clone(), t.clone())));
                                 map.remove(&path);
                                 made = Some(t);
                             }

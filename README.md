@@ -60,7 +60,12 @@ an original Rust program; its behaviour was modelled on an existing desktop orga
 - When icons don't fit a box: scroll (default) or "pages with dots" (box menu > View); the wheel
   or the dots flip pages.
 - Remember box positions per monitor setup (laptop alone / docked), Settings > Monitors.
-- Widgets: clock, sticky note, drawing pad, system monitor (CPU, RAM, drives), calendar, to-do
+- Keyboard shortcut per box (box menu > Keyboard shortcut: Ctrl+Alt+F2..F10) brings the box into
+  view (switching page or showing hidden boxes), pressed again rolls it up or down.
+- New, renamed and removed desktop files show up within about a second (Windows change
+  notifications, no polling).
+- Widgets: clock, sticky note, drawing pad, picture frame (PNG/JPEG, fit or fill), system monitor
+  (CPU, RAM, drives), calendar, to-do
   list, search box, agenda (online calendars: iCal / .ics links from Google, Outlook…; repeating
   events supported). Widget options: box menu > "Widget settings…". Each redraws only when needed (clock: each minute, monitor: every 2 s,
   calendar: at midnight, the others only on input).

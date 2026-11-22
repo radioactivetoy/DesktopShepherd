@@ -56,7 +56,7 @@ Get-CimInstance Win32_Process -Filter "Name='desktopshepherd.exe'" | % {
   "{0} ws={1:N0}MB cpu={2:N2}%" -f $_.CommandLine, ($p.WorkingSet64/1MB), (($b-$a)/10000/[Environment]::ProcessorCount*100) }
 ```
 
-Current baseline: worker ~89 MB working set (~75 MB private), ~0.01 % CPU idle; supervisor
+Current baseline: worker ~89 MB working set (~75 MB private), ~0.005 % CPU idle; supervisor
 ~2 MB private. (A release build is no smaller, so the debug build, which is opt-level 3, is fine
 for daily use.)
 
@@ -84,6 +84,14 @@ for daily use.)
   back the moment another window (even our own) comes forward, and re-send a key that arrives
   late (`keybd_event`) so typing is never lost. Still no hooks: `RegisterHotKey` and a foreground
   WinEvent callback only.
+- Icon boxes never take the focus (MA_NOACTIVATE); a left click in one calls
+  `desktop::focus_desktop()` so the keyboard goes to the desktop (type to jump / quick search),
+  not to whatever had it before (e.g. a sticky note). Keep that when changing box clicks.
+- Desktop changes come from `desktop::watch_folders` (change notifications), not polling; the
+  reader thread in `app.rs` re-reads only when woken (or once a minute).
+- Hotkey ids (`runloop.rs`): 1 search, 2 hide/show, 3/4 pages, 21..29 box shortcuts
+  (Ctrl+Alt+F2..F10; not Ctrl+Alt+digits = AltGr on many keyboards; F1 is often taken), 100+
+  typing keys.
 - PowerShell: `FindWindow(class, $null)` passes an empty title, not NULL, so it finds nothing –
   use `[NullString]::Value` or enumerate the windows instead.
 

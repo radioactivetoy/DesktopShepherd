@@ -139,13 +139,15 @@ There is no eframe, no GL and no main window to draw on any more.
 | Thread | Job |
 |---|---|
 | main/UI | the loop in `runloop.rs`, egui passes, box frames, D3D rendering |
-| desktop scan | re-reads desktop folders every `rescan_secs` (default 4) |
+| folder watch | `desktop::watch_folders`: Windows change notifications on the desktop folders and folder-box folders (asleep otherwise); wakes the desktop reader; every 4 s re-hides Windows' desktop icons if Explorer showed them |
+| desktop reader | re-reads the folders when the folder watch or the app wakes it (and once a minute as a safety net); monitors come from WM_DISPLAYCHANGE, not polling |
+| short-lived helpers | agenda downloads, drive space (system monitor), picture decoding (picture frame), file pickers, "open file location", paste / Recycle Bin, autostart entry: each on its own thread so the boxes never wait |
 | icon loader | SHGetFileInfo/IShellItemImageFactory → textures (cached in `icons.rs`, with a 5 s watchdog that replaces a stuck loader thread); icons are loaded at the size shown in real pixels (`IconCache::get(path, px)`, icon size × display scale), and textures of sizes no longer used are dropped (`IconCache::keep_only_sizes`, called from `app.rs` when the set of sizes changes) |
 | icon hide/show | toggles the desktop ListView asynchronously (never blocks on Explorer) |
 | move helper | `host::move_with_mouse`, alive only during a box drag |
 | flying icon | topmost layered window during icon drag (`ghost::begin_icon_drag(path, px) -> DragImage`); the picture loads its icon on its own thread and can be cancelled with `DragImage::destroy`, so a slow shortcut (network drive) cannot freeze the boxes |
 | quit watcher | waits on the named event `Local\DesktopShepherd.Quit` (`desktop::watch_quit_signal`) |
-| show-desktop guard | asleep except for ~1 s after Win+D (see STATUS) |
+| show-desktop guard | asleep except for ~0.4–1 s after Win+D (stops once the boxes stayed up for 300 ms; see STATUS) |
 
 Idle the UI thread sleeps: it only wakes on input, a scan change, a widget timer (clock: once
 a second) or a wake-up posted by another thread.
@@ -172,7 +174,7 @@ a second) or a wake-up posted by another thread.
 | `model.rs` | saved data types: `Layout`, `Fence`, `Tab`, `Settings`, `CategoryRule`, widgets config. Look fields on `Fence` (all with defaults; `sanitize()` repairs odd values): `border_width`, `text_color`, `text_shadow`, `font`, `title_size`, `caption_size`, `show_captions`, `icon_spacing`; `Fence::copy_look_from` backs "Apply this look to all boxes" (`Act::ApplyLookToAll`) |
 | `agenda.rs` | the agenda widget's data: WinHTTP download of iCal links (the only network use, background thread, every 30 min while shown), iCal reading incl. repeating events (4 unit tests) |
 | `storage.rs` | load/save/backups/log; `data_dir()` moves the old `%APPDATA%DeskBoxes` folder to `%APPDATA%DesktopShepherd` once |
-| `widgets.rs` | widget registry (clock, note, drawing pad, system monitor, calendar, to-do list; the search box is drawn by `search_widget` in `app.rs`) – add new widgets here. The system monitor shares one reading for all monitors (CPU/RAM every 2 s, drives every 60 s) and reads only while shown |
+| `widgets.rs` | widget registry (clock, note, drawing pad, system monitor, calendar, to-do list, agenda, picture frame; the search box is drawn by `search_widget` in `app.rs`) – add new widgets here. The system monitor shares one reading for all monitors (CPU/RAM every 2 s, drives every 60 s) and reads only while shown |
 
 (`wallpaper.rs` and the classic GL drawing path were deleted in phase C.)
 

@@ -1095,16 +1095,17 @@ pub fn watch_folders(dirs: impl Fn() -> Vec<PathBuf> + Send + 'static, changed: 
                 want.dedup();
                 if want != watched {
                     close_all(&mut handles);
+                    let mut all_open = true;
                     for d in &want {
                         // A folder that doesn't exist (yet) is just not watched; the scanner's
                         // once-a-minute read still covers it.
-                        if let Ok(h) = FindFirstChangeNotificationW(&HSTRING::from(d.as_os_str()), BOOL(0), filter) {
-                            if !h.is_invalid() {
-                                handles.push(h);
-                            }
+                        match FindFirstChangeNotificationW(&HSTRING::from(d.as_os_str()), BOOL(0), filter) {
+                            Ok(h) if !h.is_invalid() => handles.push(h),
+                            _ => all_open = false,
                         }
                     }
-                    watched = want;
+                    // A folder missing now (a drive not plugged in) is tried again in 4 s.
+                    watched = if all_open { want } else { Vec::new() };
                 }
                 if handles.is_empty() {
                     std::thread::sleep(std::time::Duration::from_secs(4));

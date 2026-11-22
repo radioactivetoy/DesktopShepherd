@@ -5,7 +5,7 @@
 | Process | Working set | Private | Threads | CPU idle (10 s, all cores) |
 |---|---|---|---|---|
 | supervisor `desktopshepherd.exe` | ~2 MB | 2 MB | – | 0.00 % |
-| worker `desktopshepherd.exe --worker` | ~89 MB | ~75 MB | 34 | ~0.00–0.02 % |
+| worker `desktopshepherd.exe --worker` | ~89 MB | ~75 MB | 34 | ~0.005 % (was ~0.01–0.02 % before the folder watcher) |
 
 History: classic GL glass path 194–240 MB → DirectX composition path ~156 MB (155 MB private,
 30 threads) → after phase C (no eframe/GL) ~110 MB (100 MB private) → after the memory round
@@ -112,6 +112,37 @@ egui font atlases, and the icon textures.
   desktop, "s" jumped to the next s-item and "s" again to the one after; a text box in another
   window received "abc1" normally; typing "xyz" right after switching from the desktop to another
   window arrived intact 3 times out of 3.
+- Fixed (2026-11-22, owner's report "typing writes into the note"): icon boxes don't take the
+  focus, so whatever had it kept it (e.g. a sticky note) and desktop typing landed there. A left
+  click in an icon box now gives the keyboard to the desktop (`desktop::focus_desktop`), the app
+  re-checks the focus for a second after any change (Windows settles it in steps), "typing does
+  nothing" no longer swallows letters, letters typed before the search window has the keyboard
+  join the query, type-to-jump skips boxes on other pages, and switching pages / hiding clears the
+  selection (Delete could otherwise remove an invisible item). Ranking: initials ("vsc") above
+  loose matches, several words each starting a word. Checked live: click note, click icon, type
+  "ste" -> quick search with Steam; the note unchanged.
+- Done (2026-11-22): review-2 items R4 (folders opened with SHOpenFolderAndSelectItems /
+  ShellExecute, no explorer.exe by name), R5 (windows by handle, not title), R8 (font list cached),
+  R9 + idea 4 (folder change notifications instead of 4 s re-reads; no monitor polling; checked: a
+  new file shows in ~1 s, a removed one disappears), R10 (Win+D guard stops early; covered time
+  still 8–9 ms), R11 (drawing pad thins points, at most 300 strokes), R12 (extra icon sizes dropped
+  when search/settings close), R13 (interval setting removed), R14 (re-stack after Explorer restart).
+- Done (2026-11-22): review 3 (Sonnet subagent, 20 findings) fixed: setup no longer writes an empty
+  layout on a new PC (it made first start show no boxes with icons hidden); only a main-thread crash
+  restores the icons; agenda download can't hang on "Loading…" (panics caught, overflow-safe);
+  weekday-only and yearly "2nd Tuesday" rules; data-folder move via a temporary copy; uninstall
+  doesn't recreate the deleted folder; cmd/ping by full path; rename case-only / trailing dots /
+  device names; paste finds the real new files; clipboard memory freed; off-screen check in points;
+  backup restore refreshes; widget data always an object; shell-menu helper responsive; drive space
+  read off the UI thread; supervisor stops on the quit signal while waiting.
+- New (2026-11-22): memory: boxes on other pages / hidden give back their drawing memory (graphics
+  memory 39 -> 26 MB with all hidden here); icons unused for 5 min are dropped.
+- New (2026-11-22): agenda converts named time zones with the calendar's VTIMEZONE rules (test:
+  09:00 New York -> 14:00 UTC in winter, 13:00 in summer).
+- New (2026-11-22): picture frame widget (PNG/JPEG, fit or fill; decoded and shrunk to 1600 px on a
+  helper thread) and box shortcuts Ctrl+Alt+F2..F10 (box menu > Keyboard shortcut: brings the box
+  into view, switching page / un-hiding, then rolls it up or down). Ctrl+Alt+F1 is not offered: on
+  this PC another tool swallows it (registration succeeds but the key never arrives).
 - New (2026-11-22): agenda widget (`src/agenda.rs`, 4 unit tests). The owner approved this one
   network use. Downloads with WinHTTP on a short-lived thread every 30 min (5 after a failure),
   only while shown; reads single, all-day and repeating events (daily/weekly/monthly incl. "last
@@ -140,7 +171,7 @@ egui font atlases, and the icon textures.
 - New (2026-11-22): review 2 R1-R3 (Windows menu in a helper process, Properties etc. now work),
   keyboard in boxes incl. copy/cut/paste, rename (F2), folder boxes, rules by name/age, hide/show
   all, per-monitor-setup positions. **Per-setup positions are untested** (needs a laptop).
-- Tests: all 17 unit tests pass (`cargo test`). Worker memory after start ~87 MB.
+- Tests: all 20 unit tests pass (`cargo test`). Worker memory after start ~87 MB.
 - Synthetic drags (SetCursorPos + mouse_event) don't start a drag on a *rolled-up* box's title
   (same before and after phase C); untested by hand.
 - Still untested: mixed display scaling and real input-method (IME) use.
@@ -157,9 +188,10 @@ egui font atlases, and the icon textures.
 2. ~~Memory: load icon textures at `icon_size × pixels_per_point` instead of 2× size~~ – done
    (2026-11-22, `IconCache::get(path, px)`; sizes no longer used are dropped by
    `IconCache::keep_only_sizes`; 110 → 89 MB together with the font change). Still open: free
-   textures of items not shown in any box (LRU).
-3. Memory: share one swap chain sized per box but drop swap chains of rolled-up boxes.
-4. CPU: desktop rescan via `ReadDirectoryChangesW` instead of polling every 4 s.
+   textures of items not shown in any box (LRU) – done 2026-11-22 (5-minute sweep).
+3. ~~Memory: drop drawing memory of boxes not shown~~ – done 2026-11-22 (hidden / other page; rolled-up
+   boxes already shrink with their window).
+4. ~~CPU: desktop rescan via change notifications instead of polling every 4 s~~ – done 2026-11-22.
 5. ~~Rename to DesktopShepherd~~ – done, with an installer (2026-11-22).
-6. Features: more widgets (image frame; calendar, system monitor, to-do and search box are done), per-box hotkeys, quick
+6. Features: more widgets (calendar, system monitor, to-do, search box, agenda and picture frame are done), per-box hotkeys (done), quick
    (Quick search, snapping to boxes/screen edges and an optional grid are done, 2026-11-22.)

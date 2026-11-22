@@ -130,11 +130,13 @@ impl IconCache {
 
     /// Drops icons not asked for within `age` (boxes on another page, items gone from view): they
     /// are loaded again if they are needed. Returns how many were dropped.
-    pub fn drop_unused(&mut self, age: Duration) -> usize {
+    /// Only icons for which `may_drop(path)` says yes go (a box that shows an icon but hasn't been
+    /// redrawn for a while must keep it).
+    pub fn drop_unused(&mut self, age: Duration, may_drop: impl Fn(&str) -> bool) -> usize {
         let now = Instant::now();
         let before = self.textures.len();
         let used = &self.last_used;
-        self.textures.retain(|k, _| used.get(k).map(|t| now.duration_since(*t) < age).unwrap_or(false));
+        self.textures.retain(|k, _| used.get(k).map(|t| now.duration_since(*t) < age).unwrap_or(false) || !may_drop(&k.0));
         let textures = &self.textures;
         let pending = &self.pending;
         self.last_used.retain(|k, _| textures.contains_key(k) || pending.contains(k));

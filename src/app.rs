@@ -947,10 +947,20 @@ impl DeskApp {
         };
         #[cfg(not(windows))]
         let icons_arrived = self.icons.poll(ctx);
-        // Once a minute: drop icons no box has shown for 5 minutes (they load again when needed).
+        // Once a minute: drop icons unused for 5 minutes that no box on screen can show: items only
+        // in boxes on other pages / hidden, or gone from the desktop. (A box on screen that wasn't
+        // redrawn still shows its icons: those stay.)
         if self.icon_sweep_at.elapsed() >= Duration::from_secs(60) {
             self.icon_sweep_at = Instant::now();
-            self.icons.drop_unused(Duration::from_secs(300));
+            let (page, hidden) = (self.layout.current_page, self.boxes_hidden);
+            let shown = |f: &&Fence| !hidden && f.page == page;
+            let in_hidden: HashSet<String> = self.layout.fences.iter().filter(|f| !shown(f)).flat_map(|f| f.tabs.iter().flat_map(|t| t.items.iter().map(|p| p.to_lowercase()))).collect();
+            let in_shown: HashSet<String> = self.layout.fences.iter().filter(shown).flat_map(|f| f.tabs.iter().flat_map(|t| t.items.iter().map(|p| p.to_lowercase()))).collect();
+            let items = &self.items;
+            self.icons.drop_unused(Duration::from_secs(300), |p| {
+                let k = p.to_lowercase();
+                !items.contains_key(&k) || (in_hidden.contains(&k) && !in_shown.contains(&k))
+            });
         }
         if icons_arrived {
             self.redraw_all = true;
