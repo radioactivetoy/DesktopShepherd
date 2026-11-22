@@ -144,6 +144,11 @@ pub struct Settings {
     pub low_priority: bool,
     /// How often the desktop folder is re-read, in seconds.
     pub rescan_secs: u64,
+    /// Moving or resizing a box snaps its edges to other boxes and the screen edges (hold Alt
+    /// to place it freely).
+    pub snap: bool,
+    /// Space left between snapped boxes and inside the screen edges, in points.
+    pub snap_gap: f32,
 }
 
 impl Default for Settings {
@@ -158,6 +163,8 @@ impl Default for Settings {
             start_with_windows: false,
             low_priority: true,
             rescan_secs: 4,
+            snap: true,
+            snap_gap: 8.0,
         }
     }
 }

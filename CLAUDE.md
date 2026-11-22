@@ -81,4 +81,5 @@ for daily use.)
   `app.rs` (Personalize page).
 - Icon selection/drag/drop → `app.rs` `fence_window`, `ghost::begin_icon_drag`.
 - Monitor handling → `app.rs` (bind/relayout), `desktop::monitors`.
+- Snapping → `src/snap.rs` (+ `snap_targets` in `app.rs`).
 - Next suggested work: see "Improvement ideas" in `docs/STATUS.md`.

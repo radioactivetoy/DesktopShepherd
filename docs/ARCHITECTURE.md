@@ -66,6 +66,27 @@ There is no eframe, no GL and no main window to draw on any more.
   - Moving a box by mouse: `host::move_with_mouse` runs a helper thread that follows the
     cursor with `SetWindowPos(…SWP_ASYNCWINDOWPOS)`; DWM moves the composed content, so the
     frosted backdrop never flickers.
+  - Snapping (`snap.rs`, plain arithmetic with unit tests): within 10 points an edge jumps onto
+    (a) another box's edge with a gap between (side by side / stacked), (b) another box's same
+    edge (lined up), (c) the monitor's usable area, with the gap inside its edges. Other boxes
+    only count when near in the other direction. Alt = no snapping. Settings: `Settings.snap`
+    (default on) and `Settings.snap_gap` (default 8 pt, 0-40), both with serde defaults. Moving:
+    `host::move_with_mouse(hwnd, grab, Option<Snap>)` snaps in pixels on its helper thread, and
+    keeps the exact spot where the box was grabbed (egui's press origin). Resizing: the grip code
+    in `app.rs` snaps the right/bottom edge in points. `app.rs` `snap_targets()` gathers the other
+    boxes' rectangles (`desktop::window_rect_px`) and the monitors' work areas
+    (`desktop::work_areas_px`).
+  - Monitor memory: when a move or resize ends, the box's monitor assignment (role index,
+    monitor name, offset) is updated at once (`UiState.rebind` on drag stop), so a later monitor
+    change cannot send it back to an old monitor.
+  - Scales: box positions are always in app screen points (pixels / main display scale, like the
+    monitor list and the saved layout); box sizes are in the box's own points (its monitor's
+    scale) (`host.rs` `frame()` / `apply_to`, and box creation). Icon drops use the main scale.
+    Mixed-scale setups are not tested.
+  - Typing: characters outside the basic range (emoji, rare CJK) that arrive as two `WM_CHAR`
+    halves are combined; the input method's composition and candidate windows are placed at the
+    text cursor (`ImmSetCompositionWindow` / `ImmSetCandidateWindow`, from egui's
+    `platform_output.ime`). Copy/paste also works in widgets inside boxes (the note).
   - Moving a box from the app (monitor relayout, "Bring every box back on screen", restoring a
     backup / importing, rolling up from the settings page):
     `DeskApp::place_box` / `place_all_boxes` push `OuterPosition` / `InnerSize` commands to the
@@ -94,7 +115,7 @@ There is no eframe, no GL and no main window to draw on any more.
 |---|---|
 | main/UI | the loop in `runloop.rs`, egui passes, box frames, D3D rendering |
 | desktop scan | re-reads desktop folders every `rescan_secs` (default 4) |
-| icon loader | SHGetFileInfo/IShellItemImageFactory → textures (cached in `icons.rs`); icons are loaded at the size shown in real pixels (`IconCache::get(path, px)`, icon size × display scale), and textures of sizes no longer used are dropped (`IconCache::keep_only_sizes`, called from `app.rs` when the set of sizes changes) |
+| icon loader | SHGetFileInfo/IShellItemImageFactory → textures (cached in `icons.rs`, with a 5 s watchdog that replaces a stuck loader thread); icons are loaded at the size shown in real pixels (`IconCache::get(path, px)`, icon size × display scale), and textures of sizes no longer used are dropped (`IconCache::keep_only_sizes`, called from `app.rs` when the set of sizes changes) |
 | icon hide/show | toggles the desktop ListView asynchronously (never blocks on Explorer) |
 | move helper | `host::move_with_mouse`, alive only during a box drag |
 | flying icon | topmost layered window during icon drag (`ghost::begin_icon_drag(path, px) -> DragImage`); the picture loads its icon on its own thread and can be cancelled with `DragImage::destroy`, so a slow shortcut (network drive) cannot freeze the boxes |
@@ -117,7 +138,8 @@ a second) or a wake-up posted by another thread.
 | `desktop.rs` | Win32 helpers: desktop scan, open item, hide/show icons, autostart Run key, single instance, monitors, work areas, z-order, rounding |
 | `fence_view.rs` | sorting/grid layout of items inside a box |
 | `ghost.rs` | only the flying icon picture while dragging icons between boxes (`begin_icon_drag` returns a `DragImage`; `DragImage::destroy`) and `primary_button_down()` |
-| `icons.rs` | icon cache (`get(path, px)`, `keep_only_sizes`) |
+| `icons.rs` | icon cache (`get(path, px)`, `keep_only_sizes`); loader watchdog: a load over 5 s is marked failed (placeholder) and a fresh loader thread takes the other pending icons (at most one restart per 5 s) |
+| `snap.rs` | box snapping arithmetic (pure, 6 unit tests: `cargo test snap`) |
 | `model.rs` | saved data types: `Layout`, `Fence`, `Tab`, `Settings`, `CategoryRule`, widgets config |
 | `storage.rs` | load/save/backups/log |
 | `widgets.rs` | widget registry (clock, note, sketch) – add new widgets here |

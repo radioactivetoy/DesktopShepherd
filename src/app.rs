@@ -82,6 +82,9 @@ struct UiState {
     rebind: HashSet<u64>,
     /// Boxes have Windows' glass (false = no-glass fallback: they paint a solid background).
     glass: bool,
+    /// Snapping while moving/resizing (from the settings) and the gap between boxes (points).
+    snap_on: bool,
+    snap_gap: f32,
     /// Commands for box windows from elsewhere (menus, monitor changes): box id, command.
     box_cmds: Vec<(u64, ViewportCommand)>,
     /// Boxes whose next position update comes from a move or resize by the person.
@@ -676,6 +679,8 @@ impl DeskApp {
         #[cfg(windows)]
         if let Some(hosts) = self.hosts.as_mut().filter(|h| !h.lost) {
             self.ui.glass = hosts.has_glass();
+            self.ui.snap_on = self.layout.settings.snap;
+            self.ui.snap_gap = self.layout.settings.snap_gap;
             let ids: Vec<u64> = self.layout.fences.iter().map(|f| f.id).collect();
             hosts.retain(&ids);
             for fence in self.layout.fences.iter_mut() {
@@ -957,14 +962,21 @@ fn fence_window(
                 st.drag = Some((fence.id, 0, c, screen));
                 #[cfg(windows)]
                 if let Some(&bh) = st.hwnds.get(&fence.id) {
-                    let grab = ((c.x - current.min.x) * ppp, (c.y - current.min.y) * ppp);
-                    crate::host::move_with_mouse(bh, (grab.0.round() as i32, grab.1.round() as i32));
+                    // Keep the exact spot the person grabbed (where the button went down, not where
+                    // the mouse was once egui recognised the drag a few pixels later).
+                    let local = ctx.input(|i| i.pointer.press_origin()).unwrap_or(c - current.min.to_vec2());
+                    let grab = (local.x * ppp, local.y * ppp);
+                    let snap = snap_targets(st, fence.id, 1.0);
+                    crate::host::move_with_mouse(bh, (grab.0.round() as i32, grab.1.round() as i32), snap);
                 }
             }
         }
         if title.drag_stopped() {
             st.drag = None;
+            // Remember the monitor the person left it on (by role or fixed monitor, per the
+            // settings) right away, and once more when its final position arrives.
             st.moved_by_person.insert(fence.id);
+            st.rebind.insert(fence.id);
         }
         if title.double_clicked() {
             fence.expanded = !fence.expanded;
@@ -1157,7 +1169,7 @@ fn fence_window(
                                 img.destroy();
                             }
                             if let Some((from, paths)) = st.item_drag.take() {
-                                if let Some(at) = desktop::cursor_points(ctx.pixels_per_point()) {
+                                if let Some(at) = desktop::cursor_points(desktop::system_scale()) {
                                     if std::env::var_os("DESKBOXES_DEBUG_DRAG").is_some() {
                                         storage::log_line(&format!("icon drop from box {from} at {at:?}"));
                                     }
@@ -1242,8 +1254,19 @@ fn fence_window(
                     if let (Some((id, k, grab, start)), Some(c)) = (st.drag, desktop::cursor_points(ppp)) {
                         if id == fence.id && k == kind {
                             let d = c - grab;
-                            let w = if k & 1 != 0 { start.width() + d.x } else { start.width() };
-                            let h = if k & 2 != 0 { start.height() + d.y } else { start.height() };
+                            let mut w = if k & 1 != 0 { start.width() + d.x } else { start.width() };
+                            let mut h = if k & 2 != 0 { start.height() + d.y } else { start.height() };
+                            // The moving edges snap to other boxes and the screen edges (Alt: freely).
+                            if !ui.input(|i| i.modifiers.alt) {
+                                if let Some(s) = snap_targets(st, fence.id, ppp) {
+                                    if k & 1 != 0 {
+                                        w = s.snap_right(start.min.x + w, start.min.y, start.min.y + h) - start.min.x;
+                                    }
+                                    if k & 2 != 0 {
+                                        h = s.snap_bottom(start.min.y + h, start.min.x, start.min.x + w) - start.min.y;
+                                    }
+                                }
+                            }
                             ctx.send_viewport_cmd(ViewportCommand::InnerSize(Vec2::new(w.max(120.0), h.max(60.0))));
                             st.burst.insert(fence.id, 6);
                             ctx.request_repaint();
@@ -1253,6 +1276,7 @@ fn fence_window(
                 if resp.drag_stopped() {
                     st.drag = None;
                     st.moved_by_person.insert(fence.id);
+                    st.rebind.insert(fence.id);
                 }
             }
         }
@@ -1991,6 +2015,12 @@ impl DeskApp {
         }
         ui.label(egui::RichText::new("They always come back when DeskBoxes closes, even after a crash.").color(Color32::from_gray(150)).size(12.0));
         dirty |= ui.checkbox(&mut s.expand_on_hover, "Open rolled-up boxes while the mouse is over them").changed();
+        ui.horizontal(|ui| {
+            dirty |= ui.checkbox(&mut s.snap, "Snap boxes to each other and to the screen edges").changed();
+            ui.label("gap");
+            dirty |= ui.add(egui::DragValue::new(&mut s.snap_gap).range(0.0..=40.0).speed(0.5).suffix(" pt")).changed();
+        });
+        ui.label(egui::RichText::new("Hold Alt while moving or resizing a box to place it freely.").color(Color32::from_gray(150)).size(12.0));
         ui.label(egui::RichText::new("Frosted glass: set each box's blur in its menu (Personalize > Blur).").color(Color32::from_gray(150)).size(12.0));
         ui.add_space(10.0);
         ui.heading("Monitors");
@@ -2489,4 +2519,19 @@ fn make_tray(ctx: &egui::Context, cmds: Arc<Mutex<Vec<TrayCmd>>>) -> Option<tray
         .with_menu_on_left_click(false)
         .build()
         .ok()
+}
+
+/// What a box being moved or resized can snap to: the other boxes and every monitor's usable
+/// area, converted to the caller's unit (`px_per_unit` = 1 for pixels, the display scale for
+/// points). None when snapping is off.
+fn snap_targets(st: &UiState, own: u64, px_per_unit: f32) -> Option<crate::snap::Snap> {
+    if !st.snap_on {
+        return None;
+    }
+    let k = px_per_unit.max(0.1);
+    let to = |r: [i32; 4]| crate::snap::R::new(r[0] as f32 / k, r[1] as f32 / k, r[2] as f32 / k, r[3] as f32 / k);
+    let boxes = st.hwnds.iter().filter(|(id, _)| **id != own).filter_map(|(_, h)| desktop::window_rect_px(*h)).map(to).collect();
+    let screens = desktop::work_areas_px().into_iter().map(to).collect();
+    let s = desktop::system_scale();
+    Some(crate::snap::Snap { boxes, screens, dist: 10.0 * s / k, gap: st.snap_gap.max(0.0) * s / k })
 }

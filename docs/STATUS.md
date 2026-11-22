@@ -64,11 +64,28 @@ egui font atlases, and the icon textures.
   to 5 s and only kills if needed (log: "quit signal received", no crash entry).
 - Fixed: starting an icon drag no longer loads the icon on the UI thread (the flying picture
   loads it on its own thread), so a slow shortcut can't freeze the boxes.
-- Open: no IME yet (Chinese/Japanese input); per-monitor DPI mixing (review S8); the icon
-  loader watchdog (review S7).
+- Done (2026-11-22), review S7: icon loader watchdog. If one icon load takes over 5 s (e.g. an
+  offline network shortcut) it is marked failed (placeholder) and a fresh loader thread takes
+  the other pending icons (at most one restart per 5 s). Not tested with a real hang.
+- Done (2026-11-22), review S8: box positions are always in app screen points (pixels / main
+  display scale), box sizes in the box's own points. Both monitors here are 125 %, so nothing
+  changed on this PC; **untested on mixed displays**.
+- Done (2026-11-22): international typing. Emoji and rare CJK characters that arrive in two
+  halves are combined (they were dropped), and the input method's composition and candidate
+  windows are placed at the text cursor. Typing an emoji and a CJK character into a settings
+  field works. Real input-method use (e.g. Japanese IME) is **not tested**: none is installed.
+- Done (2026-11-22): copy/paste also works in widgets inside boxes (the note).
+- Done (2026-11-22): a box keeps the exact spot where it was grabbed while moving.
+- Done (2026-11-22): when a move or resize ends, the box's monitor assignment is updated at
+  once, so a later monitor change no longer sends it back to its old monitor. Checked: a box
+  moved to DISPLAY2 was recorded as monitor 1 / `\\.\DISPLAY2`, and back as monitor 0 / DISPLAY1.
+- New (2026-11-22): snapping (`src/snap.rs`, `cargo test snap` passes). Checked live: a box
+  dropped about 5 px off snaps into line with the box below; with Alt it stays; moving back
+  snaps again. Settings > Desktop: "Snap boxes to each other and to the screen edges" and "gap".
 - Names: exe/data folder still `DeskBoxes`.
 - Synthetic drags (SetCursorPos + mouse_event) don't start a drag on a *rolled-up* box's title
   (same before and after phase C); untested by hand.
+- Still untested: mixed display scaling and real input-method (IME) use.
 - Fixed in phase C: app-driven box moves (monitor relayout, bring back on screen, restore
   backup/import, roll-up from settings) now really move the DirectX windows; the Settings page
   scrolls (its bottom – backups list and Quit button – used to be cut off).
@@ -88,4 +105,5 @@ egui font atlases, and the icon textures.
 5. Rename to DesktopShepherd (exe, mutex name, Run key, data folder with migration of
    `%APPDATA%\DeskBoxes`).
 6. Features: more widgets (calendar, system monitor, image frame), per-box hotkeys, quick
-   search, snapping boxes to a grid.
+   search. (Snapping boxes to each other and to the screen edges is done, 2026-11-22; a fixed
+   grid is not.)

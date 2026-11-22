@@ -28,6 +28,9 @@ an original Rust program; its behaviour was modelled on an existing desktop orga
 - Hides Windows' own desktop icons while running; a supervisor process gives them back after
   any exit or crash and restarts the app after a crash or failed start, waiting longer after
   each failure in a row (2 s up to 5 min).
+- Snapping: while you move or resize a box, its edges jump onto other boxes (side by side, or
+  lined up) and onto the screen edges, with an adjustable gap (default 8 pt). Hold Alt to place a
+  box freely; both options are in Settings > Desktop.
 - Multi-monitor: boxes follow a monitor **role** (main/second…) or stay on a **fixed** monitor.
 - Tray icon, Windows 11 style menus and settings page, start with Windows, low CPU priority,
   layout backups.

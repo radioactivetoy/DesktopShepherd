@@ -13,6 +13,7 @@ mod ghost;
 mod icons;
 mod import_original;
 mod model;
+mod snap;
 #[cfg(windows)]
 mod runloop;
 mod storage;

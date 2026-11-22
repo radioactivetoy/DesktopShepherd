@@ -4,39 +4,69 @@
 use egui::{self, ColorImage, TextureHandle, TextureOptions};
 use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 type Key = (String, u32);
+type Answer = (Key, Option<ColorImage>);
+/// What the loader thread is busy with right now, and since when (None = waiting for work).
+type Working = Arc<Mutex<Option<(Key, Instant)>>>;
+
+/// A load that takes longer than this is treated as hung (e.g. a shortcut to an offline drive).
+const STUCK_AFTER: Duration = Duration::from_secs(5);
 
 pub struct IconCache {
     tx: Sender<Key>,
-    rx: Receiver<(Key, Option<ColorImage>)>,
+    rx: Receiver<Answer>,
+    working: Working,
     textures: HashMap<Key, Option<TextureHandle>>,
     pending: HashSet<Key>,
+    /// When the loader was last replaced, so a broken shell can't make us spawn threads in a loop.
+    last_restart: Option<Instant>,
+}
+
+/// Starts one loader thread. Returns the request sender, the result receiver and the shared
+/// "working on" note the watchdog looks at. If the thread can't start, sends just go nowhere and
+/// the watchdog never fires (nothing is marked as working).
+fn spawn_loader(ctx: &egui::Context) -> (Sender<Key>, Receiver<Answer>, Working) {
+    let (tx, req_rx) = channel::<Key>();
+    let (res_tx, rx) = channel::<Answer>();
+    let working: Working = Arc::new(Mutex::new(None));
+    let note = working.clone();
+    let ctx = ctx.clone();
+    std::thread::Builder::new()
+        .name("icon-loader".into())
+        .spawn(move || {
+            platform::thread_init();
+            while let Ok(key) = req_rx.recv() {
+                if let Ok(mut w) = note.lock() {
+                    *w = Some((key.clone(), Instant::now()));
+                }
+                let img = std::panic::catch_unwind(|| platform::load(&key.0, key.1)).ok().flatten();
+                if let Ok(mut w) = note.lock() {
+                    *w = None;
+                }
+                // If the cache replaced this loader while it was stuck, nobody listens any more:
+                // the send fails and this old thread simply ends.
+                if res_tx.send((key, img)).is_err() {
+                    break;
+                }
+                ctx.request_repaint();
+            }
+        })
+        .ok();
+    (tx, rx, working)
 }
 
 impl IconCache {
     pub fn new(ctx: &egui::Context) -> Self {
-        let (tx, req_rx) = channel::<Key>();
-        let (res_tx, rx) = channel();
-        let ctx = ctx.clone();
-        std::thread::Builder::new()
-            .name("icon-loader".into())
-            .spawn(move || {
-                platform::thread_init();
-                while let Ok(key) = req_rx.recv() {
-                    let img = std::panic::catch_unwind(|| platform::load(&key.0, key.1)).ok().flatten();
-                    if res_tx.send((key, img)).is_err() {
-                        break;
-                    }
-                    ctx.request_repaint();
-                }
-            })
-            .ok();
-        Self { tx, rx, textures: HashMap::new(), pending: HashSet::new() }
+        let (tx, rx, working) = spawn_loader(ctx);
+        Self { tx, rx, working, textures: HashMap::new(), pending: HashSet::new(), last_restart: None }
     }
 
     /// Moves finished icons into textures. Call once per frame. Returns true when any arrived
-    /// (the boxes showing them must be drawn again).
+    /// (the boxes showing them must be drawn again). Also acts as the watchdog: a loader stuck
+    /// on one file for too long is replaced so the other icons still load.
     pub fn poll(&mut self, ctx: &egui::Context) -> bool {
         let mut any = false;
         while let Ok((key, img)) = self.rx.try_recv() {
@@ -45,6 +75,36 @@ impl IconCache {
             self.textures.insert(key, tex);
             any = true;
         }
+        if self.pending.is_empty() {
+            return any; // idle: no timers, no wake-ups
+        }
+
+        let current = self.working.lock().ok().and_then(|w| w.clone());
+        let mut wake = STUCK_AFTER;
+        if let Some((key, since)) = current {
+            let busy_for = since.elapsed();
+            let may_restart = self.last_restart.map_or(true, |t| t.elapsed() >= STUCK_AFTER);
+            if busy_for >= STUCK_AFTER && may_restart {
+                crate::storage::log_line(&format!("icon loading stuck on {}; starting a new loader", key.0));
+                // Never ask for this one again; a placeholder shows instead.
+                self.pending.remove(&key);
+                self.textures.insert(key, None);
+                // Replacing rx/tx drops the old receiver and sender, so the old thread ends
+                // as soon as its hung call (if ever) returns.
+                let (tx, rx, working) = spawn_loader(ctx);
+                self.tx = tx;
+                self.rx = rx;
+                self.working = working;
+                self.last_restart = Some(Instant::now());
+                for k in self.pending.iter() {
+                    let _ = self.tx.send(k.clone());
+                }
+            } else if busy_for < STUCK_AFTER {
+                wake = STUCK_AFTER - busy_for;
+            }
+        }
+        // Only while icons are still loading: come back to check on the loader.
+        ctx.request_repaint_after(wake.max(Duration::from_millis(250)));
         any
     }
 

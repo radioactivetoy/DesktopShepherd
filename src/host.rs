@@ -63,6 +63,43 @@ struct Shared {
     min_size: [i32; 2],
     /// Windows' own move/resize loop is running (the person drags the window's edge).
     sizing: bool,
+    /// First half of a two-part character (see WM_CHAR).
+    high_surrogate: Option<u16>,
+    /// Where the input method's windows were last placed (client pixels), to move them only
+    /// when the text cursor moves.
+    ime_at: Option<(i32, i32)>,
+}
+
+/// Places the input method's composition and candidate windows at the text cursor of the
+/// text field being typed in (egui reports it), so they appear next to the text.
+fn place_ime(hwnd: HWND, shared: &Mutex<Shared>, ime: Option<&egui::output::IMEOutput>, ppp: f32) {
+    use windows::Win32::UI::Input::Ime::{
+        ImmGetContext, ImmReleaseContext, ImmSetCandidateWindow, ImmSetCompositionWindow, CANDIDATEFORM, CFS_CANDIDATEPOS,
+        CFS_FORCE_POSITION, CFS_POINT, COMPOSITIONFORM,
+    };
+    let Some(ime) = ime else {
+        if let Ok(mut s) = shared.lock() {
+            s.ime_at = None;
+        }
+        return;
+    };
+    let at = ((ime.cursor_rect.min.x * ppp).round() as i32, (ime.cursor_rect.max.y * ppp).round() as i32);
+    let changed = shared.lock().map(|mut s| s.ime_at.replace(at) != Some(at)).unwrap_or(false);
+    if !changed {
+        return;
+    }
+    unsafe {
+        let himc = ImmGetContext(hwnd);
+        if himc.is_invalid() {
+            return;
+        }
+        let pt = POINT { x: at.0, y: at.1 };
+        let cf = COMPOSITIONFORM { dwStyle: CFS_POINT | CFS_FORCE_POSITION, ptCurrentPos: pt, ..Default::default() };
+        let _ = ImmSetCompositionWindow(himc, &cf);
+        let cand = CANDIDATEFORM { dwIndex: 0, dwStyle: CFS_CANDIDATEPOS, ptCurrentPos: pt, ..Default::default() };
+        let _ = ImmSetCandidateWindow(himc, &cand);
+        let _ = ImmReleaseContext(hwnd, himc);
+    }
 }
 
 /// Reads text from the clipboard (for Ctrl+V in text fields).
@@ -246,7 +283,21 @@ unsafe extern "system" fn wndproc(h: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LR
             LRESULT(0)
         }
         WM_CHAR => {
-            if let Some(c) = char::from_u32(wp.0 as u32) {
+            // Typed text, including what an input method (Chinese, Japanese, ...) produces.
+            // Characters outside the basic range (emoji, rare characters) arrive in two halves.
+            let unit = wp.0 as u32;
+            let text = if (0xD800..0xDC00).contains(&unit) {
+                if let Ok(mut s) = shared.lock() {
+                    s.high_surrogate = Some(unit as u16);
+                }
+                None
+            } else if (0xDC00..0xE000).contains(&unit) {
+                let high = shared.lock().ok().and_then(|mut s| s.high_surrogate.take());
+                high.and_then(|hi| char::decode_utf16([hi, unit as u16]).next()).and_then(|r| r.ok())
+            } else {
+                char::from_u32(unit)
+            };
+            if let Some(c) = text {
                 if !c.is_control() {
                     push(egui::Event::Text(c.to_string()));
                 }
@@ -420,7 +471,9 @@ fn apply_to(hwnd: HWND, cmd: &ViewportCommand) {
                 let _ = SetWindowPos(hwnd, None, 0, 0, (v.x * ppp).round() as i32, (v.y * ppp).round() as i32, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
             }
             ViewportCommand::OuterPosition(p) => {
-                let _ = SetWindowPos(hwnd, None, (p.x * ppp).round() as i32, (p.y * ppp).round() as i32, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+                // Positions are app screen points (main display scale); sizes are the window's own.
+                let sys = crate::desktop::system_scale();
+                let _ = SetWindowPos(hwnd, None, (p.x * sys).round() as i32, (p.y * sys).round() as i32, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
             }
             ViewportCommand::Focus => {
                 let _ = SetForegroundWindow(hwnd);
@@ -812,6 +865,7 @@ impl HostSystem {
             if let Ok(mut s) = p.shared.lock() {
                 s.cursor = out.platform_output.cursor_icon;
             }
+            place_ime(p.hwnd, &p.shared, out.platform_output.ime.as_ref(), ppp);
             // Copy / cut in text fields.
             #[allow(deprecated)]
             let mut copied = out.platform_output.copied_text.clone();
@@ -865,6 +919,12 @@ impl HostSystem {
             ];
             match self.create(id, r) {
                 Ok(h) => {
+                    // On a monitor with a different scale than the main one, the window now has
+                    // that monitor's scale: give it its size in its own points.
+                    let own = ppp_of(h.hwnd);
+                    if (own - s).abs() > 0.01 {
+                        apply_to(h.hwnd, &ViewportCommand::InnerSize(Vec2::new(rect_points[2], rect_points[3])));
+                    }
                     self.hosts.insert(id, h);
                 }
                 Err(e) => {
@@ -920,7 +980,11 @@ impl HostSystem {
                 }
                 Err(_) => (Vec::new(), false, Vec::new()),
             };
-            let outer = Rect::from_min_size(Pos2::new(wr.left as f32 / ppp, wr.top as f32 / ppp), Vec2::new(w as f32 / ppp, ht as f32 / ppp));
+            // Position in the app's screen points (pixels / the main display scale), so boxes on
+            // monitors with different scaling still line up with the monitor list; size in this
+            // box's own points (its monitor's scale), which is what egui draws with.
+            let sys = crate::desktop::system_scale();
+            let outer = Rect::from_min_size(Pos2::new(wr.left as f32 / sys, wr.top as f32 / sys), Vec2::new(w as f32 / ppp, ht as f32 / ppp));
             let mut viewports = egui::ViewportIdMap::default();
             viewports.insert(
                 vid,
@@ -954,6 +1018,18 @@ impl HostSystem {
             if let Ok(mut s) = h.shared.lock() {
                 s.cursor = out.platform_output.cursor_icon;
             }
+            place_ime(h.hwnd, &h.shared, out.platform_output.ime.as_ref(), ppp);
+            // Copy / cut in a widget's text (the sticky note).
+            #[allow(deprecated)]
+            let mut copied = out.platform_output.copied_text.clone();
+            for c in &out.platform_output.commands {
+                if let egui::OutputCommand::CopyText(t) = c {
+                    copied = t.clone();
+                }
+            }
+            if !copied.is_empty() {
+                clipboard_set(h.hwnd, &copied);
+            }
             let cmds: Vec<ViewportCommand> = out.viewport_output.get(&vid).map(|v| v.commands.clone()).unwrap_or_default();
             // egui's own "draw me again in …" for this box (tooltips, animations, a clock).
             let delay = out.viewport_output.get(&vid).map(|v| v.repaint_delay).unwrap_or(Duration::MAX);
@@ -985,14 +1061,25 @@ impl HostSystem {
 
 /// Moves a box window with the mouse from a small helper thread until the button is released
 /// (the window is truly see-through, so moving needs no redrawing at all).
-pub fn move_with_mouse(hwnd: isize, grab: (i32, i32)) {
+/// `snap` (pixels): edges jump onto other boxes and the screen edges; holding Alt places the
+/// box freely.
+pub fn move_with_mouse(hwnd: isize, grab: (i32, i32), snap: Option<crate::snap::Snap>) {
     let _ = std::thread::Builder::new().name("box-move".into()).spawn(move || unsafe {
         let h = HWND(hwnd as *mut _);
         let mut last = (i32::MIN, i32::MIN);
+        let mut wr = RECT::default();
+        let _ = GetWindowRect(h, &mut wr);
+        let (w, ht) = ((wr.right - wr.left) as f32, (wr.bottom - wr.top) as f32);
         loop {
             let mut p = POINT::default();
             if GetCursorPos(&mut p).is_ok() {
-                let (x, y) = (p.x - grab.0, p.y - grab.1);
+                let (mut x, mut y) = (p.x - grab.0, p.y - grab.1);
+                let alt = (windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState(VK_MENU.0 as i32) as u16 & 0x8000) != 0;
+                if let (Some(s), false) = (snap.as_ref(), alt) {
+                    let (sx, sy) = s.snap_move(crate::snap::R::new(x as f32, y as f32, x as f32 + w, y as f32 + ht));
+                    x = sx.round() as i32;
+                    y = sy.round() as i32;
+                }
                 if (x, y) != last {
                     let _ = SetWindowPos(h, None, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS);
                     last = (x, y);

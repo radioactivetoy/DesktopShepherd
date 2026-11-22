@@ -868,3 +868,42 @@ fn set_icons_window(visible: bool) {
         let _ = visible;
     }
 }
+
+/// A window's rectangle on screen, in pixels: left, top, right, bottom.
+pub fn window_rect_px(hwnd: isize) -> Option<[i32; 4]> {
+    #[cfg(windows)]
+    unsafe {
+        use windows::Win32::Foundation::{HWND, RECT};
+        use windows::Win32::UI::WindowsAndMessaging::GetWindowRect;
+        let mut r = RECT::default();
+        GetWindowRect(HWND(hwnd as *mut _), &mut r).ok()?;
+        Some([r.left, r.top, r.right, r.bottom])
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = hwnd;
+        None
+    }
+}
+
+/// The usable area (without the taskbar) of every monitor, in pixels: left, top, right, bottom.
+pub fn work_areas_px() -> Vec<[i32; 4]> {
+    #[allow(unused_mut)]
+    let mut out: Vec<[i32; 4]> = Vec::new();
+    #[cfg(windows)]
+    unsafe {
+        use windows::Win32::Foundation::{BOOL, LPARAM, RECT};
+        use windows::Win32::Graphics::Gdi::{EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFO};
+        unsafe extern "system" fn cb(hm: HMONITOR, _dc: HDC, _r: *mut RECT, lp: LPARAM) -> BOOL {
+            let list = &mut *(lp.0 as *mut Vec<[i32; 4]>);
+            let mut mi = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
+            if GetMonitorInfoW(hm, &mut mi).as_bool() {
+                let w = mi.rcWork;
+                list.push([w.left, w.top, w.right, w.bottom]);
+            }
+            BOOL(1)
+        }
+        let _ = EnumDisplayMonitors(HDC::default(), None, Some(cb), LPARAM(&mut out as *mut _ as isize));
+    }
+    out
+}
