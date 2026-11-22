@@ -99,6 +99,10 @@ pub struct Fence {
     pub icon_spacing: f32,
     /// A folder box: shows the live contents of this folder instead of its own tabs.
     pub folder: Option<String>,
+    /// The page this box is on (0 = the first). Only the current page's boxes are shown.
+    pub page: u32,
+    /// When the icons don't fit: 0 = scroll up/down, 1 = pages with dots (wheel or dots flip).
+    pub overflow: u8,
 }
 
 impl Default for Fence {
@@ -138,6 +142,8 @@ impl Default for Fence {
             show_captions: true,
             icon_spacing: 0.0,
             folder: None,
+            page: 0,
+            overflow: 0,
         }
     }
 }
@@ -162,6 +168,7 @@ impl Fence {
         self.icon_spacing = o.icon_spacing;
         self.title_pos = o.title_pos;
         self.tab_pos = o.tab_pos;
+        self.overflow = o.overflow;
     }
 
     pub fn remove_item(&mut self, path: &str) {
@@ -247,6 +254,8 @@ pub struct Layout {
     /// Box positions remembered per monitor setup (see `desktop::setup_key`): setup ->
     /// box id -> rectangle. Used when Settings.per_setup is on.
     pub setup_positions: std::collections::HashMap<String, std::collections::HashMap<u64, [f32; 4]>>,
+    /// The page of boxes shown (0 = the first).
+    pub current_page: u32,
 }
 
 impl Layout {

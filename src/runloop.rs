@@ -53,6 +53,28 @@ pub const SEARCH_HOTKEYS: &[(&str, u32, u32)] = &[
 /// The hide/show-all-boxes shortcut was pressed.
 static HIDE_REQUESTED: AtomicBool = AtomicBool::new(false);
 
+/// Page switches asked for with Ctrl+Alt+PageDown (+1) / PageUp (-1) since the last pass.
+static PAGE_STEP: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+
+/// Page switches asked for since the last call (+ next, - previous).
+pub fn take_page_step() -> i32 {
+    PAGE_STEP.swap(0, Ordering::SeqCst)
+}
+
+/// Registers the page shortcuts (Ctrl+Alt+PageDown / PageUp). Call once, from the app's thread.
+pub fn set_page_hotkeys() {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{RegisterHotKey, HOT_KEY_MODIFIERS};
+    let h = WAKE_HWND.load(Ordering::SeqCst);
+    if h == 0 {
+        return;
+    }
+    unsafe {
+        let hwnd = HWND(h as *mut _);
+        let _ = RegisterHotKey(hwnd, 3, HOT_KEY_MODIFIERS(0x0002 | 0x0001 | 0x4000), 0x22);
+        let _ = RegisterHotKey(hwnd, 4, HOT_KEY_MODIFIERS(0x0002 | 0x0001 | 0x4000), 0x21);
+    }
+}
+
 /// True once after each press of the hide/show-all-boxes shortcut.
 pub fn take_hide_request() -> bool {
     HIDE_REQUESTED.swap(false, Ordering::SeqCst)
@@ -237,7 +259,9 @@ unsafe extern "system" fn main_wndproc(h: HWND, m: u32, wp: WPARAM, lp: LPARAM) 
                 }
                 return LRESULT(0);
             }
-            if id == 2 {
+            if id == 3 || id == 4 {
+                PAGE_STEP.fetch_add(if id == 3 { 1 } else { -1 }, Ordering::SeqCst);
+            } else if id == 2 {
                 HIDE_REQUESTED.store(true, Ordering::SeqCst);
             } else {
                 SEARCH_REQUESTED.store(true, Ordering::SeqCst);

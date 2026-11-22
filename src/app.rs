@@ -98,6 +98,11 @@ struct UiState {
     open_search: bool,
     /// Hide or show all boxes on the next pass (tray).
     toggle_hidden: bool,
+    /// Pages: how many there are and which is shown (for the box menu), and a switch asked
+    /// for from the tray.
+    page_count: u32,
+    current_page: u32,
+    page_step: i32,
     /// Scroll this icon (lower-case path) into view in its box (type to jump).
     scroll_to: Option<String>,
     /// Each box's icons as last drawn (paths, in order) and how many fit in a row, for the arrow
@@ -114,6 +119,7 @@ pub enum TrayCmd {
     NewBox,
     Search,
     HideShow,
+    NextPage,
     Quit,
 }
 
@@ -180,6 +186,9 @@ pub struct DeskApp {
     boxes_hidden: bool,
     /// The monitor setup the boxes are placed for (see `desktop::setup_key`).
     current_setup: String,
+    /// What the box windows were last shown or hidden for (page, hidden, each box's page).
+    shown_for: Option<(u32, bool, Vec<(u64, u32)>)>,
+    page_hotkeys_set: bool,
     /// Type to jump: what was typed recently on the desktop and when (a pause starts over).
     ta_buf: String,
     ta_last: Option<Instant>,
@@ -361,6 +370,8 @@ impl DeskApp {
             hide_hotkey_ok: true,
             boxes_hidden: false,
             current_setup: String::new(),
+            shown_for: None,
+            page_hotkeys_set: false,
             ta_buf: String::new(),
             ta_last: None,
             layout,
@@ -717,6 +728,33 @@ impl DeskApp {
                 }
             }
         }
+        // Pages: Ctrl+Alt+PageDown / PageUp, or the tray; then show only the current page's boxes.
+        #[cfg(windows)]
+        if self.persist {
+            if !self.page_hotkeys_set {
+                crate::runloop::set_page_hotkeys();
+                self.page_hotkeys_set = true;
+            }
+            let step = crate::runloop::take_page_step() + std::mem::take(&mut self.ui.page_step);
+            let count = self.layout.fences.iter().map(|f| f.page + 1).max().unwrap_or(1).max(self.layout.current_page + 1);
+            if step != 0 && count > 1 {
+                let cur = self.layout.current_page as i64;
+                self.layout.current_page = (cur + step as i64).rem_euclid(count as i64) as u32;
+                self.mark_dirty();
+            }
+            self.ui.page_count = count;
+            self.ui.current_page = self.layout.current_page;
+            let want = (self.layout.current_page, self.boxes_hidden, self.layout.fences.iter().map(|f| (f.id, f.page)).collect::<Vec<_>>());
+            if self.shown_for.as_ref() != Some(&want) {
+                for f in &self.layout.fences {
+                    if let Some(h) = self.ui.hwnds.get(&f.id) {
+                        desktop::show_box_window(*h, !self.boxes_hidden && f.page == self.layout.current_page);
+                    }
+                }
+                self.shown_for = Some(want);
+                self.redraw_all = true;
+            }
+        }
         // Hide/show all boxes (shortcut or tray).
         #[cfg(windows)]
         if self.persist {
@@ -796,6 +834,7 @@ impl DeskApp {
                 TrayCmd::NewBox => self.actions.push(Act::NewFence { auto: false }),
                 TrayCmd::Search => self.ui.open_search = true,
                 TrayCmd::HideShow => self.ui.toggle_hidden = true,
+                TrayCmd::NextPage => self.ui.page_step += 1,
                 TrayCmd::Quit => self.actions.push(Act::Quit),
             }
         }
@@ -908,10 +947,15 @@ impl DeskApp {
         for (path, to, tab) in pasted {
             self.actions.push(Act::MoveItem { path, to, tab });
         }
+        let ids_before: HashSet<u64> = self.layout.fences.iter().map(|f| f.id).collect();
         if !self.actions.is_empty() {
             self.redraw_all = true;
         }
         self.process_actions();
+        let cur_page = self.layout.current_page;
+        for f in self.layout.fences.iter_mut().filter(|f| !ids_before.contains(&f.id)) {
+            f.page = cur_page;
+        }
         // Something shared changed during this pass: draw every box once more, right away.
         if self.redraw_all && self.persist {
             ctx.request_repaint();
@@ -983,6 +1027,9 @@ impl DeskApp {
             let ids: Vec<u64> = self.layout.fences.iter().map(|f| f.id).collect();
             hosts.retain(&ids);
             for fence in self.layout.fences.iter_mut() {
+                if self.boxes_hidden || fence.page != self.layout.current_page {
+                    continue; // on another page, or all hidden: nothing to draw
+                }
                 let look = crate::host::Look {
                     tint: [fence.color[0], fence.color[1], fence.color[2], fence.alpha],
                     corner_points: fence.corner,
@@ -1380,17 +1427,79 @@ fn fence_window(
             let style = fv::text_style(fence);
             let icon = fence.icon_size as f32;
             let manual = fence.sort == SortKind::Manual && !fence.auto_sort;
-            let mut child = ui.new_child(UiBuilder::new().max_rect(a.content).layout(egui::Layout::top_down(Align::Min)));
-            ScrollArea::vertical()
+            // "Pages with dots": one screenful of icons at a time; the wheel or the dots flip.
+            let paged = fence.overflow == 1;
+            let mut content = a.content;
+            let mut page_n = 0usize;
+            let mut page_h = 0.0f32;
+            let mut pages = 1usize;
+            if paged {
+                let cols = ((content.width() / cell.x).floor() as usize).max(1);
+                let rows_fit = (((content.height() - 16.0) / cell.y).floor() as usize).max(1);
+                let per_page = rows_fit * cols;
+                pages = items.len().div_ceil(per_page).max(1);
+                page_h = rows_fit as f32 * cell.y;
+                if pages > 1 {
+                    content.max.y = content.min.y + page_h;
+                }
+                let pid = egui::Id::new(("box-page", fence.id, sel));
+                page_n = ctx.data(|d| d.get_temp::<usize>(pid)).unwrap_or(0);
+                // An icon asked for (search, arrow keys, typing): go to its page.
+                if let Some(i) = st.scroll_to.as_deref().and_then(|k| items.iter().position(|it| it.path.eq_ignore_ascii_case(k))) {
+                    page_n = i / per_page;
+                    st.scroll_to = None;
+                }
+                if pages > 1 && ui.rect_contains_pointer(a.content) {
+                    let dy = ui.input(|i| i.raw_scroll_delta.y);
+                    if dy != 0.0 {
+                        let mut acc = ctx.data(|d| d.get_temp::<f32>(pid.with("acc"))).unwrap_or(0.0) + dy;
+                        if acc <= -30.0 {
+                            page_n += 1;
+                            acc = 0.0;
+                        } else if acc >= 30.0 {
+                            page_n = page_n.saturating_sub(1);
+                            acc = 0.0;
+                        }
+                        ctx.data_mut(|d| d.insert_temp(pid.with("acc"), acc));
+                    }
+                }
+                page_n = page_n.min(pages - 1);
+                if pages > 1 {
+                    // The dots, centred under the icons; click one to go to that page.
+                    let gap = 12.0;
+                    let y = a.content.max.y - 8.0;
+                    let x0 = a.content.center().x - (pages - 1) as f32 * gap / 2.0;
+                    for p in 0..pages {
+                        let c = Pos2::new(x0 + p as f32 * gap, y);
+                        let r = Rect::from_center_size(c, Vec2::new(gap, 16.0));
+                        let resp = ui.interact(r, ui.id().with(("dot", fence.id, p)), Sense::click());
+                        if resp.clicked() {
+                            page_n = p;
+                        }
+                        let alpha = if p == page_n { 235 } else if resp.hovered() { 160 } else { 90 };
+                        ui.painter().circle_filled(c, if p == page_n { 3.5 } else { 3.0 }, Color32::from_white_alpha(alpha));
+                    }
+                }
+                ctx.data_mut(|d| d.insert_temp(pid, page_n));
+            }
+            let mut child = ui.new_child(UiBuilder::new().max_rect(content).layout(egui::Layout::top_down(Align::Min)));
+            let mut area = ScrollArea::vertical()
                 .id_salt(("grid", fence.id, sel))
                 .auto_shrink([false, false])
-                .drag_to_scroll(false)
+                .drag_to_scroll(false);
+            if paged {
+                area = area
+                    .enable_scrolling(false)
+                    .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+                    .vertical_scroll_offset(page_n as f32 * page_h);
+            }
+            area
                 .show(&mut child, |ui| {
                     let width = ui.available_width();
                     let cols = ((width / cell.x).floor() as usize).max(1);
                     let rows = items.len().div_ceil(cols);
                     // The whole grid area also takes drags on empty space: a selection rectangle.
-                    let grid_h = (rows as f32 * cell.y).max(ui.available_height());
+                    let grid_h = (rows as f32 * cell.y).max(ui.available_height()).max(pages as f32 * page_h);
                     let (grid, band) = ui.allocate_exact_size(Vec2::new(width, grid_h), Sense::click_and_drag());
                     if band.drag_started() {
                         if let Some(p) = band.interact_pointer_pos() {
@@ -1643,6 +1752,7 @@ pub enum MenuPage {
     New,
     MoveTo,
     MoveToTabs(u64),
+    Pages,
 }
 
 pub struct OpenMenu {
@@ -1800,6 +1910,9 @@ fn fence_menu(ui: &mut egui::Ui, fence: &mut Fence, st: &mut UiState, page: &mut
             if sub(ui, icon::ADD, "New") {
                 *page = MenuPage::New;
             }
+            if sub(ui, icon::TAB, "Move to page") {
+                *page = MenuPage::Pages;
+            }
             if row(ui, icon::SEARCH, "Search desktop", None, true).clicked() {
                 st.open_search = true;
                 close = true;
@@ -1825,6 +1938,14 @@ fn fence_menu(ui: &mut egui::Ui, fence: &mut Fence, st: &mut UiState, page: &mut
             for (s, label) in [(32, "Small icons"), (48, "Medium icons"), (96, "Large icons")] {
                 if check(ui, fence.icon_size == s, label) {
                     fence.icon_size = s;
+                    dirty = true;
+                    close = true;
+                }
+            }
+            sep(ui);
+            for (v, label) in [(0u8, "Scroll when icons don't fit"), (1, "Pages with dots when icons don't fit")] {
+                if check(ui, fence.overflow == v, label) {
+                    fence.overflow = v;
                     dirty = true;
                     close = true;
                 }
@@ -2001,6 +2122,24 @@ fn fence_menu(ui: &mut egui::Ui, fence: &mut Fence, st: &mut UiState, page: &mut
                 }
                 ui.add_space(4.0);
             });
+        }
+        MenuPage::Pages => {
+            back(ui, page, "Move to page");
+            for p in 0..st.page_count {
+                let here = if p == st.current_page { " (shown now)" } else { "" };
+                if check(ui, fence.page == p, &format!("Page {}{here}", p + 1)) {
+                    fence.page = p;
+                    dirty = true;
+                    close = true;
+                }
+            }
+            sep(ui);
+            if row(ui, icon::ADD, "New page", None, true).clicked() {
+                fence.page = st.page_count;
+                dirty = true;
+                close = true;
+            }
+            ui.label(egui::RichText::new("Switch pages with Ctrl+Alt+PageDown / PageUp or the tray icon.").size(11.5).color(Color32::from_gray(150)));
         }
         MenuPage::New => {
             back(ui, page, "New");
@@ -3006,9 +3145,10 @@ fn make_tray(ctx: &egui::Context, cmds: Arc<Mutex<Vec<TrayCmd>>>) -> Option<tray
     let new_box = MenuItem::new("New box", true, None);
     let search = MenuItem::new("Search desktop", true, None);
     let hide = MenuItem::new("Hide / show boxes", true, None);
+    let next_page = MenuItem::new("Next page of boxes", true, None);
     let quit = MenuItem::new("Quit", true, None);
-    let _ = menu.append_items(&[&open, &search, &hide, &new_box, &PredefinedMenuItem::separator(), &quit]);
-    let (open_id, new_id, quit_id, search_id, hide_id) = (open.id().clone(), new_box.id().clone(), quit.id().clone(), search.id().clone(), hide.id().clone());
+    let _ = menu.append_items(&[&open, &search, &hide, &next_page, &new_box, &PredefinedMenuItem::separator(), &quit]);
+    let (open_id, new_id, quit_id, search_id, hide_id, page_id) = (open.id().clone(), new_box.id().clone(), quit.id().clone(), search.id().clone(), hide.id().clone(), next_page.id().clone());
     {
         let cmds = cmds.clone();
         let ctx = ctx.clone();
@@ -3021,6 +3161,8 @@ fn make_tray(ctx: &egui::Context, cmds: Arc<Mutex<Vec<TrayCmd>>>) -> Option<tray
                 Some(TrayCmd::Search)
             } else if e.id == hide_id {
                 Some(TrayCmd::HideShow)
+            } else if e.id == page_id {
+                Some(TrayCmd::NextPage)
             } else if e.id == quit_id {
                 Some(TrayCmd::Quit)
             } else {
@@ -3517,11 +3659,8 @@ impl DeskApp {
 impl DeskApp {
     /// Hides every box (a clean desktop) or shows them again, just above the desktop.
     fn set_boxes_hidden(&mut self, hidden: bool) {
+        // The windows are shown or hidden by the page/visibility step on this pass.
         self.boxes_hidden = hidden;
-        #[cfg(windows)]
-        for h in self.ui.hwnds.values() {
-            desktop::show_box_window(*h, !hidden);
-        }
         self.redraw_all = true;
     }
 }
