@@ -337,6 +337,9 @@ unsafe extern "system" fn wndproc(h: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LR
             push(egui::Event::WindowFocused(f));
             LRESULT(0)
         }
+        // No visible frame, even when the window has a resizable frame for Windows' shadow
+        // (`desktop::set_shadow`): the whole window is the box.
+        WM_NCCALCSIZE if wp.0 != 0 => LRESULT(0),
         WM_MOUSEACTIVATE => {
             // Part of the desktop: clicking a box does not bring it in front of apps.
             if shared.lock().map(|s| s.no_activate).unwrap_or(true) {

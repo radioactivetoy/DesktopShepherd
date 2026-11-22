@@ -32,18 +32,19 @@ static CACHE: Mutex<Option<HashMap<String, Slot>>> = Mutex::new(None);
 /// Places found for the name typed in the settings: (query, results or error).
 static FOUND: Mutex<Option<(String, Result<Vec<(String, f64, f64)>, String>)>> = Mutex::new(None);
 
-/// A weather code (WMO) -> (Segoe Fluent icon, short description).
-pub fn describe(code: i64, day: bool) -> (char, &'static str) {
+/// A weather code (WMO) -> (symbol, short description). The symbols come from the emoji font
+/// built into the program, so they are always there.
+pub fn describe(code: i64, day: bool) -> (&'static str, &'static str) {
     match code {
-        0 => (if day { '\u{E706}' } else { '\u{E708}' }, t("Clear")),
-        1 | 2 => (if day { '\u{E9C1}' } else { '\u{E9C3}' }, t("Partly cloudy")),
-        3 => ('\u{E753}', t("Cloudy")),
-        45 | 48 => ('\u{E9CB}', t("Fog")),
-        51..=57 => ('\u{E9C4}', t("Drizzle")),
-        61..=67 | 80..=82 => ('\u{E9C4}', t("Rain")),
-        71..=77 | 85 | 86 => ('\u{E9C8}', t("Snow")),
-        95..=99 => ('\u{E9C6}', t("Thunderstorm")),
-        _ => ('\u{E753}', ""),
+        0 => (if day { "\u{2600}" } else { "\u{1F319}" }, t("Clear")),
+        1 | 2 => (if day { "\u{26C5}" } else { "\u{2601}" }, t("Partly cloudy")),
+        3 => ("\u{2601}", t("Cloudy")),
+        45 | 48 => ("\u{2601}", t("Fog")),
+        51..=57 => ("\u{2614}", t("Drizzle")),
+        61..=67 | 80..=82 => ("\u{2614}", t("Rain")),
+        71..=77 | 85 | 86 => ("\u{2744}", t("Snow")),
+        95..=99 => ("\u{26A1}", t("Thunderstorm")),
+        _ => ("\u{2601}", ""),
     }
 }
 
@@ -160,7 +161,7 @@ impl DeskWidget for Weather {
         let p = ui.painter();
         // Now: big icon and temperature, place and description.
         let icon_c = Pos2::new(full.min.x + 30.0, full.min.y + 34.0);
-        p.text(icon_c, egui::Align2::CENTER_CENTER, icon.to_string(), egui::FontId::proportional(40.0), Color32::from_rgb(255, 214, 110));
+        p.text(icon_c, egui::Align2::CENTER_CENTER, icon, egui::FontId::proportional(40.0), Color32::from_rgb(255, 214, 110));
         p.text(Pos2::new(full.min.x + 62.0, full.min.y + 34.0), egui::Align2::LEFT_CENTER, format!("{:.0}{unit}", f.temp), egui::FontId::proportional(34.0), Color32::WHITE);
         let right_x = full.max.x - 4.0;
         p.text(Pos2::new(right_x, full.min.y + 18.0), egui::Align2::RIGHT_CENTER, &place, egui::FontId::proportional(13.0), Color32::from_gray(225));
@@ -177,7 +178,7 @@ impl DeskWidget for Weather {
                 let cx = full.min.x + cw * (i as f32 + 0.5);
                 let name = if i == 0 { t("Today").to_string() } else { crate::i18n::weekday_short(date.weekday().num_days_from_monday()).to_string() };
                 p.text(Pos2::new(cx, top), egui::Align2::CENTER_TOP, name, egui::FontId::proportional(11.5), Color32::from_gray(190));
-                p.text(Pos2::new(cx, top + 18.0), egui::Align2::CENTER_TOP, describe(*code, true).0.to_string(), egui::FontId::proportional(18.0), Color32::from_rgb(255, 214, 110));
+                p.text(Pos2::new(cx, top + 18.0), egui::Align2::CENTER_TOP, describe(*code, true).0, egui::FontId::proportional(18.0), Color32::from_rgb(255, 214, 110));
                 p.text(Pos2::new(cx, top + 42.0), egui::Align2::CENTER_TOP, format!("{mx:.0}° {mn:.0}°"), egui::FontId::proportional(11.5), Color32::from_gray(220));
             }
         }

@@ -1446,19 +1446,39 @@ struct MediaInfo {
 
 /// What's playing, read on a helper thread at most every 2 s while a media widget shows (Windows'
 /// own media controls: Spotify, browsers, VLC… anything that shows in the volume flyout).
-static MEDIA: std::sync::Mutex<Option<(std::time::Instant, Option<MediaInfo>)>> = std::sync::Mutex::new(None);
+/// Every player Windows knows (the one it calls "current" first).
+static MEDIA: std::sync::Mutex<Option<(std::time::Instant, Vec<MediaInfo>)>> = std::sync::Mutex::new(None);
 static MEDIA_BUSY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 #[cfg(windows)]
-fn media_session() -> Option<windows::Media::Control::GlobalSystemMediaTransportControlsSession> {
+fn media_sessions() -> Vec<windows::Media::Control::GlobalSystemMediaTransportControlsSession> {
     use windows::Media::Control::GlobalSystemMediaTransportControlsSessionManager as M;
-    M::RequestAsync().ok()?.get().ok()?.GetCurrentSession().ok()
+    let Some(m) = M::RequestAsync().ok().and_then(|op| op.get().ok()) else { return Vec::new() };
+    let mut v = Vec::new();
+    let current = m.GetCurrentSession().ok();
+    let cur_id = current.as_ref().and_then(|s| s.SourceAppUserModelId().ok()).map(|h| h.to_string());
+    if let Some(c) = current {
+        v.push(c);
+    }
+    if let Ok(list) = m.GetSessions() {
+        for s in list {
+            let id = s.SourceAppUserModelId().ok().map(|h| h.to_string());
+            if id != cur_id {
+                v.push(s);
+            }
+        }
+    }
+    v
 }
 
 #[cfg(windows)]
-fn read_media(previous: Option<&MediaInfo>) -> Option<MediaInfo> {
+fn read_media(previous: &[MediaInfo]) -> Vec<MediaInfo> {
+    media_sessions().iter().filter_map(|s| read_session(s, previous)).collect()
+}
+
+#[cfg(windows)]
+fn read_session(s: &windows::Media::Control::GlobalSystemMediaTransportControlsSession, previous: &[MediaInfo]) -> Option<MediaInfo> {
     use windows::Media::Control::GlobalSystemMediaTransportControlsSessionPlaybackStatus as S;
-    let s = media_session()?;
     let props = s.TryGetMediaPropertiesAsync().ok()?.get().ok()?;
     let title = props.Title().map(|t| t.to_string()).unwrap_or_default();
     let artist = props.Artist().map(|t| t.to_string()).unwrap_or_default();
@@ -1476,7 +1496,7 @@ fn read_media(previous: Option<&MediaInfo>) -> Option<MediaInfo> {
         (&app, &title, &artist).hash(&mut h);
         h.finish()
     };
-    let art = match previous.and_then(|p| p.art.clone()).filter(|(k, _)| *k == key) {
+    let art = match previous.iter().find_map(|p| p.art.clone().filter(|(k, _)| *k == key)) {
         Some(a) => Some(a),
         None => (|| -> Option<(u64, std::sync::Arc<egui::ColorImage>)> {
             use windows::Storage::Streams::DataReader;
@@ -1497,17 +1517,17 @@ fn read_media(previous: Option<&MediaInfo>) -> Option<MediaInfo> {
     Some(MediaInfo { app, title, artist, playing, timeline, art })
 }
 #[cfg(not(windows))]
-fn read_media(_previous: Option<&MediaInfo>) -> Option<MediaInfo> {
-    None
+fn read_media(_previous: &[MediaInfo]) -> Vec<MediaInfo> {
+    Vec::new()
 }
 
 fn refresh_media(force: bool) {
     let current = MEDIA.lock().ok().and_then(|g| g.clone());
     let stale = current.as_ref().map(|(t, _)| t.elapsed() >= Duration::from_secs(2)).unwrap_or(true);
     if (stale || force) && !MEDIA_BUSY.swap(true, std::sync::atomic::Ordering::SeqCst) {
-        let prev = current.and_then(|(_, m)| m);
+        let prev = current.map(|(_, m)| m).unwrap_or_default();
         let spawned = std::thread::Builder::new().name("media-status".into()).spawn(move || {
-            let info = std::panic::catch_unwind(|| read_media(prev.as_ref())).ok().flatten();
+            let info = std::panic::catch_unwind(|| read_media(&prev)).unwrap_or_default();
             if let Ok(mut g) = MEDIA.lock() {
                 *g = Some((std::time::Instant::now(), info));
             }
@@ -1522,10 +1542,10 @@ fn refresh_media(force: bool) {
 }
 
 /// Play/pause, next or previous, on a helper thread (the player answers when it likes).
-fn media_command(which: u8) {
+fn media_command(which: u8, app: String) {
     let _ = std::thread::Builder::new().name("media-command".into()).spawn(move || {
         #[cfg(windows)]
-        if let Some(s) = media_session() {
+        if let Some(s) = media_sessions().into_iter().find(|s| s.SourceAppUserModelId().map(|h| h.to_string() == app).unwrap_or(false)) {
             let r = match which {
                 0 => s.TrySkipPreviousAsync(),
                 1 => s.TryTogglePlayPauseAsync(),
@@ -1591,12 +1611,35 @@ struct Media;
 impl DeskWidget for Media {
     fn ui(&self, ui: &mut Ui, _data: &mut Value) -> WidgetOutput {
         refresh_media(false);
-        let info = MEDIA.lock().ok().and_then(|g| g.as_ref().and_then(|(_, m)| m.clone()));
+        let all: Vec<MediaInfo> = MEDIA.lock().ok().and_then(|g| g.as_ref().map(|(_, m)| m.clone())).unwrap_or_default();
         // Nothing playing: an empty box (it fills again when music starts).
-        let Some(m) = info else {
+        if all.is_empty() {
             return WidgetOutput { changed: false, repaint_after: Some(Duration::from_secs(3)) };
-        };
-        let full = ui.max_rect();
+        }
+        // Several players: the one chosen with the dots (by its app), else Windows' current one.
+        let sid = ui.make_persistent_id("media-player");
+        let chosen: Option<String> = ui.ctx().data(|d| d.get_temp(sid));
+        let idx = chosen.and_then(|c| all.iter().position(|m| m.app == c)).unwrap_or(0);
+        let m = all[idx].clone();
+        let mut full = ui.max_rect();
+        if all.len() > 1 {
+            // The dots, one per player, at the bottom.
+            let gap = 14.0;
+            let y = full.max.y - 6.0;
+            let n = all.len();
+            for (i, p) in all.iter().enumerate() {
+                let c = Pos2::new(full.center().x + (i as f32 - (n as f32 - 1.0) / 2.0) * gap, y);
+                let r = egui::Rect::from_center_size(c, egui::vec2(gap, 12.0));
+                let resp = ui.interact(r, ui.id().with(("media-dot", i)), Sense::click()).on_hover_text(format!("{} — {}", app_label(&p.app), p.title));
+                if resp.clicked() {
+                    ui.ctx().data_mut(|d| d.insert_temp(sid, p.app.clone()));
+                    ui.ctx().request_repaint();
+                }
+                let alpha = if i == idx { 235 } else if resp.hovered() { 160 } else { 90 };
+                ui.painter().circle_filled(c, if i == idx { 3.5 } else { 3.0 }, Color32::from_white_alpha(alpha));
+            }
+            full.max.y -= 12.0;
+        }
         let side = (full.height() - 8.0).min(full.width() * 0.42).max(32.0);
         let art_rect = egui::Rect::from_min_size(Pos2::new(full.min.x, full.center().y - side / 2.0), egui::vec2(side, side));
         // The cover with rounded corners: one texture per widget, replaced when the song changes.
@@ -1654,13 +1697,13 @@ impl DeskWidget for Media {
         pa.circle_filled(mid, if play.hovered() { 19.0 } else { 18.0 }, Color32::WHITE);
         pa.text(mid + egui::vec2(if m.playing { 0.0 } else { 1.5 }, 0.0), egui::Align2::CENTER_CENTER, if m.playing { "\u{E769}" } else { "\u{E768}" }, egui::FontId::proportional(16.0), Color32::from_rgb(20, 20, 24));
         if prev.clicked() {
-            media_command(0);
+            media_command(0, m.app.clone());
         }
         if play.clicked() {
-            media_command(1);
+            media_command(1, m.app.clone());
         }
         if next.clicked() {
-            media_command(2);
+            media_command(2, m.app.clone());
         }
         y += 44.0;
         // Progress: where in the song, moving on by itself while playing.

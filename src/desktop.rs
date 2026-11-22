@@ -1371,6 +1371,17 @@ pub fn set_shadow(handle: isize, on: bool) -> bool {
         if hwnd.0.is_null() {
             return false;
         }
+        // Windows draws its shadow only for windows with a resizable frame; the box hides that
+        // frame (WM_NCCALCSIZE in host.rs), so only the shadow shows.
+        {
+            use windows::Win32::UI::WindowsAndMessaging::{GetWindowLongW, SetWindowLongW, SetWindowPos, GWL_STYLE, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE, SWP_NOZORDER, WS_THICKFRAME};
+            let style = GetWindowLongW(hwnd, GWL_STYLE) as u32;
+            let want = if on { style | WS_THICKFRAME.0 } else { style & !WS_THICKFRAME.0 };
+            if want != style {
+                SetWindowLongW(hwnd, GWL_STYLE, want as i32);
+                let _ = SetWindowPos(hwnd, None, 0, 0, 0, 0, SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+            }
+        }
         let policy = if on { DWMNCRP_ENABLED } else { DWMNCRP_DISABLED };
         let _ = DwmSetWindowAttribute(hwnd, DWMWA_NCRENDERING_POLICY, &policy as *const _ as *const _, std::mem::size_of_val(&policy) as u32);
         let pref = if on { DWMWCP_ROUND } else { DWMWCP_DONOTROUND };

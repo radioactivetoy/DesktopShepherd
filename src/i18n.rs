@@ -513,6 +513,19 @@ pub static ES: &[(&str, &str)] = &[
     ("Previous", "Anterior"),
     ("Play", "Reproducir"),
     ("Next", "Siguiente"),
+    ("Soft shadow (drawn by Windows)", "Sombra suave (dibujada por Windows)"),
+    ("Size", "Tamaño"),
+    ("Updates", "Actualizaciones"),
+    ("This is version {}.", "Esta es la versión {}."),
+    ("Checking…", "Comprobando…"),
+    ("Check now", "Comprobar ahora"),
+    ("Look for new versions automatically (once a day)", "Buscar nuevas versiones automáticamente (una vez al día)"),
+    ("Version {} is available.", "La versión {} está disponible."),
+    ("Update now", "Actualizar ahora"),
+    ("You have the newest version.", "Tienes la versión más reciente."),
+    ("DesktopShepherd {} is available", "DesktopShepherd {} está disponible"),
+    ("Later", "Más tarde"),
+    ("Update", "Actualizar"),
 ];
 
 pub static CA: &[(&str, &str)] = &[
@@ -837,6 +850,19 @@ pub static CA: &[(&str, &str)] = &[
     ("Previous", "Anterior"),
     ("Play", "Reprodueix"),
     ("Next", "Següent"),
+    ("Soft shadow (drawn by Windows)", "Ombra suau (dibuixada per Windows)"),
+    ("Size", "Mida"),
+    ("Updates", "Actualitzacions"),
+    ("This is version {}.", "Aquesta és la versió {}."),
+    ("Checking…", "S'està comprovant…"),
+    ("Check now", "Comprova-ho ara"),
+    ("Look for new versions automatically (once a day)", "Cerca versions noves automàticament (un cop al dia)"),
+    ("Version {} is available.", "La versió {} està disponible."),
+    ("Update now", "Actualitza ara"),
+    ("You have the newest version.", "Tens la versió més recent."),
+    ("DesktopShepherd {} is available", "DesktopShepherd {} està disponible"),
+    ("Later", "Més tard"),
+    ("Update", "Actualitza"),
 ];
 
 #[cfg(test)]

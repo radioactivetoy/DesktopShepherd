@@ -2350,10 +2350,7 @@ fn look_left(ui: &mut egui::Ui, fence: &mut Fence) -> bool {
                 dirty |= slider_row(ui, t("Thickness"), bw, &mut |ui| ui.add(egui::Slider::new(&mut fence.border_width, 0.0..=6.0).step_by(0.5).show_value(false)).changed());
                 let [r, g, b, a] = fence.border_color;
                 let mut border = Color32::from_rgba_unmultiplied(r, g, b, a);
-                ui.horizontal(|ui| {
-                    ui.add_space(14.0);
-                    dirty |= ui.checkbox(&mut fence.shadow, t("Soft shadow (drawn by Windows)")).changed();
-                });
+                // (Windows' shadow option: hidden until it shows reliably; see docs/STATUS.md.)
                 if color_row(ui, "border-colour", t("Border colour…"), &mut border, true) {
                     fence.border_color = border.to_srgba_unmultiplied();
                     dirty = true;

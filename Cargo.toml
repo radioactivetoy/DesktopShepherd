@@ -59,6 +59,7 @@ windows = { version = "0.58", features = [
     "Win32_Globalization",
     "Win32_System_Diagnostics_Debug",
     "Foundation",
+    "Foundation_Collections",
     "Media",
     "Media_Control",
     "Storage",

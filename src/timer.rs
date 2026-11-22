@@ -118,7 +118,7 @@ impl DeskWidget for Timer {
         });
         if !pomodoro && !running && full.height() > 150.0 {
             child.horizontal(|ui| {
-                for m in [1i64, 5, 10, 15, 30, 60] {
+                for m in [5i64, 10, 25] {
                     if ui.small_button(tf("{} min", &[&m])).clicked() {
                         data["len"] = json!(m * 60_000);
                         data["paused"] = json!(0);

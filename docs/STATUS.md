@@ -112,6 +112,9 @@ egui font atlases, and the icon textures.
   desktop, "s" jumped to the next s-item and "s" again to the one after; a text box in another
   window received "abc1" normally; typing "xyz" right after switching from the desktop to another
   window arrived intact 3 times out of 3.
+- To do: Windows drop shadow on boxes (`desktop::set_shadow`, field `Fence.shadow`) is wired but
+  showed no shadow in testing (box windows are composition windows with WS_EX_NOREDIRECTIONBITMAP);
+  the Personalize checkbox is hidden until it works. Weather icons: use Meteocons later.
 - New (2026-11-22, evening): internet allowed (CLAUDE.md rule 3). Widgets "Laptop status"
   (GetSystemPowerStatus, WLAN API, Bluetooth API; helper thread every 5 s while shown) and "Now
   playing" (Windows media session API: title, artist, cover, play/pause/next/previous, progress;
