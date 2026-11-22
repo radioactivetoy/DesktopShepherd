@@ -214,6 +214,8 @@ fn download(url: &str) -> Result<String, String> {
         if status != 200 {
             return Err(match status {
                 401 | 403 => format!("{host} refused the link (error {status}): is it the private/secret iCal address?"),
+                // Google answers 404 to a calendar's public address unless it is shared publicly.
+                404 if path.contains("/public/") => "that is the calendar's public address, which only works for public calendars: use its \"Secret address in iCal format\" instead".to_string(),
                 404 => format!("{host} doesn't know that link (error 404)"),
                 _ => format!("{host} answered with error {status}"),
             });
