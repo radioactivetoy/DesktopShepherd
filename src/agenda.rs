@@ -11,7 +11,8 @@
 //! times in UTC ("Z") or local, repeating events (daily / weekly with days / monthly by date or
 //! "2nd Tuesday" / yearly, with interval, count, end date), cancelled dates (EXDATE), moved
 //! instances (RECURRENCE-ID) and cancelled events. Times given with a named time zone (TZID) are
-//! taken as local time (right when the calendar is in the person's own zone).
+//! converted with the zone's rules the calendar itself includes (VTIMEZONE: Google and Outlook
+//! send them); a zone without rules is taken as local time.
 
 use chrono::{Datelike, Duration as CDuration, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Weekday};
 use std::collections::{HashMap, HashSet};
@@ -529,6 +530,57 @@ fn nth_last_day(y: i32, m: u32, n: i32) -> Option<NaiveDate> {
     Some(next - CDuration::days(n as i64))
 }
 
+/// A calendar's time zones: TZID -> (first change, yearly rule, offset from UTC in seconds).
+type Zones = HashMap<String, Vec<(NaiveDateTime, Option<Rule>, i64)>>;
+
+/// "+0100", "-0500", "+053000" -> seconds east of UTC.
+fn parse_offset(v: &str) -> Option<i64> {
+    let v = v.trim();
+    let (sign, digits) = match v.chars().next()? {
+        '+' => (1, &v[1..]),
+        '-' => (-1, &v[1..]),
+        _ => (1, v),
+    };
+    if digits.len() < 4 || !digits.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    let h: i64 = digits[0..2].parse().ok()?;
+    let m: i64 = digits[2..4].parse().ok()?;
+    let s: i64 = digits.get(4..6).and_then(|x| x.parse().ok()).unwrap_or(0);
+    Some(sign * (h * 3600 + m * 60 + s))
+}
+
+/// A time on a zone's clock -> the same moment on this PC's clock. Uses the zone's latest
+/// change at or before that time (winter / summer time); a zone the calendar doesn't describe
+/// is taken as local time.
+fn zone_to_local(t: NaiveDateTime, tzid: Option<&str>, zones: &Zones) -> NaiveDateTime {
+    let Some(parts) = tzid.and_then(|z| zones.get(z)) else { return t };
+    let mut best: Option<(NaiveDateTime, i64)> = None;
+    for (start, rule, offset) in parts {
+        let onset = match rule {
+            Some(r) => {
+                // Only the last two years of a yearly rule matter for this time.
+                let mut s = *start;
+                if r.freq == "YEARLY" && r.count.is_none() && t.year() - 1 > s.year() {
+                    if let Some(d) = NaiveDate::from_ymd_opt(t.year() - 1, s.month(), s.day().min(28)) {
+                        s = d.and_time(s.time());
+                    }
+                }
+                expand(s, r, t).into_iter().filter(|o| *o <= t).last()
+            }
+            None => (*start <= t).then_some(*start),
+        };
+        if let Some(o) = onset {
+            if best.map(|(b, _)| o > b).unwrap_or(true) {
+                best = Some((o, *offset));
+            }
+        }
+    }
+    let Some((_, offset)) = best else { return t };
+    let Some(utc) = t.checked_sub_signed(CDuration::seconds(offset)) else { return t };
+    chrono::Utc.from_utc_datetime(&utc).with_timezone(&chrono::Local).naive_local()
+}
+
 /// Reads an iCal text into the calendar's name and the events touching [from, to], sorted.
 pub fn parse(text: &str, from: NaiveDate, to: NaiveDate) -> (Option<String>, Vec<Occurrence>) {
     // Unfold continuation lines (a line starting with a space or tab belongs to the one before).
@@ -549,8 +601,51 @@ pub fn parse(text: &str, from: NaiveDate, to: NaiveDate) -> (Option<String>, Vec
     let mut events: Vec<Vec<Prop>> = Vec::new();
     let mut cur: Option<Vec<Prop>> = None;
     let mut depth_other = 0; // inside VALARM etc. within an event
+    // Time zones the calendar describes: TZID -> its changes (first start, yearly rule, offset).
+    let mut zones: Zones = HashMap::new();
+    let mut zone_id: Option<String> = None;
+    let mut part: Option<Vec<Prop>> = None; // a STANDARD or DAYLIGHT block being read
     for l in &lines {
         let upper = l.to_ascii_uppercase();
+        if cur.is_none() {
+            match upper.as_str() {
+                "BEGIN:VTIMEZONE" => {
+                    zone_id = None;
+                    continue;
+                }
+                "END:VTIMEZONE" => {
+                    zone_id = None;
+                    continue;
+                }
+                "BEGIN:STANDARD" | "BEGIN:DAYLIGHT" => {
+                    part = Some(Vec::new());
+                    continue;
+                }
+                "END:STANDARD" | "END:DAYLIGHT" => {
+                    if let (Some(id), Some(ps)) = (zone_id.as_ref(), part.take()) {
+                        let get = |n: &str| ps.iter().find(|p| p.name == n);
+                        let start = get("DTSTART").and_then(|p| parse_value(&p.value, false)).map(|t| t.0);
+                        let offset = get("TZOFFSETTO").and_then(|p| parse_offset(&p.value));
+                        if let (Some(start), Some(offset)) = (start, offset) {
+                            let rule = get("RRULE").and_then(|p| parse_rule(&p.value));
+                            zones.entry(id.clone()).or_default().push((start, rule, offset));
+                        }
+                    }
+                    continue;
+                }
+                _ => {}
+            }
+            if let Some(ps) = part.as_mut() {
+                if let Some(p) = parse_line(l) {
+                    ps.push(p);
+                }
+                continue;
+            }
+            if upper.starts_with("TZID") {
+                zone_id = parse_line(l).map(|p| p.value.trim().to_string());
+                continue;
+            }
+        }
         if upper == "BEGIN:VEVENT" {
             cur = Some(Vec::new());
             depth_other = 0;
@@ -617,11 +712,14 @@ pub fn parse(text: &str, from: NaiveDate, to: NaiveDate) -> (Option<String>, Vec
                         }
                     }
                 }
-                expand(start, &rule, to_t).into_iter().filter(|t| !ex.contains(t) && !moved.contains(&(uid.clone(), *t))).collect()
+                expand(start, &rule, to_t + CDuration::days(1)).into_iter().filter(|t| !ex.contains(t) && !moved.contains(&(uid.clone(), *t))).collect()
             }
             _ => vec![start],
         };
+        // Times with a named zone: worked out in that zone (above), shown in local time.
+        let tzid = get("DTSTART").and_then(|p| p.param("TZID")).map(|z| z.to_string());
         for s in starts {
+            let s = if all_day { s } else { zone_to_local(s, tzid.as_deref(), &zones) };
             let Some(end) = s.checked_add_signed(length) else { continue };
             // Touches the window (an event of zero length counts at its start).
             if s < to_t && (end > from_t || (end == s && s >= from_t)) {
@@ -688,6 +786,20 @@ mod tests {
         assert!(v.contains(&"Tue 10 Second Tuesday".to_string()), "{v:?}");
         let work: Vec<&String> = v.iter().filter(|s| s.ends_with("Work")).collect();
         assert_eq!(work, ["Fri 20 Work", "Mon 23 Work", "Tue 24 Work", "Wed 25 Work"]);
+    }
+
+    #[test]
+    fn named_time_zone_is_converted() {
+        // New York: UTC-5 in winter, UTC-4 in summer (second Sunday of March to first Sunday of November).
+        let cal = "BEGIN:VCALENDAR\nBEGIN:VTIMEZONE\nTZID:America/New_York\nBEGIN:DAYLIGHT\nTZOFFSETFROM:-0500\nTZOFFSETTO:-0400\nDTSTART:19700308T020000\nRRULE:FREQ=YEARLY;BYMONTH=3;BYDAY=2SU\nEND:DAYLIGHT\nBEGIN:STANDARD\nTZOFFSETFROM:-0400\nTZOFFSETTO:-0500\nDTSTART:19701101T020000\nRRULE:FREQ=YEARLY;BYMONTH=11;BYDAY=1SU\nEND:STANDARD\nEND:VTIMEZONE\nBEGIN:VEVENT\nDTSTART;TZID=America/New_York:20261124T090000\nDTEND;TZID=America/New_York:20261124T100000\nSUMMARY:Winter call\nEND:VEVENT\nBEGIN:VEVENT\nDTSTART;TZID=America/New_York:20260715T090000\nSUMMARY:Summer call\nEND:VEVENT\nEND:VCALENDAR\n";
+        let local = |y, m, dd, h| chrono::Utc.from_utc_datetime(&d(y, m, dd).and_hms_opt(h, 0, 0).unwrap()).with_timezone(&chrono::Local).naive_local();
+        let (_, ev) = parse(cal, d(2026, 7, 1), d(2026, 11, 30));
+        let winter = ev.iter().find(|e| e.title == "Winter call").unwrap();
+        assert_eq!(winter.start, local(2026, 11, 24, 14)); // 09:00 New York = 14:00 UTC
+        assert_eq!(winter.end - winter.start, CDuration::hours(1));
+        let summer = ev.iter().find(|e| e.title == "Summer call").unwrap();
+        assert_eq!(summer.start, local(2026, 7, 15, 13)); // 09:00 New York (summer) = 13:00 UTC
+        assert_eq!(parse_offset("+0530"), Some(19800));
     }
 
     #[test]
