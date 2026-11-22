@@ -2625,20 +2625,29 @@ impl DeskApp {
     }
 
     fn page_boxes(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
+        // A short row: the three kinds of box, and every widget behind one "Add widget" list (it
+        // grows with new widgets without running off the window).
+        ui.horizontal_wrapped(|ui| {
             if ui.button("➕ New box").clicked() {
                 self.actions.push(Act::NewFence { auto: false });
             }
             if ui.button("➕ New auto-sort box").on_hover_text("Collects every desktop item no other box holds, sorted into tabs by kind").clicked() {
                 self.actions.push(Act::NewFence { auto: true });
             }
-            ui.separator();
-            ui.label("Widgets:");
-            for k in widgets::REGISTRY {
-                if ui.button(format!("➕ {}", k.label)).clicked() {
-                    self.actions.push(Act::NewWidget(k.id));
-                }
+            if ui.button("➕ New folder box…").on_hover_text("A box that shows what is in a folder, live").clicked() {
+                self.actions.push(Act::NewFolderBox);
             }
+            ui.separator();
+            ui.menu_button(format!("➕ Add widget  {}", icon::DOWN), |ui| {
+                ui.set_min_width(230.0);
+                for k in widgets::REGISTRY {
+                    let text = egui::RichText::new(format!("{}    {}", k.icon, k.label)).size(14.0);
+                    if ui.add(egui::Button::new(text).frame(false).min_size(Vec2::new(220.0, 28.0))).clicked() {
+                        self.actions.push(Act::NewWidget(k.id));
+                        ui.close_menu();
+                    }
+                }
+            });
         });
         ui.add_space(8.0);
         let claimed: HashSet<String> = self
