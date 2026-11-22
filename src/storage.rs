@@ -12,6 +12,12 @@ const MAX_BACKUPS: usize = 10;
 pub fn data_dir() -> PathBuf {
     static DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
     DIR.get_or_init(|| {
+        // Portable copy: a "portable.txt" next to the program keeps everything in "data" beside it.
+        if let Some(dir) = std::env::current_exe().ok().and_then(|e| e.parent().map(|p| p.to_path_buf())) {
+            if dir.join("portable.txt").exists() {
+                return dir.join("data");
+            }
+        }
         let base = dirs::config_dir().unwrap_or_else(std::env::temp_dir);
         let dir = base.join("DesktopShepherd");
         // The program used to be called DeskBoxes: bring its folder (layout, backups, log)

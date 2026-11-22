@@ -1,0 +1,64 @@
+# Builds DesktopShepherd on GitHub's Windows machines and makes two downloads:
+#   DesktopShepherd-Setup-<version>.exe     installer (installs per user, no admin rights)
+#   DesktopShepherd-Portable-<version>.zip  portable copy (settings kept next to the program)
+#
+# - Push a tag like v0.2.0 (git tag v0.2.0 && git push origin v0.2.0): builds and publishes a
+#   GitHub Release with both files.
+# - "Run workflow" on the Actions page: builds only; the files are under the run's Artifacts.
+#
+# GitHub's machines use the MSVC toolchain, where this PC's GNU workarounds (.cargo/config.toml,
+# lib/) are not needed (the config only applies to the GNU target).
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust toolchain (stable, MSVC)
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustc --version
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build (dist profile, exact versions from Cargo.lock)
+        run: cargo build --profile dist --locked
+
+      - name: Test
+        run: cargo test --locked
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $ver = if ($env:GITHUB_REF_TYPE -eq 'tag') { $env:GITHUB_REF_NAME.TrimStart('v') } else { "dev-$($env:GITHUB_SHA.Substring(0,7))" }
+          New-Item -ItemType Directory -Force out, portable | Out-Null
+          Copy-Item target\dist\desktopshepherd.exe "out\DesktopShepherd-Setup-$ver.exe"
+          Copy-Item target\dist\desktopshepherd.exe portable\DesktopShepherd.exe
+          "DesktopShepherd portable: settings are kept in the 'data' folder next to the program. Delete this file to use your user profile instead." | Set-Content portable\portable.txt
+          Copy-Item README.md portable\README.md
+          Compress-Archive -Path portable\* -DestinationPath "out\DesktopShepherd-Portable-$ver.zip"
+          Get-ChildItem out | Format-Table Name, Length
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DesktopShepherd
+          path: out/*
+
+      - name: Publish release (tags only)
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: out/*
+          generate_release_notes: true
