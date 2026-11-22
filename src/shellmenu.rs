@@ -17,6 +17,7 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Shell::Common::ITEMIDLIST;
 use windows::Win32::UI::Shell::{
     IContextMenu, IContextMenu2, IContextMenu3, IShellFolder, SHBindToParent, SHParseDisplayName, CMF_NORMAL, CMINVOKECOMMANDINFO,
+    CMINVOKECOMMANDINFOEX,
 };
 use windows::Win32::UI::WindowsAndMessaging::*;
 
@@ -167,9 +168,12 @@ pub fn run_helper(args: &[String]) -> i32 {
     }
 }
 
-/// Keeps the helper alive (pumping messages) while it shows windows of its own.
+/// Keeps the helper alive (pumping messages) while it shows windows of its own. A command
+/// may take a few seconds to open its window (Properties loads its pages the first time): wait up
+/// to 10 s for one to appear, then until every one is closed.
 unsafe fn wait_for_own_windows(owner: HWND) {
     let start = std::time::Instant::now();
+    let mut seen = false;
     let mut idle_checks = 0;
     while start.elapsed() < std::time::Duration::from_secs(3600) {
         let mut msg = MSG::default();
@@ -179,11 +183,12 @@ unsafe fn wait_for_own_windows(owner: HWND) {
         }
         if own_visible_windows(owner) == 0 {
             idle_checks += 1;
-            // Give a command a moment to open its window before deciding there is none.
-            if idle_checks >= 8 {
+            // Nothing opened within 10 s, or everything that opened is closed again.
+            if (!seen && idle_checks >= 40) || (seen && idle_checks >= 4) {
                 return;
             }
         } else {
+            seen = true;
             idle_checks = 0;
         }
         std::thread::sleep(std::time::Duration::from_millis(250));
@@ -279,14 +284,20 @@ unsafe fn show_inner(owner: HWND, paths: &[String], extras: &[Extra]) -> windows
             return Ok(cmd - OURS);
         }
         if cmd >= FIRST {
-            let info = CMINVOKECOMMANDINFO {
-                cbSize: std::mem::size_of::<CMINVOKECOMMANDINFO>() as u32,
+            // The full form (Unicode verb, the point where the menu was opened): some commands,
+            // like Properties, fail with the short form.
+            let verb = (cmd - FIRST) as usize;
+            let info = CMINVOKECOMMANDINFOEX {
+                cbSize: std::mem::size_of::<CMINVOKECOMMANDINFOEX>() as u32,
+                fMask: 0x4000 /* CMIC_MASK_UNICODE */ | 0x2000_0000 /* CMIC_MASK_PTINVOKE */,
                 hwnd: owner,
-                lpVerb: PCSTR((cmd - FIRST) as usize as *const u8),
+                lpVerb: PCSTR(verb as *const u8),
+                lpVerbW: PCWSTR(verb as *const u16),
                 nShow: SW_SHOWNORMAL.0,
+                ptInvoke: at,
                 ..Default::default()
             };
-            cm.InvokeCommand(&info)?;
+            cm.InvokeCommand(&info as *const CMINVOKECOMMANDINFOEX as *const CMINVOKECOMMANDINFO)?;
         }
         Ok(0)
     })();
