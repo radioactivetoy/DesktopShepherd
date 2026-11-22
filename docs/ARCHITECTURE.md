@@ -3,8 +3,8 @@
 ## Processes
 
 ```
-deskboxes.exe            supervisor (main.rs: supervise)
-  └─ deskboxes.exe --worker   the real app (own Win32 loop + egui + DirectX windows)
+desktopshepherd.exe            supervisor (main.rs: supervise)
+  └─ desktopshepherd.exe --worker   the real app (own Win32 loop + egui + DirectX windows)
 ```
 
 - The supervisor claims a single-instance mutex, starts the worker and waits. Whenever the
@@ -12,11 +12,11 @@ deskboxes.exe            supervisor (main.rs: supervise)
   with growing waits for failures in a row (2, 5, 15, 30, 60, 120, then every 300 s; a run of
   ≥ 60 s resets them). Only exit code 0 (a real quit) stops the supervisor. A failed start
   (no DirectX device at all) exits with code 2 and is retried the same way.
-- Clean stop: the worker waits on a named event `Local\DeskBoxes.Quit`
+- Clean stop: the worker waits on a named event `Local\DesktopShepherd.Quit`
   (`desktop::watch_quit_signal`, hooked to `runloop::request_quit`). `scripts\stop.ps1` sets
   it, waits up to 5 s and only force-kills if the worker does not leave.
 - The worker also has a panic hook that logs and restores icons.
-- Log: `%APPDATA%\DeskBoxes\log.txt`. Layout: `%APPDATA%\DeskBoxes\layout.json` (written via
+- Log: `%APPDATA%\DesktopShepherd\log.txt`. Layout: `%APPDATA%\DesktopShepherd\layout.json` (written via
   `.tmp` + rename; rolling copies in `backups\`).
 
 ## The program's own loop (`runloop.rs`, since phase C)
@@ -24,7 +24,7 @@ deskboxes.exe            supervisor (main.rs: supervise)
 There is no eframe, no GL and no main window to draw on any more.
 
 - At start the process is set to per-monitor DPI aware v2 (eframe used to do that).
-- A hidden top-level window, class/name `DeskBoxesMain`, is created and **never shown**. It
+- A hidden top-level window, class/name `DesktopShepherdMain`, is created and **never shown**. It
   receives wake-ups (`WM_APP`) posted by other threads (desktop scan, icon loader, tray...) and
   Windows' shutdown notice (`WM_QUERYENDSESSION` / `WM_ENDSESSION`): on shutdown the app saves
   and puts the desktop icons back.
@@ -61,7 +61,7 @@ There is no eframe, no GL and no main window to draw on any more.
 
 ## Windows inside the worker
 
-- **Menus and settings**: `host::Panel` windows (class `DeskBoxesPanel`): plain Win32 windows
+- **Menus and settings**: `host::Panel` windows (class `DesktopShepherdPanel`): plain Win32 windows
   with an ordinary flip swap chain, drawn by the boxes' renderer and egui context
   (`HostSystem::panel`, ids `MENU_PANEL` / `SETTINGS_PANEL` / `SEARCH_PANEL` in `app.rs`). The quick
   search box (`show_search`) is such a topmost panel near the top of the main monitor; ranking
@@ -120,7 +120,7 @@ There is no eframe, no GL and no main window to draw on any more.
     `D3D_DRIVER_TYPE_WARP` (Windows' software DirectX; logged). WARP is slower but fine for
     small boxes and covers weak GPUs and Remote Desktop.
   - **No-glass fallback**: if Windows' composition cannot start (or env var
-    `DESKBOXES_NO_COMPOSITION=1`, for testing), boxes are ordinary windows with their own flip
+    `DESKTOPSHEPHERD_NO_COMPOSITION=1`, for testing), boxes are ordinary windows with their own flip
     swap chain; egui draws a solid dark background and the tint (`HostSystem::has_glass`,
     `Host.glass: Option<Glass>`, `UiState.glass`). Chain: hardware D3D11 + glass, WARP + glass,
     no glass. Only "no D3D device at all" exits with code 2 (the supervisor retries with growing
@@ -144,7 +144,7 @@ There is no eframe, no GL and no main window to draw on any more.
 | icon hide/show | toggles the desktop ListView asynchronously (never blocks on Explorer) |
 | move helper | `host::move_with_mouse`, alive only during a box drag |
 | flying icon | topmost layered window during icon drag (`ghost::begin_icon_drag(path, px) -> DragImage`); the picture loads its icon on its own thread and can be cancelled with `DragImage::destroy`, so a slow shortcut (network drive) cannot freeze the boxes |
-| quit watcher | waits on the named event `Local\DeskBoxes.Quit` (`desktop::watch_quit_signal`) |
+| quit watcher | waits on the named event `Local\DesktopShepherd.Quit` (`desktop::watch_quit_signal`) |
 | show-desktop guard | asleep except for ~1 s after Win+D (see STATUS) |
 
 Idle the UI thread sleeps: it only wakes on input, a scan change, a widget timer (clock: once
@@ -155,9 +155,11 @@ a second) or a wake-up posted by another thread.
 | File | Contents |
 |---|---|
 | `main.rs` | arg parsing, supervisor, panic hook, start of the worker |
-| `runloop.rs` | the Win32 message loop, hidden `DeskBoxesMain` window, wake-ups, shutdown notice, quit |
+| `runloop.rs` | the Win32 message loop, hidden `DesktopShepherdMain` window, wake-ups, shutdown notice, quit |
 | `app.rs` | `DeskApp` state, update pass, boxes UI (`fence_window`), menus, settings page, selection/drag/drop, multi-monitor binding, `place_box` / `place_all_boxes`, layout migrations (v2/v3), `Act` command queue; `type_ahead` (type to jump: open boxes in reading order, all tabs; same letter again = next match; letters within 1 s narrow the prefix; selects, switches tab, scrolls into view via `UiState.scroll_to`; Enter opens the selection within 30 s; mode 2 opens quick search with the typed letter) |
-| `shellmenu.rs` | Windows' own context menu for desktop items ("More options..."): `SHParseDisplayName` -> `SHBindToParent` -> `IShellFolder::GetUIObjectOf(IContextMenu)` -> `QueryContextMenu` -> `TrackPopupMenuEx` (owner: the hidden `DeskBoxesMain` window) -> `InvokeCommand`. Items of a multi-selection in the same folder are included. Runs in our process, not Explorer's: a faulty third-party menu add-on can only crash DeskBoxes (the supervisor restarts it), never Explorer. The owner must be in front, so `runloop::bring_main_to_front()` is called from `show_menu` while our own menu still has focus. The desktop is re-read after a command. |
+| `shellmenu.rs` | Windows' own context menu for desktop items, shown by a short-lived helper process (`desktopshepherd.exe --shell-menu`): `IShellFolder::GetUIObjectOf(IContextMenu)` -> `QueryContextMenu` -> `TrackPopupMenuEx` -> `InvokeCommand` with `CMINVOKECOMMANDINFOEX`. Our own entries are added on top; the chosen one comes back as the exit code. Shell extensions load only into the helper, never into the app or Explorer. |
+| `fileops.rs` | Recycle Bin delete, clipboard (copy/cut as files) and paste into a box (`SHFileOperationW`, undo-able, renames on collision) |
+| `install.rs` | installer (any copy named *setup*.exe) and `--uninstall`: per-user install to `%LOCALAPPDATA%ProgramsDesktopShepherd`, Start menu shortcut, Installed apps entry, Run value; stops a running copy through the quit event |
 | `host.rs` | DirectX/composition box and panel windows, input mapping, look (`Look`), device-lost recovery, `move_with_mouse` |
 | `d3d.rs` | D3D11 egui renderer (hardware or WARP device, textures, swap chains, draw, `render_offscreen` for `--screenshot`) |
 | `comp_trial.rs` | stand-alone composition diagnostic (`--composition-trial`) |
@@ -168,8 +170,8 @@ a second) or a wake-up posted by another thread.
 | `snap.rs` | box snapping arithmetic (pure, 7 unit tests: `cargo test snap`) |
 | `search.rs` | quick-search ranking (pure, 4 unit tests): name starts with text, then a word starts with it, then contains it (or file type), then letters in order; 12 results |
 | `model.rs` | saved data types: `Layout`, `Fence`, `Tab`, `Settings`, `CategoryRule`, widgets config. Look fields on `Fence` (all with defaults; `sanitize()` repairs odd values): `border_width`, `text_color`, `text_shadow`, `font`, `title_size`, `caption_size`, `show_captions`, `icon_spacing`; `Fence::copy_look_from` backs "Apply this look to all boxes" (`Act::ApplyLookToAll`) |
-| `storage.rs` | load/save/backups/log |
-| `widgets.rs` | widget registry (clock, note, sketch) – add new widgets here |
+| `storage.rs` | load/save/backups/log; `data_dir()` moves the old `%APPDATA%DeskBoxes` folder to `%APPDATA%DesktopShepherd` once |
+| `widgets.rs` | widget registry (clock, note, drawing pad, system monitor, calendar, to-do list; the search box is drawn by `search_widget` in `app.rs`) – add new widgets here. The system monitor shares one reading for all monitors (CPU/RAM every 2 s, drives every 60 s) and reads only while shown |
 
 (`wallpaper.rs` and the classic GL drawing path were deleted in phase C.)
 

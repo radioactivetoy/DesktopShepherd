@@ -37,13 +37,13 @@ pub fn run(seconds: u64) -> windows::core::Result<()> {
             apartmentType: DQTAT_COM_NONE,
         })?;
         let inst = GetModuleHandleW(None)?;
-        let wc = WNDCLASSW { lpfnWndProc: Some(proc), hInstance: inst.into(), lpszClassName: w!("DeskBoxesCompTrial"), ..Default::default() };
+        let wc = WNDCLASSW { lpfnWndProc: Some(proc), hInstance: inst.into(), lpszClassName: w!("DesktopShepherdCompTrial"), ..Default::default() };
         RegisterClassW(&wc);
         let (x, y, wd, ht) = (300, 200, 520, 340);
         let hwnd = CreateWindowExW(
             WS_EX_NOREDIRECTIONBITMAP | WS_EX_TOOLWINDOW,
-            w!("DeskBoxesCompTrial"),
-            w!("DeskBoxes composition trial"),
+            w!("DesktopShepherdCompTrial"),
+            w!("DesktopShepherd composition trial"),
             WS_POPUP | WS_VISIBLE,
             x,
             y,

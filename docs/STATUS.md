@@ -4,8 +4,8 @@
 
 | Process | Working set | Private | Threads | CPU idle (10 s, all cores) |
 |---|---|---|---|---|
-| supervisor `deskboxes.exe` | ~2 MB | 2 MB | – | 0.00 % |
-| worker `deskboxes.exe --worker` | ~89 MB | ~75 MB | 34 | ~0.00–0.02 % |
+| supervisor `desktopshepherd.exe` | ~2 MB | 2 MB | – | 0.00 % |
+| worker `desktopshepherd.exe --worker` | ~89 MB | ~75 MB | 34 | ~0.00–0.02 % |
 
 History: classic GL glass path 194–240 MB → DirectX composition path ~156 MB (155 MB private,
 30 threads) → after phase C (no eframe/GL) ~110 MB (100 MB private) → after the memory round
@@ -23,7 +23,7 @@ move/resize, look change, its egui timer) or when shared data changes (`redraw_a
 started by box input are grouped (at most one per 16 ms, `host::MIN_PASS_GAP`). Phase C
 removed eframe and its GL main window and the classic path (own message loop in
 `src/runloop.rs`); moving a box no longer causes a burst of redraws (only resizing does).
-`DESKBOXES_DEBUG_DRAWS=1` logs box frames drawn and time spent per 300 passes.
+`DESKTOPSHEPHERD_DEBUG_DRAWS=1` logs box frames drawn and time spent per 300 passes.
 Dragging a box: the box follows the cursor within ~1 step; dragged icons track within 1 px.
 
 **Original app for comparison**: only its 11–12 MB launcher was running here (the
@@ -52,7 +52,7 @@ egui font atlases, and the icon textures.
 - Blur slider changes the *opacity* of the system host-backdrop blur (fixed radius), so low
   values look like "less frosted" rather than a smaller radius.
 - RDP / weak GPUs: the app falls back to Windows' software DirectX (WARP); slower but the same
-  look. If Windows composition itself can't start (or `DESKBOXES_NO_COMPOSITION=1`), boxes are
+  look. If Windows composition itself can't start (or `DESKTOPSHEPHERD_NO_COMPOSITION=1`), boxes are
   ordinary windows with a solid dark background and tint, no glass (phase D is done). Fallback
   chain: hardware D3D11 + glass, WARP + glass, no glass; only "no D3D device at all" exits with
   code 2 (supervisor retries). WARP and a real "no composition" machine can't be tested on this
@@ -60,7 +60,7 @@ egui font atlases, and the icon textures.
   path is gone.
 - Fixed: the settings window now redraws live while its edge is dragged (`WM_ENTERSIZEMOVE` /
   `WM_EXITSIZEMOVE` tracking and `runloop::pass_now()` from the window procedure).
-- Fixed: clean stop. `scripts\stop.ps1` sets the named event `Local\DeskBoxes.Quit`, waits up
+- Fixed: clean stop. `scripts\stop.ps1` sets the named event `Local\DesktopShepherd.Quit`, waits up
   to 5 s and only kills if needed (log: "quit signal received", no crash entry).
 - Fixed: starting an icon drag no longer loads the icon on the UI thread (the flying picture
   loads it on its own thread), so a slow shortcut can't freeze the boxes.
@@ -112,8 +112,26 @@ egui font atlases, and the icon textures.
   desktop, "s" jumped to the next s-item and "s" again to the one after; a text box in another
   window received "abc1" normally; typing "xyz" right after switching from the desktop to another
   window arrived intact 3 times out of 3.
-- Tests: all 11 unit tests pass (`cargo test`). Worker memory after start ~88 MB.
-- Names: exe/data folder still `DeskBoxes`.
+- New (2026-11-22): renamed DeskBoxes -> **DesktopShepherd** (exe `desktopshepherd.exe`, window
+  classes, mutex `Local\DesktopShepherd.SingleInstance`, quit event `Local\DesktopShepherd.Quit`,
+  Run value, env vars `DESKTOPSHEPHERD_*`). The data folder `%APPDATA%\DeskBoxes` is moved to
+  `%APPDATA%\DesktopShepherd` on the first start (copied if it can't be moved); the old Run value
+  is removed. Checked: the folder moved, all 8 boxes loaded.
+- New (2026-11-22): installer built into the program (`src/install.rs`, `scripts\make-setup.ps1`,
+  see README). Checked live on this PC: install, update over a running copy, uninstall keeping the
+  boxes (program folder, Start menu shortcut, Installed apps entry and Run value all removed).
+  Two bugs found and fixed while testing: the folder was deleted before the final message closed
+  (so it stayed), and its path was garbled for cmd (now `raw_arg`).
+- New (2026-11-22): widgets system monitor, calendar, to-do list and search box. Measured with the
+  four on screen: worker CPU 0.02 % -> 0.05 % (the monitor's 2 s update; the others cost nothing
+  when idle). A widget on another page or while boxes are hidden isn't drawn and reads nothing.
+- New (2026-11-22): pages of boxes and "pages with dots" for full boxes (see README). Checked:
+  a box moved to page 2 disappears from page 1; a box with 47 icons shows 2 dots and the wheel
+  flips to page 2.
+- New (2026-11-22): review 2 R1-R3 (Windows menu in a helper process, Properties etc. now work),
+  keyboard in boxes incl. copy/cut/paste, rename (F2), folder boxes, rules by name/age, hide/show
+  all, per-monitor-setup positions. **Per-setup positions are untested** (needs a laptop).
+- Tests: all 13 unit tests pass (`cargo test`). Worker memory after start ~87 MB.
 - Synthetic drags (SetCursorPos + mouse_event) don't start a drag on a *rolled-up* box's title
   (same before and after phase C); untested by hand.
 - Still untested: mixed display scaling and real input-method (IME) use.
@@ -133,7 +151,6 @@ egui font atlases, and the icon textures.
    textures of items not shown in any box (LRU).
 3. Memory: share one swap chain sized per box but drop swap chains of rolled-up boxes.
 4. CPU: desktop rescan via `ReadDirectoryChangesW` instead of polling every 4 s.
-5. Rename to DesktopShepherd (exe, mutex name, Run key, data folder with migration of
-   `%APPDATA%\DeskBoxes`).
-6. Features: more widgets (calendar, system monitor, image frame), per-box hotkeys, quick
+5. ~~Rename to DesktopShepherd~~ – done, with an installer (2026-11-22).
+6. Features: more widgets (image frame; calendar, system monitor, to-do and search box are done), per-box hotkeys, quick
    (Quick search, snapping to boxes/screen edges and an optional grid are done, 2026-11-22.)

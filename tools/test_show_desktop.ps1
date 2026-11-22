@@ -23,7 +23,7 @@ public static class ZW {
   return (IsWindowVisible(h)?"vis":"HIDDEN")+(IsIconic(h)?",MIN":"")+(cl!=0?",CLOAKED":"")+(top?",TOPMOST":"");
  }
  public static List<string> Z(uint pid){ var r=new List<string>(); int i=0; int firstBox=-1, desk=-1; EnumWindows((h,l)=>{ uint p; GetWindowThreadProcessId(h,out p); string c=Cls(h);
-  bool isBox = p==pid && c=="DeskBoxesBox";
+  bool isBox = p==pid && c=="DesktopShepherdBox";
   bool isDesk = (c=="Progman" || c=="WorkerW") && FindWindowEx(h,IntPtr.Zero,"SHELLDLL_DefView",null)!=IntPtr.Zero;
   bool isProg = c=="Progman";
   if(isBox || isDesk || isProg){ r.Add("  #"+i+" "+c+(isDesk?"(icons)":"")+" ["+Flags(h)+"]"); }
@@ -35,8 +35,8 @@ public static class ZW {
 }
 '@
 Add-Type $src
-$w = (Get-CimInstance Win32_Process -Filter "Name='deskboxes.exe'" | Where-Object CommandLine -match worker).ProcessId
-if (-not $w) { "DeskBoxes worker is not running"; exit 1 }
+$w = (Get-CimInstance Win32_Process -Filter "Name='desktopshepherd.exe'" | Where-Object CommandLine -match worker).ProcessId
+if (-not $w) { "DesktopShepherd worker is not running"; exit 1 }
 "BEFORE (fg=" + [ZW]::Cls([ZW]::GetForegroundWindow()) + ")"; [ZW]::Z($w)
 [ZW]::WinD(); Start-Sleep -Milliseconds 300
 "300 ms AFTER WIN+D (fg=" + [ZW]::Cls([ZW]::GetForegroundWindow()) + ")"; [ZW]::Z($w)

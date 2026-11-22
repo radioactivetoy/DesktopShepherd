@@ -2,3 +2,4 @@
 shots/
 *.log
 layout.json.tmp
+/dist

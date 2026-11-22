@@ -149,7 +149,7 @@ pub fn set_typing_keys(on: bool) {
                     if let Ok(mut w) = WARNED.lock() {
                         if !w.contains(&(mods, vk)) {
                             w.push((mods, vk));
-                            crate::storage::log_line(&format!("desktop key {vk:#x} (modifiers {mods}) is used by another program; DeskBoxes leaves it alone"));
+                            crate::storage::log_line(&format!("desktop key {vk:#x} (modifiers {mods}) is used by another program; DesktopShepherd leaves it alone"));
                         }
                     }
                 }
@@ -316,10 +316,10 @@ pub fn run(screenshot: Option<PathBuf>) -> i32 {
     }
     unsafe {
         let Ok(inst) = GetModuleHandleW(None) else { return crate::EXIT_START_FAILED };
-        let wc = WNDCLASSW { lpfnWndProc: Some(main_wndproc), hInstance: inst.into(), lpszClassName: w!("DeskBoxesMain"), ..Default::default() };
+        let wc = WNDCLASSW { lpfnWndProc: Some(main_wndproc), hInstance: inst.into(), lpszClassName: w!("DesktopShepherdMain"), ..Default::default() };
         RegisterClassW(&wc);
         // A plain hidden top-level window (not message-only: those don't get the shutdown notice).
-        let Ok(hwnd) = CreateWindowExW(WS_EX_TOOLWINDOW, w!("DeskBoxesMain"), w!("DeskBoxes"), WS_POPUP, 0, 0, 0, 0, None, None, inst, None) else {
+        let Ok(hwnd) = CreateWindowExW(WS_EX_TOOLWINDOW, w!("DesktopShepherdMain"), w!("DesktopShepherd"), WS_POPUP, 0, 0, 0, 0, None, None, inst, None) else {
             crate::storage::log_line("could not create the main window");
             return crate::EXIT_START_FAILED;
         };

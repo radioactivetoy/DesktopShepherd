@@ -10,8 +10,33 @@ use std::path::PathBuf;
 const MAX_BACKUPS: usize = 10;
 
 pub fn data_dir() -> PathBuf {
-    let base = dirs::config_dir().unwrap_or_else(std::env::temp_dir);
-    base.join("DeskBoxes")
+    static DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    DIR.get_or_init(|| {
+        let base = dirs::config_dir().unwrap_or_else(std::env::temp_dir);
+        let dir = base.join("DesktopShepherd");
+        // The program used to be called DeskBoxes: bring its folder (layout, backups, log)
+        // over the first time.
+        let old = base.join("DeskBoxes");
+        if !dir.exists() && old.is_dir() && fs::rename(&old, &dir).is_err() {
+            // Something holds a file open: copy instead, the old folder stays as it is.
+            let _ = copy_dir(&old, &dir);
+        }
+        dir
+    })
+    .clone()
+}
+
+fn copy_dir(from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()> {
+    fs::create_dir_all(to)?;
+    for e in fs::read_dir(from)?.flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            copy_dir(&p, &to.join(e.file_name()))?;
+        } else {
+            fs::copy(&p, to.join(e.file_name()))?;
+        }
+    }
+    Ok(())
 }
 
 fn layout_path() -> PathBuf {

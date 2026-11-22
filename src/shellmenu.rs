@@ -1,10 +1,10 @@
 //! Windows' own right-click menu for desktop items: the same menu Explorer shows ("Open with",
 //! "Send to", and what other programs add: 7-Zip, the antivirus, …), drawn dark, with
-//! DeskBoxes' own entries ("Move to ▸", "Remove from this box") at the top.
+//! DesktopShepherd' own entries ("Move to ▸", "Remove from this box") at the top.
 //!
-//! It runs in a short-lived helper process (`deskboxes.exe --shell-menu …`), not in the main
+//! It runs in a short-lived helper process (`desktopshepherd.exe --shell-menu …`), not in the main
 //! app: other programs' menu add-ons are loaded there and leave with it, so they can neither
-//! crash DeskBoxes nor stay in its memory. The helper's exit code is the DeskBoxes entry chosen
+//! crash DesktopShepherd nor stay in its memory. The helper's exit code is the DesktopShepherd entry chosen
 //! (0 = none, or a Windows command that the helper ran itself).
 
 #![cfg(windows)]
@@ -51,7 +51,7 @@ pub fn handle_menu_msg(msg: u32, wp: WPARAM, lp: LPARAM) -> Option<LRESULT> {
     })
 }
 
-/// One DeskBoxes entry at the top of the menu: its number (returned when chosen) and label.
+/// One DesktopShepherd entry at the top of the menu: its number (returned when chosen) and label.
 /// `sub` = put it in the "Move to" submenu.
 pub struct Extra {
     pub id: u32,
@@ -79,7 +79,7 @@ pub fn spawn(paths: &[String], extras: &[Extra]) -> bool {
     for e in extras {
         cmd.arg(if e.sub { "--sub" } else { "--item" }).arg(format!("{}|{}", e.id, e.label));
     }
-    // The person just clicked in DeskBoxes: let the helper take the focus (its menu needs it).
+    // The person just clicked in DesktopShepherd: let the helper take the focus (its menu needs it).
     unsafe {
         let _ = AllowSetForegroundWindow(ASFW_ANY);
     }
@@ -106,7 +106,7 @@ unsafe extern "system" fn owner_proc(h: HWND, m: u32, wp: WPARAM, lp: LPARAM) ->
     DefWindowProcW(h, m, wp, lp)
 }
 
-/// Dark menus like the rest of DeskBoxes (uxtheme's SetPreferredAppMode / FlushMenuThemes,
+/// Dark menus like the rest of DesktopShepherd (uxtheme's SetPreferredAppMode / FlushMenuThemes,
 /// found by number; silently skipped if this Windows doesn't have them).
 unsafe fn dark_menus() {
     use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
@@ -122,7 +122,7 @@ unsafe fn dark_menus() {
 }
 
 /// The helper process (`--shell-menu`): shows the menu at the mouse, runs a Windows command
-/// itself or returns the DeskBoxes entry chosen as its exit code.
+/// itself or returns the DesktopShepherd entry chosen as its exit code.
 pub fn run_helper(args: &[String]) -> i32 {
     let mut paths = Vec::new();
     let mut extras = Vec::new();
@@ -146,9 +146,9 @@ pub fn run_helper(args: &[String]) -> i32 {
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
         dark_menus();
         let Ok(inst) = GetModuleHandleW(None) else { return 0 };
-        let wc = WNDCLASSW { lpfnWndProc: Some(owner_proc), hInstance: inst.into(), lpszClassName: w!("DeskBoxesMenuOwner"), ..Default::default() };
+        let wc = WNDCLASSW { lpfnWndProc: Some(owner_proc), hInstance: inst.into(), lpszClassName: w!("DesktopShepherdMenuOwner"), ..Default::default() };
         RegisterClassW(&wc);
-        let Ok(owner) = CreateWindowExW(WS_EX_TOOLWINDOW, w!("DeskBoxesMenuOwner"), w!("DeskBoxes menu"), WS_POPUP, 0, 0, 0, 0, None, None, inst, None) else {
+        let Ok(owner) = CreateWindowExW(WS_EX_TOOLWINDOW, w!("DesktopShepherdMenuOwner"), w!("DesktopShepherd menu"), WS_POPUP, 0, 0, 0, 0, None, None, inst, None) else {
             return 0;
         };
         let chosen = match show_inner(owner, &paths, &extras) {
@@ -222,8 +222,8 @@ impl Drop for Pidl {
     }
 }
 
-/// Builds the menu (DeskBoxes entries, then Windows' items for `paths` that share the first
-/// one's folder), shows it at the mouse and handles the choice. Returns the DeskBoxes entry
+/// Builds the menu (DesktopShepherd entries, then Windows' items for `paths` that share the first
+/// one's folder), shows it at the mouse and handles the choice. Returns the DesktopShepherd entry
 /// chosen, or 0.
 unsafe fn show_inner(owner: HWND, paths: &[String], extras: &[Extra]) -> windows::core::Result<u32> {
     let mut items: Vec<(Pidl, String)> = Vec::new();
@@ -252,7 +252,7 @@ unsafe fn show_inner(owner: HWND, paths: &[String], extras: &[Extra]) -> windows
     const LAST: u32 = 0x7FFF;
     const OURS: u32 = 0x8000;
     let result = (|| -> windows::core::Result<u32> {
-        // DeskBoxes' entries first.
+        // DesktopShepherd' entries first.
         let mut count = 0u32;
         let subs: Vec<&Extra> = extras.iter().filter(|e| e.sub).collect();
         if !subs.is_empty() {

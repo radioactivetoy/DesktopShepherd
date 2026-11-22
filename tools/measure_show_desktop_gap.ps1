@@ -1,6 +1,6 @@
 # Presses Win+D, then samples the window stack every ~1 ms for 800 ms and reports when the
 # desktop (Progman) covered the boxes and when the boxes came back above it. Presses Win+D
-# again at the end to restore. Run while DeskBoxes is running.
+# again at the end to restore. Run while DesktopShepherd is running.
 $src = @'
 using System; using System.Runtime.InteropServices; using System.Text; using System.Diagnostics; using System.Collections.Generic;
 public static class G {
@@ -14,7 +14,7 @@ public static class G {
  // 1 = every visible box above Progman, 0 = at least one box below it
  static int State(uint pid){ bool seenProg=false; bool bad=false; EnumWindows((h,l)=>{ string c=Cls(h);
    if(c=="Progman"){ seenProg=true; return true; }
-   if(seenProg && IsWindowVisible(h)){ uint p; GetWindowThreadProcessId(h,out p); if(p==pid && c=="DeskBoxesBox"){ bad=true; return false; } }
+   if(seenProg && IsWindowVisible(h)){ uint p; GetWindowThreadProcessId(h,out p); if(p==pid && c=="DesktopShepherdBox"){ bad=true; return false; } }
    return true; }, IntPtr.Zero); return bad?0:1; }
  public static void WinD(){ keybd_event(0x5B,0,0,UIntPtr.Zero); keybd_event(0x44,0,0,UIntPtr.Zero); keybd_event(0x44,0,2,UIntPtr.Zero); keybd_event(0x5B,0,2,UIntPtr.Zero); }
  public static string Run(uint pid){
@@ -29,6 +29,6 @@ public static class G {
 }
 '@
 Add-Type $src
-$w = (Get-CimInstance Win32_Process -Filter "Name='deskboxes.exe'" | Where-Object CommandLine -match worker).ProcessId
-if (-not $w) { "DeskBoxes worker is not running"; exit 1 }
+$w = (Get-CimInstance Win32_Process -Filter "Name='desktopshepherd.exe'" | Where-Object CommandLine -match worker).ProcessId
+if (-not $w) { "DesktopShepherd worker is not running"; exit 1 }
 for ($i = 1; $i -le 3; $i++) { "--- run $i"; [G]::Run($w); Start-Sleep 2 }

@@ -1,5 +1,5 @@
 #![windows_subsystem = "windows"]
-//! DeskBoxes — a lightweight desktop icon organizer (boxes on the desktop) with widgets.
+//! DesktopShepherd — a lightweight desktop icon organizer (boxes on the desktop) with widgets.
 
 mod app;
 mod comp_trial;
@@ -16,6 +16,8 @@ mod model;
 mod search;
 #[cfg(windows)]
 mod fileops;
+#[cfg(windows)]
+mod install;
 #[cfg(windows)]
 mod shellmenu;
 mod snap;
@@ -80,6 +82,18 @@ fn main() {
         .position(|a| a == "--screenshot")
         .and_then(|i| args.get(i + 1))
         .map(PathBuf::from);
+
+    // Installing (a copy named *Setup*.exe) and uninstalling (from Windows' Installed apps).
+    #[cfg(windows)]
+    if args.iter().any(|a| a == "--uninstall") {
+        install::run_uninstall();
+        return;
+    }
+    #[cfg(windows)]
+    if install::is_setup_exe() && !args.iter().any(|a| a.starts_with("--")) {
+        install::run_setup();
+        return;
+    }
 
     // Windows' right-click menu, shown by a short-lived helper process (see shellmenu.rs).
     #[cfg(windows)]

@@ -29,7 +29,7 @@ On the MSVC toolchain none of this should be needed (untested).
 
 ## The exe is locked while running
 
-`cargo build` fails with "failed to remove file …deskboxes.exe" when the app is running.
+`cargo build` fails with "failed to remove file …desktopshepherd.exe" when the app is running.
 Run `scripts\stop.ps1` first. Do **not** kill only the supervisor: kill the worker first, or
 desktop icons stay hidden until the next start (fix: start and quit the app, or toggle
 "Show desktop icons" in Explorer's desktop right-click → View).

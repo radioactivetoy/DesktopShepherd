@@ -224,7 +224,7 @@ impl Default for Settings {
             blur: 16,
             monitor_mode: MonitorMode::Role,
             categories: default_categories(),
-            // The boxes replace the desktop icons while DeskBoxes runs (original: organize_hide).
+            // The boxes replace the desktop icons while DesktopShepherd runs (original: organize_hide).
             hide_desktop_icons: true,
             expand_on_hover: true,
             start_with_windows: false,

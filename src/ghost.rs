@@ -25,7 +25,7 @@ mod imp {
         static READY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
         *READY.get_or_init(|| unsafe {
             let Ok(inst) = GetModuleHandleW(None) else { return false };
-            let wc = WNDCLASSW { lpfnWndProc: Some(ghost_proc), hInstance: inst.into(), lpszClassName: w!("DeskBoxesGhost"), ..Default::default() };
+            let wc = WNDCLASSW { lpfnWndProc: Some(ghost_proc), hInstance: inst.into(), lpszClassName: w!("DesktopShepherdGhost"), ..Default::default() };
             RegisterClassW(&wc) != 0
         })
     }
@@ -54,8 +54,8 @@ mod imp {
             let inst = GetModuleHandleW(None).ok()?;
             let hwnd = CreateWindowExW(
                 WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TRANSPARENT,
-                w!("DeskBoxesGhost"),
-                w!("DeskBoxes dragged icon"),
+                w!("DesktopShepherdGhost"),
+                w!("DesktopShepherd dragged icon"),
                 WS_POPUP,
                 x,
                 y,

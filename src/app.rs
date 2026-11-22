@@ -49,7 +49,7 @@ enum Act {
     /// Pick a folder (Windows' folder picker, on its own thread) and make a folder box for it.
     NewFolderBox,
     /// Right-click on an item: Windows' own menu (and the other selected items with it), with
-    /// DeskBoxes' entries on top, shown by a helper process.
+    /// DesktopShepherd' entries on top, shown by a helper process.
     ItemMenu { from: u64, path: String },
     Quit,
 }
@@ -194,7 +194,7 @@ pub struct DeskApp {
     ta_last: Option<Instant>,
 }
 
-/// Passes and box frames drawn (for DESKBOXES_DEBUG_DRAWS).
+/// Passes and box frames drawn (for DESKTOPSHEPHERD_DEBUG_DRAWS).
 static DRAW_STATS: (std::sync::atomic::AtomicU64, std::sync::atomic::AtomicU64) =
     (std::sync::atomic::AtomicU64::new(0), std::sync::atomic::AtomicU64::new(0));
 static DRAW_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -379,6 +379,11 @@ impl DeskApp {
         if app.persist {
             app.bind_unassigned();
             app.switch_setup_or_relayout();
+            // Keep the start-with-Windows entry pointing at this copy of the program (after a
+            // rename, a move or an update), off a helper thread so the start isn't slowed.
+            if app.layout.settings.start_with_windows {
+                let _ = std::thread::Builder::new().name("autostart".into()).spawn(|| desktop::set_start_with_windows(true));
+            }
         }
         app.apply_icon_hiding();
         Some(app)
@@ -618,7 +623,7 @@ impl DeskApp {
                         if crate::shellmenu::spawn(&paths, &extras) {
                             self.menu_ctx = Some((path.clone(), paths, targets.iter().map(|t| t.0).collect()));
                         } else {
-                            // The helper couldn't start: DeskBoxes' own menu instead.
+                            // The helper couldn't start: DesktopShepherd' own menu instead.
                             let at = desktop::cursor_points(desktop::system_scale()).unwrap_or_default();
                             self.ui.menu = Some(OpenMenu { target: MenuTarget::Item(from, path.clone()), page: MenuPage::Main, at, size: Vec2::new(270.0, 120.0), frames: 0, was_focused: false, rounded: false });
                         }
@@ -668,7 +673,7 @@ impl DeskApp {
     }
 
     fn update_inner(&mut self, ctx: &egui::Context) {
-        if std::env::var_os("DESKBOXES_DEBUG_REPAINT").is_some() && ctx.cumulative_pass_nr() % 120 == 0 {
+        if std::env::var_os("DESKTOPSHEPHERD_DEBUG_REPAINT").is_some() && ctx.cumulative_pass_nr() % 120 == 0 {
             storage::log_line(&format!("repaint causes: {:?}", ctx.repaint_causes()));
         }
         // ---- inputs from background threads and the tray icon
@@ -899,7 +904,7 @@ impl DeskApp {
             }
         }
 
-        // A DeskBoxes entry chosen in Windows' menu (helper process). Windows' own commands may
+        // A DesktopShepherd entry chosen in Windows' menu (helper process). Windows' own commands may
         // also have renamed, deleted or added files: read the desktop again either way.
         #[cfg(windows)]
         for (id, clicked) in crate::shellmenu::take_done() {
@@ -1061,9 +1066,9 @@ impl DeskApp {
         if shared_ui_fingerprint(&self.ui) != fingerprint {
             self.redraw_all = true;
         }
-        // DESKBOXES_DEBUG_DRAWS: log how many box frames each pass draws (measuring only).
+        // DESKTOPSHEPHERD_DEBUG_DRAWS: log how many box frames each pass draws (measuring only).
         let passes = DRAW_STATS.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-        if passes % 300 == 0 && std::env::var_os("DESKBOXES_DEBUG_DRAWS").is_some() {
+        if passes % 300 == 0 && std::env::var_os("DESKTOPSHEPHERD_DEBUG_DRAWS").is_some() {
             let draws = DRAW_STATS.1.swap(0, std::sync::atomic::Ordering::Relaxed);
             let us = DRAW_US.swap(0, std::sync::atomic::Ordering::Relaxed);
             let upd = UPDATE_US.swap(0, std::sync::atomic::Ordering::Relaxed);
@@ -1130,7 +1135,7 @@ fn fence_window(
     let mut dirty = false;
     let mut wake = false;
 
-    if std::env::var_os("DESKBOXES_DEBUG_REPAINT").is_some() && ctx.cumulative_pass_nr() % 120 == 0 {
+    if std::env::var_os("DESKTOPSHEPHERD_DEBUG_REPAINT").is_some() && ctx.cumulative_pass_nr() % 120 == 0 {
         storage::log_line(&format!(
             "box {} causes: {:?} burst={:?} rect={:?}",
             fence.id,
@@ -1139,7 +1144,7 @@ fn fence_window(
             ctx.input(|i| i.viewport().inner_rect)
         ));
     }
-    if std::env::var_os("DESKBOXES_DEBUG_DRAG").is_some() && ctx.input(|i| i.pointer.any_pressed() || i.pointer.any_released()) {
+    if std::env::var_os("DESKTOPSHEPHERD_DEBUG_DRAG").is_some() && ctx.input(|i| i.pointer.any_pressed() || i.pointer.any_released()) {
         storage::log_line(&format!("box {} pointer pressed={} released={} at {:?} hovered_any={} dragged={:?}", fence.id, ctx.input(|i| i.pointer.any_pressed()), ctx.input(|i| i.pointer.any_released()), ctx.input(|i| i.pointer.interact_pos()), ctx.is_pointer_over_area(), ctx.dragged_id()));
     }
     // Hover-to-open for rolled-up boxes.
@@ -1165,7 +1170,7 @@ fn fence_window(
     let want = fence.corner.round() as i32;
     // Part of the desktop: clicking doesn't bring it forward; after typing in it, back down.
     if !st.hwnds.contains_key(&fence.id) {
-        if let Some(h) = desktop::prepare_box(&format!("DeskBoxes box {}", fence.id), fence.widget.is_none()) {
+        if let Some(h) = desktop::prepare_box(&format!("DesktopShepherd box {}", fence.id), fence.widget.is_none()) {
             st.hwnds.insert(fence.id, h);
         }
     }
@@ -1195,7 +1200,7 @@ fn fence_window(
     // The box draws its own rounded corners (with the glass behind them), so Windows must not
     // re-round or outline the window: then the box looks exactly the same at rest as its
     // see-through copy does while being dragged.
-    if st.rounded.get(&fence.id) != Some(&want) && desktop::round_window(&format!("DeskBoxes box {}", fence.id), 0.0) {
+    if st.rounded.get(&fence.id) != Some(&want) && desktop::round_window(&format!("DesktopShepherd box {}", fence.id), 0.0) {
         st.rounded.insert(fence.id, want);
     }
 
@@ -1569,7 +1574,7 @@ fn fence_window(
                                 st.selection.insert(key.clone());
                             }
                             let paths: Vec<String> = items.iter().filter(|x| st.selection.contains(&x.path.to_lowercase())).map(|x| x.path.clone()).collect();
-                            if std::env::var_os("DESKBOXES_DEBUG_DRAG").is_some() {
+                            if std::env::var_os("DESKTOPSHEPHERD_DEBUG_DRAG").is_some() {
                                 storage::log_line(&format!("icon drag start from box {}: {:?}", fence.id, paths));
                             }
                             st.item_drag = Some((fence.id, paths));
@@ -1601,7 +1606,7 @@ fn fence_window(
                             }
                             if let Some((from, paths)) = st.item_drag.take() {
                                 if let Some(at) = desktop::cursor_points(desktop::system_scale()) {
-                                    if std::env::var_os("DESKBOXES_DEBUG_DRAG").is_some() {
+                                    if std::env::var_os("DESKTOPSHEPHERD_DEBUG_DRAG").is_some() {
                                         storage::log_line(&format!("icon drop from box {from} at {at:?}"));
                                     }
                                     actions.push(Act::DropItems { from, paths, at });
@@ -1625,7 +1630,7 @@ fn fence_window(
                                 st.selection.clear();
                                 st.selection.insert(key.clone());
                             }
-                            // Windows' own menu with DeskBoxes' entries on top (falls back to ours).
+                            // Windows' own menu with DesktopShepherd' entries on top (falls back to ours).
                             actions.push(Act::ItemMenu { from: fence.id, path: it.path.clone() });
                         }
                         resp.on_hover_text_at_pointer(it.name.as_str());
@@ -1918,7 +1923,7 @@ fn fence_menu(ui: &mut egui::Ui, fence: &mut Fence, st: &mut UiState, page: &mut
                 st.open_search = true;
                 close = true;
             }
-            if row(ui, icon::SETTINGS, "DeskBoxes settings", None, true).clicked() {
+            if row(ui, icon::SETTINGS, "DesktopShepherd settings", None, true).clicked() {
                 actions.push(Act::OpenManager);
                 close = true;
             }
@@ -2278,7 +2283,7 @@ impl DeskApp {
             let s = desktop::system_scale();
             let rect_px = [(pos.x * s).round() as i32, (pos.y * s).round() as i32, (m.size.x * s).round() as i32, (m.size.y * s).round() as i32];
             let force = self.panel_force;
-            hosts.panel(MENU_PANEL, crate::host::PanelKind::Menu, "DeskBoxes menu", rect_px, true, force, |pctx| {
+            hosts.panel(MENU_PANEL, crate::host::PanelKind::Menu, "DesktopShepherd menu", rect_px, true, force, |pctx| {
                 self.menu_body(pctx, &mut m, targets, &root_ctx, &mut close, &mut dirty, &mut measured);
             });
             if close {
@@ -2316,7 +2321,7 @@ impl DeskApp {
                 ctx.send_viewport_cmd(ViewportCommand::Focus);
             }
             if !m.rounded && m.frames >= 2 {
-                m.rounded = desktop::round_window("DeskBoxes menu", 8.0) || m.frames > 30;
+                m.rounded = desktop::round_window("DesktopShepherd menu", 8.0) || m.frames > 30;
             }
             match ctx.input(|i| i.viewport().focused) {
                 Some(true) => m.was_focused = true,
@@ -2397,7 +2402,7 @@ impl DeskApp {
             let (x, y) = (((sw - w) / 2.0).max(0.0), ((sh - h) / 2.0).max(0.0));
             let rect_px = [(x * s) as i32, (y * s) as i32, (w * s) as i32, (h * s) as i32];
             let force = self.panel_force;
-            hosts.panel(SETTINGS_PANEL, crate::host::PanelKind::Settings, "DeskBoxes", rect_px, false, force, |pctx| {
+            hosts.panel(SETTINGS_PANEL, crate::host::PanelKind::Settings, "DesktopShepherd", rect_px, false, force, |pctx| {
                 if pctx.input(|i| i.viewport().close_requested()) {
                     close = true;
                 }
@@ -2418,7 +2423,7 @@ impl DeskApp {
         {
             egui::TopBottomPanel::top("mgr-top").frame(egui::Frame::new().fill(Color32::from_rgb(24, 25, 28)).inner_margin(10.0)).show(ctx, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("DeskBoxes").size(20.0).strong().color(Color32::WHITE));
+                    ui.label(egui::RichText::new("DesktopShepherd").size(20.0).strong().color(Color32::WHITE));
                     ui.add_space(20.0);
                     ui.selectable_value(&mut self.page, Page::Boxes, "Boxes");
                     ui.selectable_value(&mut self.page, Page::Layout, "Layout");
@@ -2584,7 +2589,7 @@ impl DeskApp {
             dirty = true;
             icons_changed = true;
         }
-        ui.label(egui::RichText::new("They always come back when DeskBoxes closes, even after a crash.").color(Color32::from_gray(150)).size(12.0));
+        ui.label(egui::RichText::new("They always come back when DesktopShepherd closes, even after a crash.").color(Color32::from_gray(150)).size(12.0));
         dirty |= ui.checkbox(&mut s.expand_on_hover, "Open rolled-up boxes while the mouse is over them").changed();
         ui.horizontal(|ui| {
             dirty |= ui.checkbox(&mut s.snap, "Snap boxes to each other and to the screen edges").changed();
@@ -2743,7 +2748,7 @@ impl DeskApp {
         });
         ui.add_space(10.0);
         ui.heading("Computer");
-        if ui.checkbox(&mut s.start_with_windows, "Start DeskBoxes when Windows starts").changed() {
+        if ui.checkbox(&mut s.start_with_windows, "Start DesktopShepherd when Windows starts").changed() {
             if self.persist {
                 desktop::set_start_with_windows(s.start_with_windows);
             }
@@ -2762,7 +2767,7 @@ impl DeskApp {
         });
         ui.add_space(10.0);
         ui.heading("Saved layouts");
-        ui.label(egui::RichText::new("A copy of your layout is kept each time DeskBoxes starts (the last 10).").color(Color32::from_gray(150)).size(12.0));
+        ui.label(egui::RichText::new("A copy of your layout is kept each time DesktopShepherd starts (the last 10).").color(Color32::from_gray(150)).size(12.0));
         let mut restore = None;
         for b in self.backups.iter().rev().take(10) {
             ui.horizontal(|ui| {
@@ -2782,7 +2787,7 @@ impl DeskApp {
             {
                 self.actions.push(Act::ImportOriginal);
             }
-            if self.persist && ui.button("Quit DeskBoxes").clicked() {
+            if self.persist && ui.button("Quit DesktopShepherd").clicked() {
                 self.actions.push(Act::Quit);
             }
         });
@@ -2856,7 +2861,7 @@ fn default_layout(items: &HashMap<String, DeskItem>) -> Layout {
         widget: Some(WidgetConfig {
             kind: "note".into(),
             data: serde_json::json!({
-                "text": "Welcome to DeskBoxes!\n• Drag a box by its title, resize from its edges.\n• Double-click a title to roll the box up.\n• Right-click a box or an icon for options."
+                "text": "Welcome to DesktopShepherd!\n• Drag a box by its title, resize from its edges.\n• Double-click a title to roll the box up.\n• Right-click a box or an icon for options."
             }),
         }),
         ..Fence::default()
@@ -2960,7 +2965,7 @@ fn sanitize(layout: &mut Layout) {
         }
         layout.version = 2;
     }
-    // Version 3: the person asked that the normal desktop icons disappear while DeskBoxes runs.
+    // Version 3: the person asked that the normal desktop icons disappear while DesktopShepherd runs.
     if layout.version < 3 {
         layout.settings.hide_desktop_icons = true;
         layout.version = 3;
@@ -3142,7 +3147,7 @@ fn make_tray(ctx: &egui::Context, cmds: Arc<Mutex<Vec<TrayCmd>>>) -> Option<tray
     }
     let icon = tray_icon::Icon::from_rgba(rgba, n as u32, n as u32).ok()?;
     let menu = Menu::new();
-    let open = MenuItem::new("Open DeskBoxes", true, None);
+    let open = MenuItem::new("Open DesktopShepherd", true, None);
     let new_box = MenuItem::new("New box", true, None);
     let search = MenuItem::new("Search desktop", true, None);
     let hide = MenuItem::new("Hide / show boxes", true, None);
@@ -3187,7 +3192,7 @@ fn make_tray(ctx: &egui::Context, cmds: Arc<Mutex<Vec<TrayCmd>>>) -> Option<tray
         }));
     }
     TrayIconBuilder::new()
-        .with_tooltip("DeskBoxes")
+        .with_tooltip("DesktopShepherd")
         .with_icon(icon)
         .with_menu(Box::new(menu))
         .with_menu_on_left_click(false)
@@ -3265,7 +3270,7 @@ impl DeskApp {
         let force = self.panel_force;
         if let Some(mut hosts) = self.hosts.take() {
             let icons = &mut self.icons;
-            hosts.panel(SEARCH_PANEL, crate::host::PanelKind::Menu, "DeskBoxes search", rect_px, true, force, |pctx| {
+            hosts.panel(SEARCH_PANEL, crate::host::PanelKind::Menu, "DesktopShepherd search", rect_px, true, force, |pctx| {
                 match pctx.input(|i| i.viewport().focused) {
                     Some(true) => s.was_focused = true,
                     Some(false) if s.was_focused => close = true,
@@ -3611,7 +3616,7 @@ impl DeskApp {
         let mut done: Option<String> = None;
         let force = self.panel_force;
         if let Some(mut hosts) = self.hosts.take() {
-            hosts.panel(RENAME_PANEL, crate::host::PanelKind::Menu, "DeskBoxes rename", rect_px, true, force, |pctx| {
+            hosts.panel(RENAME_PANEL, crate::host::PanelKind::Menu, "DesktopShepherd rename", rect_px, true, force, |pctx| {
                 match pctx.input(|i| i.viewport().focused) {
                     Some(true) => r.was_focused = true,
                     Some(false) if r.was_focused => close = true,

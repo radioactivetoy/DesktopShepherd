@@ -1,11 +1,11 @@
 [package]
-name = "deskboxes"
+name = "desktopshepherd"
 version = "0.1.0"
 edition = "2021"
 description = "A lightweight desktop icon organizer: boxes (fences) on your desktop, plus widgets."
 
 [[bin]]
-name = "deskboxes"
+name = "desktopshepherd"
 path = "src/main.rs"
 
 [dependencies]
@@ -66,3 +66,11 @@ opt-level = 2
 opt-level = 3
 lto = "thin"
 codegen-units = 1
+
+# The installer's build (scripts\make-setup.ps1): like everyday builds, without the debugging
+# information that makes the file ~10x bigger.
+[profile.dist]
+inherits = "dev"
+debug = false
+strip = true
+incremental = false

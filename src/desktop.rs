@@ -189,7 +189,7 @@ pub fn icon_spacing() -> (f32, f32) {
 }
 
 const RUN_KEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
-const RUN_NAME: &str = "DeskBoxes";
+const RUN_NAME: &str = "DesktopShepherd";
 
 pub fn set_start_with_windows(on: bool) {
     #[cfg(windows)]
@@ -198,6 +198,8 @@ pub fn set_start_with_windows(on: bool) {
         let Ok(key) = winreg::RegKey::predef(HKEY_CURRENT_USER).open_subkey_with_flags(RUN_KEY, KEY_SET_VALUE) else {
             return;
         };
+        // The entry from when the program was called DeskBoxes.
+        let _ = key.delete_value("DeskBoxes");
         if on {
             if let Ok(exe) = std::env::current_exe() {
                 // "--boot" makes the start wait longer for the desktop, as the original does.
@@ -220,7 +222,7 @@ pub fn claim_single_instance() -> bool {
         use windows::core::w;
         use windows::Win32::Foundation::{GetLastError, BOOL, ERROR_ALREADY_EXISTS};
         use windows::Win32::System::Threading::CreateMutexW;
-        match CreateMutexW(None, BOOL(0), w!("Local\\DeskBoxes.SingleInstance")) {
+        match CreateMutexW(None, BOOL(0), w!("Local\\DesktopShepherd.SingleInstance")) {
             Ok(h) => {
                 let exists = GetLastError() == ERROR_ALREADY_EXISTS;
                 // Keep the handle for the whole run (it closes when the process ends).
@@ -254,7 +256,7 @@ pub fn set_low_priority(on: bool) {
 }
 
 /// Listens for a polite "please quit" request (scripts\stop.ps1 sets the named event
-/// `Local\DeskBoxes.Quit`) and calls `on_quit` once when it arrives. The helper thread sleeps
+/// `Local\DesktopShepherd.Quit`) and calls `on_quit` once when it arrives. The helper thread sleeps
 /// inside Windows until then, so it costs no CPU. Call once, from the worker.
 pub fn watch_quit_signal(on_quit: impl Fn() + Send + 'static) {
     #[cfg(windows)]
@@ -263,7 +265,7 @@ pub fn watch_quit_signal(on_quit: impl Fn() + Send + 'static) {
         use windows::Win32::Foundation::{BOOL, HANDLE};
         use windows::Win32::System::Threading::{CreateEventW, ResetEvent, WaitForSingleObject, INFINITE};
         // Manual-reset event, not signalled at the start.
-        let ev = match CreateEventW(None, BOOL(1), BOOL(0), w!("Local\\DeskBoxes.Quit")) {
+        let ev = match CreateEventW(None, BOOL(1), BOOL(0), w!("Local\\DesktopShepherd.Quit")) {
             Ok(h) => h,
             Err(e) => {
                 storage_log(&format!("quit signal: could not create event: {e}"));

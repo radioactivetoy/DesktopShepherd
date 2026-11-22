@@ -261,7 +261,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "deskboxes"
+name = "desktopshepherd"
 version = "0.1.0"
 dependencies = [
  "blowfish",

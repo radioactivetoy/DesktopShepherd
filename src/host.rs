@@ -513,7 +513,7 @@ impl Panel {
                 PanelKind::Menu => (WS_EX_TOPMOST | WS_EX_TOOLWINDOW, WS_POPUP),
                 PanelKind::Settings => (WINDOW_EX_STYLE(0), WS_OVERLAPPEDWINDOW),
             };
-            let hwnd = CreateWindowExW(ex, w!("DeskBoxesPanel"), &HSTRING::from(title), style, r[0], r[1], r[2].max(1), r[3].max(1), None, None, inst, None)?;
+            let hwnd = CreateWindowExW(ex, w!("DesktopShepherdPanel"), &HSTRING::from(title), style, r[0], r[1], r[2].max(1), r[3].max(1), None, None, inst, None)?;
             let s = ppp_of(hwnd);
             let shared = Arc::new(Mutex::new(Shared {
                 // A new window starts with no mouse over it: forget where the mouse was in the
@@ -600,11 +600,11 @@ impl HostSystem {
         unsafe {
             let _ = RoInitialize(RO_INIT_SINGLETHREADED);
             let inst = GetModuleHandleW(None)?;
-            let wc = WNDCLASSW { lpfnWndProc: Some(wndproc), hInstance: inst.into(), lpszClassName: w!("DeskBoxesBox"), ..Default::default() };
+            let wc = WNDCLASSW { lpfnWndProc: Some(wndproc), hInstance: inst.into(), lpszClassName: w!("DesktopShepherdBox"), ..Default::default() };
             RegisterClassW(&wc);
             // Glass needs Windows' composition system. Without it (or with
-            // DESKBOXES_NO_COMPOSITION=1, for testing) boxes still work, with solid backgrounds.
-            let composition = if std::env::var_os("DESKBOXES_NO_COMPOSITION").is_some() {
+            // DESKTOPSHEPHERD_NO_COMPOSITION=1, for testing) boxes still work, with solid backgrounds.
+            let composition = if std::env::var_os("DESKTOPSHEPHERD_NO_COMPOSITION").is_some() {
                 None
             } else {
                 let made = (|| -> Result<(windows::System::DispatcherQueueController, Compositor)> {
@@ -639,7 +639,7 @@ impl HostSystem {
                     root.request_repaint_after(info.delay.max(MIN_PASS_GAP));
                 });
             }
-            let pc = WNDCLASSW { lpfnWndProc: Some(wndproc), hInstance: inst.into(), lpszClassName: w!("DeskBoxesPanel"), hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(), ..Default::default() };
+            let pc = WNDCLASSW { lpfnWndProc: Some(wndproc), hInstance: inst.into(), lpszClassName: w!("DesktopShepherdPanel"), hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(), ..Default::default() };
             RegisterClassW(&pc);
             Ok(Self { _controller: controller, compositor, renderer, ctx, hosts: HashMap::new(), panels: HashMap::new(), start: std::time::Instant::now(), lost: false, logged_error: false })
         }
@@ -648,13 +648,13 @@ impl HostSystem {
     fn create(&self, id: u64, rect_px: [i32; 4]) -> Result<Host> {
         unsafe {
             let inst = GetModuleHandleW(None)?;
-            let title = HSTRING::from(format!("DeskBoxes box {id}"));
+            let title = HSTRING::from(format!("DesktopShepherd box {id}"));
             // With glass the window has no surface of its own (composition draws it); without,
             // it is an ordinary window with its own swap chain.
             let ex = if self.compositor.is_some() { WS_EX_NOREDIRECTIONBITMAP } else { WINDOW_EX_STYLE(0) };
             let hwnd = CreateWindowExW(
                 ex | WS_EX_TOOLWINDOW | WS_EX_ACCEPTFILES,
-                w!("DeskBoxesBox"),
+                w!("DesktopShepherdBox"),
                 &title,
                 WS_POPUP,
                 rect_px[0],
@@ -796,7 +796,7 @@ impl HostSystem {
                 }
             }
         }
-        let vid = ViewportId::from_hash_of(("deskboxes-panel", id));
+        let vid = ViewportId::from_hash_of(("desktopshepherd-panel", id));
         let time = self.start.elapsed().as_secs_f64();
         let Some(p) = self.panels.get_mut(&id) else { return false };
         unsafe {
@@ -933,7 +933,7 @@ impl HostSystem {
                 }
             }
         }
-        let vid = ViewportId::from_hash_of(("deskboxes-fence", id));
+        let vid = ViewportId::from_hash_of(("desktopshepherd-fence", id));
         let time = self.start.elapsed().as_secs_f64();
         let Some(h) = self.hosts.get_mut(&id) else { return false };
         unsafe {

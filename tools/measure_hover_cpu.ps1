@@ -3,8 +3,8 @@
 # Usage: .\tools\measure_hover_cpu.ps1 [-X 400] [-Y 300] [-R 120]   (centre and radius in pixels)
 param([int]$X = 400, [int]$Y = 300, [int]$R = 120)
 Add-Type 'using System; using System.Runtime.InteropServices; public static class M { [StructLayout(LayoutKind.Sequential)] public struct P { public int x, y; } [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y); [DllImport("user32.dll")] public static extern bool GetCursorPos(out P p); }'
-$w = Get-CimInstance Win32_Process -Filter "Name='deskboxes.exe'" | Where-Object CommandLine -match worker
-if (-not $w) { "DeskBoxes worker is not running"; exit 1 }
+$w = Get-CimInstance Win32_Process -Filter "Name='desktopshepherd.exe'" | Where-Object CommandLine -match worker
+if (-not $w) { "DesktopShepherd worker is not running"; exit 1 }
 $p = Get-Process -Id $w.ProcessId
 $cores = [Environment]::ProcessorCount
 $orig = New-Object M+P; [void][M]::GetCursorPos([ref]$orig)

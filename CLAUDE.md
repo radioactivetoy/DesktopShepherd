@@ -20,7 +20,7 @@ changing anything. The owner does not code: explain results in plain words, no j
 4. **Never `cargo update`.** Pinned crates keep the GNU build working (see `docs/BUILDING.md`).
 5. Keep the fallback chain working: hardware DirectX + glass, then software DirectX (WARP) +
    glass (`d3d::Renderer::new`), then no glass (plain windows, solid dark background; test with
-   env var `DESKBOXES_NO_COMPOSITION=1`). Never add GL, a web engine or eframe back.
+   env var `DESKTOPSHEPHERD_NO_COMPOSITION=1`). Never add GL, a web engine or eframe back.
 6. Saved layout (`model.rs`) must stay backward compatible: new fields use `#[serde(default)]`;
    breaking changes get a migration in `app.rs` (`version` field, see v2/v3).
 
@@ -30,14 +30,14 @@ changing anything. The owner does not code: explain results in plain words, no j
 .\scripts\stop.ps1            # asks the worker to quit cleanly (waits up to 5 s, kills only if
                               # needed), then stops the supervisor (exe is locked while running)
 cargo build
-Start-Process .\target\debug\deskboxes.exe
+Start-Process .\target\debug\desktopshepherd.exe
 ```
 
 - Quick visual check without touching the live desktop:
-  `.\target\debug\deskboxes.exe --screenshot C:\temp\shot.png` (draws the settings view
+  `.\target\debug\desktopshepherd.exe --screenshot C:\temp\shot.png` (draws the settings view
   off-screen with the D3D renderer, no window at all, ~4 s, exits by itself; uses the default
   layout, not your saved one).
-- Logs: `%APPDATA%\DeskBoxes\log.txt`. Layout: `%APPDATA%\DeskBoxes\layout.json` (back it up
+- Logs: `%APPDATA%\DesktopShepherd\log.txt`. Layout: `%APPDATA%\DesktopShepherd\layout.json` (back it up
   before experiments; backups are in `backups\`).
 - Synthetic mouse tests: add waits of ≥150 ms between press/move/release, or egui won't start
   a drag. Display scale is 125 %: from a (DPI-unaware) PowerShell, `SetCursorPos` and
@@ -48,7 +48,7 @@ Start-Process .\target\debug\deskboxes.exe
 ## Measuring
 
 ```powershell
-Get-CimInstance Win32_Process -Filter "Name='deskboxes.exe'" | % {
+Get-CimInstance Win32_Process -Filter "Name='desktopshepherd.exe'" | % {
   $p = Get-Process -Id $_.ProcessId; $a = $p.TotalProcessorTime.TotalMilliseconds
   Start-Sleep 10; $p.Refresh(); $b = $p.TotalProcessorTime.TotalMilliseconds
   "{0} ws={1:N0}MB cpu={2:N2}%" -f $_.CommandLine, ($p.WorkingSet64/1MB), (($b-$a)/10000/[Environment]::ProcessorCount*100) }
@@ -65,9 +65,9 @@ for daily use.)
 - History: GL transparency never worked on this PC; real glass comes only from the composition
   path. The GL path and eframe are gone (phase C), so this no longer matters.
 - There is no main window any more. `src/runloop.rs` is the program's own message loop (hidden
-  window `DeskBoxesMain`, never shown). Other threads wake it with `runloop::wake_after` /
+  window `DesktopShepherdMain`, never shown). Other threads wake it with `runloop::wake_after` /
   WM_APP; quit with `runloop::request_quit()` (the stop script reaches it through the named
-  event `Local\DeskBoxes.Quit`, `desktop::watch_quit_signal`).
+  event `Local\DesktopShepherd.Quit`, `desktop::watch_quit_signal`).
 - App-driven box moves (relayout, bring back on screen, restore backup) must go through
   `DeskApp::place_box` / `place_all_boxes`, otherwise the DirectX windows don't move.
 - Moving boxes by re-rendering every frame caused jitter/flashes; boxes move themselves via
@@ -87,7 +87,8 @@ for daily use.)
 
 ## Where to start for common tasks
 
-- New widget → `src/widgets.rs` (`REGISTRY`).
+- New widget → `src/widgets.rs` (`REGISTRY`). Widgets that need the desktop's items (search box) are
+  drawn in `app.rs` (`search_widget`).
 - Box look (tint/blur/corners) → `host.rs` `Look` + `HostSystem::apply`; settings UI in
   `app.rs` (Personalize page).
 - Box look options (colour, border, fonts, text, icon size/spacing) → `Fence` fields in
@@ -100,4 +101,6 @@ for daily use.)
 - Icon selection/drag/drop → `app.rs` `fence_window`, `ghost::begin_icon_drag`.
 - Monitor handling → `app.rs` (bind/relayout), `desktop::monitors`.
 - Snapping (incl. optional grid) → `src/snap.rs` (+ `snap_targets` in `app.rs`).
+- Installer / uninstaller → `src/install.rs`; build the setup file with `scripts\make-setup.ps1`.
+- Pages of boxes → `Fence.page`, `Layout.current_page`, page block in `update_inner` (`app.rs`).
 - Next suggested work: see "Improvement ideas" in `docs/STATUS.md`.
