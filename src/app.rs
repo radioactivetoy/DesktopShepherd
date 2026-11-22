@@ -2721,14 +2721,39 @@ impl DeskApp {
     }
 
     fn page_layout(&mut self, ui: &mut egui::Ui) {
-        // Show the main monitor, widened to include any box sitting on another monitor.
-        let [sw, sh] = desktop::primary_screen_points();
-        let mut screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(sw, sh));
-        for f in &self.layout.fences {
-            screen = screen.union(Rect::from_min_size(Pos2::new(f.rect[0], f.rect[1]), Vec2::new(f.rect[2], f.rect[3])));
+        // Dots switch between "all monitors" (0) and each monitor on its own (1, 2, ...).
+        let monitors = if self.monitors.is_empty() { desktop::monitors() } else { self.monitors.clone() };
+        let fixed = self.layout.settings.monitor_mode == crate::model::MonitorMode::Fixed;
+        let role_name = |i: usize| match i {
+            0 => "Main monitor".to_string(),
+            1 => "Second monitor".to_string(),
+            2 => "Third monitor".to_string(),
+            n => format!("Monitor {}", n + 1),
+        };
+        let label_of = |i: usize, m: &desktop::Monitor| -> String {
+            let dev = m.name.trim_start_matches("\\\\.\\").to_string();
+            let size = format!("{}×{}", m.rect.width().round(), m.rect.height().round());
+            if fixed {
+                // Fixed mode: boxes stay on this physical display, whatever its role.
+                format!("{dev} (fixed){}  ·  {size}", if m.primary { ", main now" } else { "" })
+            } else {
+                format!("{}  ·  {dev}  ·  {size}", role_name(i))
+            }
+        };
+        let vid = ui.make_persistent_id("layout-view");
+        let mut view: usize = ui.ctx().data(|d| d.get_temp(vid)).unwrap_or(0);
+        if view > monitors.len() || monitors.len() < 2 {
+            view = 0;
         }
         ui.horizontal(|ui| {
-            ui.label(egui::RichText::new("Your desktop, as the boxes sit on it").color(Color32::from_gray(180)));
+            let title = if view == 0 {
+                if monitors.len() > 1 { format!("All {} monitors", monitors.len()) } else { "Your desktop, as the boxes sit on it".to_string() }
+            } else {
+                label_of(view - 1, &monitors[view - 1])
+            };
+            ui.label(egui::RichText::new(title).color(Color32::from_gray(210)).size(15.0));
+            ui.add_space(12.0);
+            let [sw, sh] = desktop::primary_screen_points();
             if self.persist && ui.button("Bring every box back on screen").clicked() {
                 let main = Rect::from_min_size(Pos2::ZERO, Vec2::new(sw, sh));
                 for f in &mut self.layout.fences {
@@ -2741,13 +2766,39 @@ impl DeskApp {
                 self.mark_dirty();
             }
         });
+        if monitors.len() > 1 {
+            ui.label(
+                egui::RichText::new(if fixed {
+                    "Boxes stay on their display (Settings > Monitors: fixed)."
+                } else {
+                    "Boxes follow the monitor's role: main, second… (Settings > Monitors: by role)."
+                })
+                .size(12.0)
+                .color(Color32::from_gray(150)),
+            );
+        }
         ui.add_space(6.0);
+        // The area shown: one monitor, or all of them together.
+        let screen = if view == 0 {
+            monitors.iter().map(|m| m.rect).reduce(|a, b| a.union(b)).unwrap_or(Rect::from_min_size(Pos2::ZERO, Vec2::new(1920.0, 1080.0)))
+        } else {
+            monitors[view - 1].rect
+        };
+        let dots_h = if monitors.len() > 1 { 22.0 } else { 0.0 };
         let avail = ui.available_rect_before_wrap();
-        let scale = (avail.width() / screen.width()).min(avail.height() / screen.height()).min(1.0);
+        let room = Vec2::new(avail.width(), (avail.height() - dots_h).max(50.0));
+        let scale = (room.x / screen.width()).min(room.y / screen.height()).min(1.0);
         let area = Rect::from_min_size(avail.min, screen.size() * scale);
         ui.allocate_rect(area, Sense::hover());
         let painter = ui.painter_at(area);
-        painter.rect_filled(area, 0.0, Color32::from_rgb(20, 24, 32));
+        painter.rect_filled(area, 0.0, Color32::from_rgb(12, 14, 18));
+        let to_area = |r: Rect| Rect::from_min_size(area.min + (r.min - screen.min) * scale, r.size() * scale);
+        // Each monitor: its own background and name in the corner.
+        for (i, m) in monitors.iter().enumerate() {
+            let r = to_area(m.rect);
+            painter.rect_filled(r.shrink(1.0), 4.0, Color32::from_rgb(20, 24, 32));
+            painter.rect_stroke(r.shrink(1.0), 4.0, egui::Stroke::new(1.0_f32, Color32::from_white_alpha(if view == i + 1 { 0 } else { 40 })), egui::StrokeKind::Inside);
+        }
         let claimed: HashSet<String> = self
             .layout
             .fences
@@ -2758,14 +2809,50 @@ impl DeskApp {
         let desk = DeskState { items: &self.items, claimed: &claimed, spacing: self.spacing, rules: &self.layout.settings.categories, open_counts: &self.layout.open_counts };
         for f in &self.layout.fences {
             let h = if f.expanded { f.rect[3] } else { ROLLED_HEIGHT };
-            let r = Rect::from_min_size(
-                area.min + (Pos2::new(f.rect[0], f.rect[1]) - screen.min) * scale,
-                Vec2::new(f.rect[2], h) * scale,
-            );
-            // The settings window is drawn by the same egui context as the boxes (DirectX) or as
-            // the classic boxes (GL), so the boxes' icon cache serves the preview either way.
-            fv::paint_static(&painter, &mut self.icons, f, &desk, r, scale);
+            let br = Rect::from_min_size(Pos2::new(f.rect[0], f.rect[1]), Vec2::new(f.rect[2], h));
+            if !screen.intersects(br) {
+                continue; // on another monitor
+            }
+            // The settings window is drawn by the same egui context as the boxes, so the boxes'
+            // icon cache serves the preview.
+            fv::paint_static(&painter, &mut self.icons, f, &desk, to_area(br), scale);
         }
+        // A monitor with no box: say so rather than show an empty area.
+        let on_screen = self.layout.fences.iter().any(|f| screen.intersects(Rect::from_min_size(Pos2::new(f.rect[0], f.rect[1]), Vec2::new(f.rect[2], f.rect[3]))));
+        if view > 0 && !on_screen {
+            painter.text(area.center(), egui::Align2::CENTER_CENTER, "No boxes on this monitor yet", FontId::proportional(15.0), Color32::from_gray(150));
+        }
+        // Monitor names on top of the boxes, in each monitor's bottom-left corner.
+        if view == 0 && monitors.len() > 1 {
+            for (i, m) in monitors.iter().enumerate() {
+                let r = to_area(m.rect);
+                let text = if fixed { m.name.trim_start_matches("\\\\.\\").to_string() } else { role_name(i) };
+                let g = painter.layout_no_wrap(text, FontId::proportional(13.0), Color32::WHITE);
+                let size = g.size() + Vec2::new(12.0, 6.0);
+                let tag = Rect::from_min_size(Pos2::new(r.min.x + 8.0, r.max.y - 8.0 - size.y), size);
+                painter.rect_filled(tag, 4.0, Color32::from_rgba_unmultiplied(70, 140, 230, 230));
+                painter.galley(tag.min + Vec2::new(6.0, 3.0), g, Color32::WHITE);
+            }
+        }
+        // The dots: all monitors, then each one.
+        if monitors.len() > 1 {
+            let n = monitors.len() + 1;
+            let gap = 16.0;
+            let y = area.max.y + dots_h / 2.0 + 2.0;
+            let cx = avail.center().x.min(area.center().x.max(avail.min.x + gap * n as f32));
+            for i in 0..n {
+                let c = Pos2::new(cx + (i as f32 - (n as f32 - 1.0) / 2.0) * gap, y);
+                let r = Rect::from_center_size(c, Vec2::new(gap, 18.0));
+                let tip = if i == 0 { "All monitors".to_string() } else { label_of(i - 1, &monitors[i - 1]) };
+                let resp = ui.interact(r, ui.id().with(("layout-dot", i)), Sense::click()).on_hover_text(tip);
+                if resp.clicked() {
+                    view = i;
+                }
+                let alpha = if i == view { 235 } else if resp.hovered() { 160 } else { 90 };
+                ui.painter().circle_filled(c, if i == view { 4.0 } else { 3.5 }, Color32::from_white_alpha(alpha));
+            }
+        }
+        ui.ctx().data_mut(|d| d.insert_temp(vid, view));
     }
 
     fn page_settings(&mut self, ui: &mut egui::Ui) {
