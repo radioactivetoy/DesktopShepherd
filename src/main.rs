@@ -3,6 +3,7 @@
 
 mod agenda;
 mod apps;
+mod i18n;
 mod app;
 mod comp_trial;
 #[cfg(windows)]

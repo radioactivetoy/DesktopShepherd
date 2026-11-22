@@ -293,6 +293,8 @@ impl DeskApp {
             }
         }
         sanitize(&mut layout);
+        // The language, before any text is made (tray menu, windows).
+        crate::i18n::set_lang(layout.settings.language);
         if persist {
             storage::backup_now(&layout);
             if first_run {
@@ -3174,6 +3176,18 @@ impl DeskApp {
         let s = &mut self.layout.settings;
         let mut dirty = false;
         let mut icons_changed = false;
+        ui.horizontal(|ui| {
+            ui.label(crate::i18n::t("Language"));
+            for (v, name) in crate::i18n::CHOICES {
+                let label = if *v == 0 { crate::i18n::t(name) } else { name };
+                if ui.selectable_label(s.language == *v, label).clicked() && s.language != *v {
+                    s.language = *v;
+                    crate::i18n::set_lang(*v);
+                    dirty = true;
+                }
+            }
+        });
+        ui.add_space(6.0);
         ui.heading("Desktop");
         dirty |= ui.checkbox(&mut s.desktop_menu, "Add \"DesktopShepherd\" to the desktop's right-click menu (new box or widget where you click)").changed();
         ui.label(egui::RichText::new("On Windows 11 it is under \"Show more options\". Or press Ctrl+Alt+B anywhere and drag a rectangle.").color(Color32::from_gray(150)).size(12.0));

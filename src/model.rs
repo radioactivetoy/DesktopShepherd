@@ -234,6 +234,8 @@ pub struct Settings {
     pub fade_delay: u32,
     /// Each Windows virtual desktop shows its own page of boxes (desktop 1 = page 1…).
     pub link_vdesks: bool,
+    /// Language: 0 = automatic (Windows), 1 = English, 2 = Spanish, 3 = Catalan.
+    pub language: u8,
 }
 
 impl Default for Settings {
@@ -262,6 +264,7 @@ impl Default for Settings {
             fade_opacity: 30,
             fade_delay: 3,
             link_vdesks: false,
+            language: 0,
         }
     }
 }
