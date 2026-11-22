@@ -30,6 +30,14 @@ static DEADLINE: Mutex<Option<Instant>> = Mutex::new(None);
 static QUIT: AtomicBool = AtomicBool::new(false);
 /// Windows reported a display change (monitor added, removed, switched off, resolution).
 static DISPLAY_CHANGED: AtomicBool = AtomicBool::new(false);
+/// Explorer (re)started: Windows broadcasts "TaskbarCreated" (its message number is kept here).
+static TASKBAR_CREATED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+static EXPLORER_RESTARTED: AtomicBool = AtomicBool::new(false);
+
+/// True once after Explorer restarted (a new desktop and taskbar).
+pub fn take_explorer_restarted() -> bool {
+    EXPLORER_RESTARTED.swap(false, Ordering::SeqCst)
+}
 
 /// The quick-search shortcut was pressed.
 static SEARCH_REQUESTED: AtomicBool = AtomicBool::new(false);
@@ -309,6 +317,11 @@ unsafe extern "system" fn main_wndproc(h: HWND, m: u32, wp: WPARAM, lp: LPARAM) 
             }
             LRESULT(0)
         }
+        _ if m != 0 && m == TASKBAR_CREATED.load(Ordering::SeqCst) => {
+            EXPLORER_RESTARTED.store(true, Ordering::SeqCst);
+            wake_after(Duration::ZERO);
+            DefWindowProcW(h, m, wp, lp)
+        }
         _ => DefWindowProcW(h, m, wp, lp),
     }
 }
@@ -343,6 +356,10 @@ pub fn run(screenshot: Option<PathBuf>) -> i32 {
             return crate::EXIT_START_FAILED;
         };
         WAKE_HWND.store(hwnd.0 as isize, Ordering::SeqCst);
+        {
+            use windows::Win32::UI::WindowsAndMessaging::RegisterWindowMessageW;
+            TASKBAR_CREATED.store(RegisterWindowMessageW(windows::core::w!("TaskbarCreated")), Ordering::SeqCst);
+        }
 
         let root = root_context();
         // The root context only schedules and never draws text: no fonts (saves their memory).

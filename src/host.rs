@@ -771,9 +771,13 @@ impl HostSystem {
         self.hosts.retain(|id, _| ids.contains(id));
     }
 
-    #[allow(dead_code)]
     pub fn hwnd(&self, id: u64) -> Option<isize> {
         self.hosts.get(&id).map(|h| h.hwnd.0 as isize)
+    }
+
+    /// A panel window's handle (menu, settings, search…), if it is open.
+    pub fn panel_hwnd(&self, id: u64) -> Option<isize> {
+        self.panels.get(&id).map(|p| p.hwnd.0 as isize)
     }
 
     /// Applies a command (move, resize, focus) to a box window.

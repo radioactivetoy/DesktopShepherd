@@ -143,10 +143,29 @@ pub fn open_item(path: &str) {
     });
 }
 
+/// Opens the item's folder with the item selected. Uses Windows' own call (no process started by
+/// name, any characters in the path work) on a helper thread, so a slow network folder never
+/// freezes the boxes.
 pub fn show_in_folder(path: &str) {
     #[cfg(windows)]
     {
-        let _ = std::process::Command::new("explorer").arg(format!("/select,{path}")).spawn();
+        let path = path.to_string();
+        let _ = std::thread::Builder::new().name("show-in-folder".into()).spawn(move || unsafe {
+            use windows::core::HSTRING;
+            use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED};
+            use windows::Win32::UI::Shell::{ILFree, SHOpenFolderAndSelectItems, SHParseDisplayName};
+            let init = CoInitializeEx(None, COINIT_APARTMENTTHREADED).is_ok();
+            let mut pidl = std::ptr::null_mut();
+            if SHParseDisplayName(&HSTRING::from(path.as_str()), None, &mut pidl, 0, None).is_ok() && !pidl.is_null() {
+                let _ = SHOpenFolderAndSelectItems(pidl, None, 0);
+                ILFree(Some(pidl));
+            } else if let Some(dir) = std::path::Path::new(&path).parent() {
+                open_folder(dir);
+            }
+            if init {
+                CoUninitialize();
+            }
+        });
     }
     #[cfg(not(windows))]
     {
@@ -156,8 +175,12 @@ pub fn show_in_folder(path: &str) {
 
 pub fn open_folder(path: &Path) {
     #[cfg(windows)]
-    {
-        let _ = std::process::Command::new("explorer").arg(path).spawn();
+    unsafe {
+        // Windows' own "open" on the folder: no process started by name.
+        use windows::core::{w, HSTRING, PCWSTR};
+        use windows::Win32::UI::Shell::ShellExecuteW;
+        use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+        let _ = ShellExecuteW(None, w!("open"), &HSTRING::from(path.as_os_str()), PCWSTR::null(), PCWSTR::null(), SW_SHOWNORMAL);
     }
     #[cfg(not(windows))]
     {
@@ -339,13 +362,12 @@ pub fn work_area_at(p: egui::Pos2, ppp: f32) -> egui::Rect {
 /// when it loses focus. Nothing here fights Explorer: there is no hook in Explorer and no
 /// repeated z-order forcing (an earlier version forced every move to the bottom, which could
 /// clash with Explorer keeping its own desktop at the bottom). Returns the window handle.
-pub fn prepare_box(title: &str, no_activate: bool) -> Option<isize> {
+pub fn prepare_box(handle: isize, no_activate: bool) -> Option<isize> {
     #[cfg(windows)]
     unsafe {
-        use windows::core::HSTRING;
         use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
         use windows::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
-        use windows::Win32::UI::WindowsAndMessaging::{FindWindowW, MA_NOACTIVATE, WM_MOUSEACTIVATE};
+        use windows::Win32::UI::WindowsAndMessaging::{MA_NOACTIVATE, WM_MOUSEACTIVATE};
 
         unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM, _id: usize, data: usize) -> LRESULT {
             if msg == WM_MOUSEACTIVATE && data == 1 {
@@ -354,8 +376,9 @@ pub fn prepare_box(title: &str, no_activate: bool) -> Option<isize> {
             DefSubclassProc(hwnd, msg, wp, lp)
         }
 
-        let t = HSTRING::from(title);
-        let hwnd = FindWindowW(None, &t).ok()?;
+        // The handle the box host created (never looked up by title: another program's window
+        // could carry the same title).
+        let hwnd = HWND(handle as *mut _);
         if hwnd.0.is_null() {
             return None;
         }
@@ -366,7 +389,7 @@ pub fn prepare_box(title: &str, no_activate: bool) -> Option<isize> {
     }
     #[cfg(not(windows))]
     {
-        let _ = (title, no_activate);
+        let _ = (handle, no_activate);
         Some(0)
     }
 }
@@ -782,17 +805,15 @@ pub fn reapply_icon_hiding() {
 
 /// Asks Windows 11 to round a window's corners natively (radius 0 = square, ≤4 = small) and
 /// to skip its own border, since boxes draw theirs. Harmless on Windows 10 (ignored).
-pub fn round_window(title: &str, radius: f32) -> bool {
+pub fn round_window(handle: isize, radius: f32) -> bool {
     #[cfg(windows)]
     unsafe {
-        use windows::core::HSTRING;
+        use windows::Win32::Foundation::HWND;
         use windows::Win32::Graphics::Dwm::{
             DwmSetWindowAttribute, DWMWA_BORDER_COLOR, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND, DWMWCP_ROUND,
             DWMWCP_ROUNDSMALL,
         };
-        use windows::Win32::UI::WindowsAndMessaging::FindWindowW;
-        let t = HSTRING::from(title);
-        let Ok(hwnd) = FindWindowW(None, &t) else { return false };
+        let hwnd = HWND(handle as *mut _);
         if hwnd.0.is_null() {
             return false;
         }

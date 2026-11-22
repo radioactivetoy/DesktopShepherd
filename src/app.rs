@@ -879,6 +879,14 @@ impl DeskApp {
         if self.persist {
             // Displays changed: Windows told us at once (WM_DISPLAYCHANGE), or the watcher noticed.
             #[cfg(windows)]
+            if crate::runloop::take_explorer_restarted() {
+                // Explorer restarted: a new desktop window. Put the boxes back just above it as it
+                // settles (icon hiding is re-applied by the regular check).
+                storage::log_line("Explorer restarted");
+                let now = Instant::now();
+                self.restack_at = vec![now + Duration::from_millis(800), now + Duration::from_secs(3), now + Duration::from_secs(8)];
+            }
+            #[cfg(windows)]
             let told = crate::runloop::take_display_changed();
             #[cfg(not(windows))]
             let told = false;
@@ -901,7 +909,7 @@ impl DeskApp {
                 let now = Instant::now();
                 if self.restack_at.iter().any(|t| *t <= now) {
                     self.restack_at.retain(|t| *t > now);
-                    storage::log_line(&format!("display change: re-stacking {} boxes", self.ui.hwnds.len()));
+                    storage::log_line(&format!("re-stacking {} boxes", self.ui.hwnds.len()));
                     for h in self.ui.hwnds.values() {
                         desktop::send_to_bottom(*h);
                     }
@@ -1094,6 +1102,19 @@ impl DeskApp {
                     dirty |= r.0;
                     wake_scan |= r.1;
                 });
+                // Part of the desktop (clicks don't bring it forward) and square Windows corners (the box
+                // draws its own): set up once, by the handle the host created.
+                if let Some(hw) = hosts.hwnd(id) {
+                    if !self.ui.hwnds.contains_key(&id) {
+                        if let Some(hw) = desktop::prepare_box(hw, fence.widget.is_none()) {
+                            self.ui.hwnds.insert(id, hw);
+                        }
+                    }
+                    let want = fence.corner.round() as i32;
+                    if self.ui.rounded.get(&id) != Some(&want) && desktop::round_window(hw, 0.0) {
+                        self.ui.rounded.insert(id, want);
+                    }
+                }
                 if drew {
                     DRAW_STATS.1.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     DRAW_US.fetch_add(t0.elapsed().as_micros() as u64, std::sync::atomic::Ordering::Relaxed);
@@ -1210,11 +1231,6 @@ fn fence_window(
     // Native Windows 11 rounded corners matching the box's corner setting.
     let want = fence.corner.round() as i32;
     // Part of the desktop: clicking doesn't bring it forward; after typing in it, back down.
-    if !st.hwnds.contains_key(&fence.id) {
-        if let Some(h) = desktop::prepare_box(&format!("DesktopShepherd box {}", fence.id), fence.widget.is_none()) {
-            st.hwnds.insert(fence.id, h);
-        }
-    }
     let has_focus = ctx.input(|i| i.viewport().focused).unwrap_or(false);
     if has_focus {
         st.focused.insert(fence.id);
@@ -1241,9 +1257,8 @@ fn fence_window(
     // The box draws its own rounded corners (with the glass behind them), so Windows must not
     // re-round or outline the window: then the box looks exactly the same at rest as its
     // see-through copy does while being dragged.
-    if st.rounded.get(&fence.id) != Some(&want) && desktop::round_window(&format!("DesktopShepherd box {}", fence.id), 0.0) {
-        st.rounded.insert(fence.id, want);
-    }
+    // (done by handle in show_fences, right after the box's frame)
+    let _ = want;
 
     // Remember where the person moved or resized the box.
     if !any_down {
@@ -2335,6 +2350,9 @@ impl DeskApp {
             hosts.panel(MENU_PANEL, crate::host::PanelKind::Menu, "DesktopShepherd menu", rect_px, true, force, |pctx| {
                 self.menu_body(pctx, &mut m, targets, &root_ctx, &mut close, &mut dirty, &mut measured);
             });
+            if !m.rounded && m.frames >= 2 {
+                m.rounded = hosts.panel_hwnd(MENU_PANEL).map(|h| desktop::round_window(h, 8.0)).unwrap_or(false) || m.frames > 30;
+            }
             if close {
                 hosts.close_panel(MENU_PANEL);
             }
@@ -2368,9 +2386,6 @@ impl DeskApp {
             m.frames += 1;
             if m.frames == 1 {
                 ctx.send_viewport_cmd(ViewportCommand::Focus);
-            }
-            if !m.rounded && m.frames >= 2 {
-                m.rounded = desktop::round_window("DesktopShepherd menu", 8.0) || m.frames > 30;
             }
             match ctx.input(|i| i.viewport().focused) {
                 Some(true) => m.was_focused = true,
