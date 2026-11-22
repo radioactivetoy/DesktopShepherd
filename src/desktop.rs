@@ -1147,3 +1147,27 @@ pub fn watch_folders(dirs: impl Fn() -> Vec<PathBuf> + Send + 'static, changed: 
         let _ = (dirs, changed);
     }
 }
+
+/// For the supervisor while it waits before restarting the app: true if the "please quit" event
+/// (`Local\DesktopShepherd.Quit`) was set within `wait` (then it should stop too).
+pub fn wait_for_quit_signal(wait: std::time::Duration) -> bool {
+    #[cfg(windows)]
+    unsafe {
+        use windows::core::w;
+        use windows::Win32::Foundation::{CloseHandle, BOOL, WAIT_OBJECT_0};
+        use windows::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
+        // The same manual-reset event the app listens to (opened if it exists, else created).
+        let Ok(ev) = CreateEventW(None, BOOL(1), BOOL(0), w!("Local\\DesktopShepherd.Quit")) else {
+            std::thread::sleep(wait);
+            return false;
+        };
+        let r = WaitForSingleObject(ev, wait.as_millis().min(u32::MAX as u128 - 1) as u32);
+        let _ = CloseHandle(ev);
+        r == WAIT_OBJECT_0
+    }
+    #[cfg(not(windows))]
+    {
+        std::thread::sleep(wait);
+        false
+    }
+}

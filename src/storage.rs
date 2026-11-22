@@ -18,8 +18,15 @@ pub fn data_dir() -> PathBuf {
         // over the first time.
         let old = base.join("DeskBoxes");
         if !dir.exists() && old.is_dir() && fs::rename(&old, &dir).is_err() {
-            // Something holds a file open: copy instead, the old folder stays as it is.
-            let _ = copy_dir(&old, &dir);
+            // Something holds a file open: copy instead (the old folder stays as it is). Copied to
+            // a temporary name first, so a half-finished copy is never taken for the real folder.
+            let tmp = base.join("DesktopShepherd.copying");
+            let _ = fs::remove_dir_all(&tmp);
+            if copy_dir(&old, &tmp).is_ok() {
+                let _ = fs::rename(&tmp, &dir);
+            } else {
+                let _ = fs::remove_dir_all(&tmp);
+            }
         }
         dir
     })

@@ -72,7 +72,10 @@ fn supervise(boot: bool) {
         if failures_in_a_row >= 3 {
             storage::log_line(&format!("{failures_in_a_row} failures in a row; next try in {wait} s"));
         }
-        std::thread::sleep(Duration::from_secs(wait));
+        // Waits, but a "please quit" (stop script, installer) ends the wait and the supervisor.
+        if desktop::wait_for_quit_signal(Duration::from_secs(wait)) {
+            return;
+        }
     }
 }
 
@@ -152,8 +155,13 @@ fn main() {
     // If anything ever goes wrong: log it and give the desktop icons back before leaving.
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        storage::log_line(&format!("crash: {info}"));
-        desktop::restore_desktop_icons();
+        let thread = std::thread::current().name().unwrap_or("?").to_string();
+        storage::log_line(&format!("crash in thread {thread}: {info}"));
+        // Only the main thread's crash ends the app. A helper thread's (a download, a file
+        // operation) does not: the app keeps running and must keep the icons hidden.
+        if thread == "main" {
+            desktop::restore_desktop_icons();
+        }
         default_hook(info);
     }));
 

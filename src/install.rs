@@ -44,7 +44,10 @@ fn tell(text: &str, style: MESSAGEBOX_STYLE) {
             }
         }
         let r = MessageBoxW(None, &HSTRING::from(text), &HSTRING::from(APP), style | MB_OK);
-        crate::storage::log_line(&format!("setup message ({}): {}", r.0, text.lines().next().unwrap_or("")));
+        // (not after the data folder was deleted on uninstall: logging would create it again)
+        if crate::storage::data_dir().exists() {
+            crate::storage::log_line(&format!("setup message ({}): {}", r.0, text.lines().next().unwrap_or("")));
+        }
     }
 }
 
@@ -158,14 +161,18 @@ pub fn run_setup() {
     }
     // Start with Windows: remember it in the settings (the installed copy keeps the entry
     // pointing at itself each time it starts).
-    let mut layout = crate::storage::load().unwrap_or_default();
-    if !layout.settings.start_with_windows {
-        layout.settings.start_with_windows = true;
-        let _ = crate::storage::save(&layout);
+    // An existing layout is only switched to start with Windows. A new PC has none: the
+    // installed copy is told (DESKTOPSHEPHERD_INSTALLED) and turns it on in its own first layout,
+    // so the usual first-run boxes are made (never write an empty layout here).
+    if let Some(mut layout) = crate::storage::load() {
+        if !layout.settings.start_with_windows {
+            layout.settings.start_with_windows = true;
+            let _ = crate::storage::save(&layout);
+        }
     }
     // Said before starting it: the starting program would close this message right away.
     tell(&format!("{APP} is {}. It starts when you press OK; its icon is in the tray (next to the clock).", if again { "updated" } else { "installed" }), MB_ICONINFORMATION);
-    if let Err(e) = std::process::Command::new(&exe).current_dir(&dir).spawn() {
+    if let Err(e) = std::process::Command::new(&exe).current_dir(&dir).env("DESKTOPSHEPHERD_INSTALLED", "1").spawn() {
         tell(&format!("{APP} is installed but did not start: {e}"), MB_ICONWARNING);
     }
 }
@@ -214,10 +221,13 @@ pub fn run_uninstall() {
     if running_from_it {
         use std::os::windows::process::CommandExt;
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        let _ = std::process::Command::new("cmd")
+        // Windows' own cmd and ping by full path, run from System32 (never a program of the same
+        // name from a folder others can write to).
+        let sys32 = std::env::var_os("SystemRoot").map(std::path::PathBuf::from).unwrap_or_else(|| std::path::PathBuf::from(r"C:\Windows")).join("System32");
+        let _ = std::process::Command::new(sys32.join("cmd.exe"))
             // Passed as typed: the usual quoting would garble the folder path for cmd.
-            .raw_arg(format!("/C ping -n 3 127.0.0.1 >nul & rmdir /s /q \"{}\"", dir.display()))
-            .current_dir(std::env::temp_dir())
+            .raw_arg(format!("/C \"\"{}\" -n 3 127.0.0.1 >nul & rmdir /s /q \"{}\"\"", sys32.join("PING.EXE").display(), dir.display()))
+            .current_dir(&sys32)
             .creation_flags(CREATE_NO_WINDOW)
             .spawn();
     } else {

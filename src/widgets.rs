@@ -344,8 +344,17 @@ fn read_now() -> Snapshot {
         r.at = now;
     }
     if r.disks_at.map(|t| now.duration_since(t) >= Duration::from_secs(60)).unwrap_or(true) {
-        r.disks = disks();
+        // A sleeping or stuck drive can take seconds to answer: ask on a helper thread, never
+        // here on the thread that draws every box. The answer shows on the next update.
         r.disks_at = Some(now);
+        let _ = std::thread::Builder::new().name("drive-space".into()).spawn(|| {
+            let found = disks();
+            if let Ok(mut g) = READINGS.lock() {
+                if let Some(r) = g.as_mut() {
+                    r.disks = found;
+                }
+            }
+        });
     }
     (r.cpu, r.history.iter().copied().collect(), r.mem_load, r.mem_used_gb, r.mem_total_gb, r.disks.clone())
 }
@@ -617,7 +626,7 @@ impl DeskWidget for Agenda {
                 // Every event of the next days, each day under its own heading.
                 let mut rows: Vec<(chrono::NaiveDate, usize, &crate::agenda::Occurrence)> = Vec::new();
                 for (ci, c) in cals.iter().enumerate() {
-                    for e in &c.events {
+                    for e in c.events.iter() {
                         if e.end <= now && !(e.all_day && e.end.date() > today) {
                             if !(e.end == e.start && e.start.date() == today && e.start >= now) {
                                 continue; // already over
@@ -713,7 +722,7 @@ fn agenda_edit(ui: &mut Ui, data: &mut Value, urls: &[String], cals: &[crate::ag
                         // The server name is enough to tell links apart (the rest is a secret).
                         u.split("://").nth(1).and_then(|r| r.split('/').next()).unwrap_or(u).to_string()
                     });
-                    ui.add(egui::Label::new(name).truncate()).on_hover_text("The full link is kept private in your layout file.");
+                    ui.add(egui::Label::new(name).truncate()).on_hover_text("The full link stays on this PC only: in your layout file and its backups.");
                     if ui.small_button("Remove").clicked() {
                         remove = Some(i);
                     }

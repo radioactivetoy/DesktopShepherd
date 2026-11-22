@@ -75,6 +75,10 @@ pub fn set_clipboard_files(owner: isize, paths: &[String], cut: bool) -> bool {
                 let _ = GlobalUnlock(mem);
                 ok = SetClipboardData(CF_HDROP, HANDLE(mem.0)).is_ok();
             }
+            if !ok {
+                // The clipboard didn't take it: the memory is still ours to free.
+                let _ = windows::Win32::Foundation::GlobalFree(mem);
+            }
         }
         // "Preferred DropEffect": 2 = move (cut), 1 = copy.
         let effect_fmt = RegisterClipboardFormatW(w!("Preferred DropEffect"));
@@ -84,7 +88,11 @@ pub fn set_clipboard_files(owner: isize, paths: &[String], cut: bool) -> bool {
                 if !p.is_null() {
                     *p = if cut { 2 } else { 1 };
                     let _ = GlobalUnlock(mem);
-                    let _ = SetClipboardData(effect_fmt, HANDLE(mem.0));
+                    if SetClipboardData(effect_fmt, HANDLE(mem.0)).is_err() {
+                        let _ = windows::Win32::Foundation::GlobalFree(mem);
+                    }
+                } else {
+                    let _ = windows::Win32::Foundation::GlobalFree(mem);
                 }
             }
         }
@@ -135,14 +143,27 @@ pub fn paste_into(owner: isize, dest: String, done: impl FnOnce(Vec<String>) + S
     }
     let _ = std::thread::Builder::new().name("paste".into()).spawn(move || {
         let flags = FOF_ALLOWUNDO | FOF_RENAMEONCOLLISION;
-        let _ = file_op(if cut { FO_MOVE } else { FO_COPY }, &files, Some(&dest), flags);
-        let landed: Vec<String> = files
+        // What is in the folder before, so the new files are known exactly afterwards (a copy of a
+        // file that is already there gets a new name, e.g. "x - Copy").
+        let list = |d: &str| -> std::collections::HashSet<String> {
+            std::fs::read_dir(d).map(|rd| rd.flatten().map(|e| e.path().to_string_lossy().to_lowercase()).collect()).unwrap_or_default()
+        };
+        let before = list(&dest);
+        let dest_l = dest.trim_end_matches(['\\', '/']).to_lowercase();
+        // Files already in this folder (cut and pasted in place): nothing to move, just place them.
+        let in_place: Vec<String> = files
             .iter()
-            .filter_map(|f| std::path::Path::new(f).file_name())
-            .map(|n| std::path::Path::new(&dest).join(n))
-            .filter(|p| p.exists())
-            .map(|p| p.to_string_lossy().to_string())
+            .filter(|f| std::path::Path::new(f).parent().map(|p| p.to_string_lossy().to_lowercase() == dest_l).unwrap_or(false))
+            .cloned()
             .collect();
+        let to_do: Vec<String> = files.iter().filter(|f| !in_place.contains(f)).cloned().collect();
+        if !to_do.is_empty() {
+            let _ = file_op(if cut { FO_MOVE } else { FO_COPY }, &to_do, Some(&dest), flags);
+        }
+        let mut landed: Vec<String> = std::fs::read_dir(&dest)
+            .map(|rd| rd.flatten().map(|e| e.path().to_string_lossy().to_string()).filter(|p| !before.contains(&p.to_lowercase())).collect())
+            .unwrap_or_default();
+        landed.extend(in_place.into_iter().filter(|p| std::path::Path::new(p).exists()));
         done(landed);
     });
 }

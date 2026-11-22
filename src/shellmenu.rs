@@ -172,26 +172,29 @@ pub fn run_helper(args: &[String]) -> i32 {
 /// may take a few seconds to open its window (Properties loads its pages the first time): wait up
 /// to 10 s for one to appear, then until every one is closed.
 unsafe fn wait_for_own_windows(owner: HWND) {
-    let start = std::time::Instant::now();
+    use std::time::{Duration, Instant};
+    use windows::Win32::UI::WindowsAndMessaging::{MsgWaitForMultipleObjects, QS_ALLINPUT};
+    let start = Instant::now();
     let mut seen = false;
-    let mut idle_checks = 0;
-    while start.elapsed() < std::time::Duration::from_secs(3600) {
+    let mut idle_since: Option<Instant> = None;
+    while start.elapsed() < Duration::from_secs(3600) {
         let mut msg = MSG::default();
         while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
             let _ = TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
         if own_visible_windows(owner) == 0 {
-            idle_checks += 1;
-            // Nothing opened within 10 s, or everything that opened is closed again.
-            if (!seen && idle_checks >= 40) || (seen && idle_checks >= 4) {
+            let since = *idle_since.get_or_insert_with(Instant::now);
+            // Nothing opened within 10 s, or everything that opened has been closed for 1 s.
+            if (!seen && start.elapsed() >= Duration::from_secs(10)) || (seen && since.elapsed() >= Duration::from_secs(1)) {
                 return;
             }
         } else {
             seen = true;
-            idle_checks = 0;
+            idle_since = None;
         }
-        std::thread::sleep(std::time::Duration::from_millis(250));
+        // Sleep until a message arrives (a dialog of ours stays responsive) or 250 ms pass.
+        let _ = MsgWaitForMultipleObjects(None, false, 250, QS_ALLINPUT);
     }
 }
 

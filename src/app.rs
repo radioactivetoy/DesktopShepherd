@@ -256,6 +256,10 @@ impl DeskApp {
         let initial = desktop::scan(&clean_paths(&layout));
         if first_run {
             layout = default_layout(&initial);
+            // Just installed by the setup: start with Windows (the setup asked for it).
+            if std::env::var_os("DESKTOPSHEPHERD_INSTALLED").is_some() {
+                layout.settings.start_with_windows = true;
+            }
         }
         sanitize(&mut layout);
         if persist {
@@ -603,6 +607,13 @@ impl DeskApp {
                         self.place_all_boxes();
                         self.mark_dirty();
                         self.apply_icon_hiding();
+                        // The restored settings take effect, and the list shows the backup just made.
+                        #[cfg(windows)]
+                        {
+                            desktop::set_start_with_windows(self.layout.settings.start_with_windows);
+                            desktop::set_low_priority(self.layout.settings.low_priority);
+                        }
+                        self.backups = storage::list_backups();
                     }
                 }
                 Act::ImportOriginal => {
@@ -3046,7 +3057,12 @@ fn sanitize(layout: &mut Layout) {
         layout.settings.hide_desktop_icons = true;
         layout.version = 3;
     }
-    let vs = desktop::virtual_screen();
+    // The screen area in pixels; box positions are in points (pixels / display scale).
+    let vs = {
+        let px = desktop::virtual_screen();
+        let s = desktop::system_scale().max(0.5);
+        [px[0] / s, px[1] / s, px[2] / s, px[3] / s]
+    };
     let mut seen = HashSet::new();
     for f in &mut layout.fences {
         if f.id == 0 || !seen.insert(f.id) {
@@ -3057,6 +3073,13 @@ fn sanitize(layout: &mut Layout) {
         layout.next_id = layout.next_id.max(f.id);
         if f.tabs.is_empty() {
             f.tabs.push(Tab { name: "Main".into(), items: vec![] });
+        }
+        // A widget's saved data is always an object (a hand-edited file could hold anything else,
+        // and widgets add fields to it).
+        if let Some(w) = f.widget.as_mut() {
+            if !w.data.is_object() {
+                w.data = serde_json::json!({});
+            }
         }
         f.sel_tab = f.sel_tab.min(f.tabs.len() - 1);
         f.rect[2] = if f.rect[2].is_finite() { f.rect[2].clamp(120.0, 4000.0) } else { 400.0 };
@@ -3647,8 +3670,15 @@ impl DeskApp {
 
     /// Renames the file, keeping a hidden extension, and updates every box that holds it.
     fn finish_rename(&mut self, path: &str, new_name: &str) {
-        let new_name = new_name.trim();
-        if new_name.is_empty() || new_name.contains(['\\', '/', ':', '*', '?', '"', '<', '>', '|']) {
+        // Windows drops dots and spaces at the end of a name: do it here so the boxes keep the
+        // real name; device names (CON, NUL, COM1…) can't be file names.
+        let new_name = new_name.trim().trim_end_matches(['.', ' ']);
+        let reserved = {
+            let base = new_name.split('.').next().unwrap_or("").trim().to_ascii_uppercase();
+            matches!(base.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+                || ((base.starts_with("COM") || base.starts_with("LPT")) && base.len() == 4 && base[3..].chars().all(|c| c.is_ascii_digit() && c != '0'))
+        };
+        if new_name.is_empty() || reserved || new_name.contains(['\\', '/', ':', '*', '?', '"', '<', '>', '|']) {
             return;
         }
         let Some(it) = self.items.get(&path.to_lowercase()).cloned() else { return };
@@ -3656,7 +3686,12 @@ impl DeskApp {
         let Some(dir) = old.parent() else { return };
         let file = if it.is_dir || it.ext.is_empty() { new_name.to_string() } else { format!("{new_name}.{}", it.ext) };
         let new_path = dir.join(file);
-        if new_path.exists() {
+        // Only the letter case changes ("foo" -> "Foo"): the "existing" file is this one.
+        let same_file = new_path.to_string_lossy().to_lowercase() == it.path.to_lowercase();
+        if same_file && new_path.to_string_lossy() == it.path.as_str() {
+            return; // nothing changes
+        }
+        if new_path.exists() && !same_file {
             storage::log_line(&format!("rename: {} already exists", new_path.display()));
             return;
         }

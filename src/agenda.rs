@@ -30,7 +30,7 @@ pub struct Occurrence {
 #[derive(Default)]
 struct CalState {
     name: Option<String>,
-    events: Vec<Occurrence>,
+    events: std::sync::Arc<Vec<Occurrence>>,
     fetched_at: Option<Instant>,
     error: Option<String>,
     loading: bool,
@@ -43,6 +43,12 @@ static REFRESH_ASKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicB
 
 pub fn request_refresh() {
     REFRESH_ASKED.store(true, std::sync::atomic::Ordering::SeqCst);
+    // Every link is due again, whichever agenda widget looks next.
+    if let Ok(mut g) = STATE.lock() {
+        for st in g.get_or_insert_with(HashMap::new).values_mut() {
+            st.fetched_at = None;
+        }
+    }
     #[cfg(windows)]
     crate::runloop::wake_after(Duration::ZERO);
 }
@@ -59,7 +65,7 @@ const AHEAD_DAYS: i64 = 60;
 /// What the widget shows for one link.
 pub struct CalView {
     pub name: Option<String>,
-    pub events: Vec<Occurrence>,
+    pub events: std::sync::Arc<Vec<Occurrence>>,
     pub error: Option<String>,
     pub loading: bool,
 }
@@ -92,13 +98,16 @@ pub fn view(urls: &[String], force: bool) -> Vec<CalView> {
 fn start_download(url: String) {
     let key = url.clone();
     let spawned = std::thread::Builder::new().name("agenda-download".into()).spawn(move || {
-        let result = download(&url).and_then(|text| {
-            if !text.contains("BEGIN:VCALENDAR") {
-                return Err("that link isn't an iCal calendar (.ics)".to_string());
-            }
-            let today = chrono::Local::now().date_naive();
-            Ok(parse(&text, today, today + CDuration::days(AHEAD_DAYS)))
-        });
+        let result = std::panic::catch_unwind(|| {
+            download(&url).and_then(|text| {
+                if !text.contains("BEGIN:VCALENDAR") {
+                    return Err("that link isn't an iCal calendar (.ics)".to_string());
+                }
+                let today = chrono::Local::now().date_naive();
+                Ok(parse(&text, today, today + CDuration::days(AHEAD_DAYS)))
+            })
+        })
+        .unwrap_or_else(|_| Err("that calendar has something DesktopShepherd can't read".to_string()));
         if let Ok(mut g) = STATE.lock() {
             let st = g.get_or_insert_with(HashMap::new).entry(url.clone()).or_default();
             st.loading = false;
@@ -106,7 +115,7 @@ fn start_download(url: String) {
             match result {
                 Ok((name, events)) => {
                     st.name = name;
-                    st.events = events;
+                    st.events = std::sync::Arc::new(events);
                     st.error = None;
                 }
                 Err(e) => {
@@ -136,19 +145,22 @@ fn download(url: &str) -> Result<String, String> {
     use windows::core::{HSTRING, PCWSTR};
     use windows::Win32::Networking::WinHttp::*;
     let url = url.trim();
-    let (secure, rest) = if let Some(r) = url.strip_prefix("https://") {
-        (true, r)
-    } else if let Some(r) = url.strip_prefix("webcal://").or_else(|| url.strip_prefix("webcals://")) {
-        (true, r)
-    } else if let Some(r) = url.strip_prefix("http://") {
-        (false, r)
-    } else {
+    let Some((scheme, rest)) = url.split_once("://") else {
         return Err("the link must start with https://, http:// or webcal://".into());
     };
-    let (hostport, path) = match rest.find('/') {
-        Some(i) => (&rest[..i], &rest[i..]),
-        None => (rest, "/"),
+    let secure = match scheme.to_ascii_lowercase().as_str() {
+        "https" | "webcal" | "webcals" => true,
+        "http" => false,
+        _ => return Err("the link must start with https://, http:// or webcal://".into()),
     };
+    let rest = rest.split('#').next().unwrap_or("");
+    // Server part: up to the first / or ?; the rest (path and query) is what is asked for.
+    let cut = rest.find(['/', '?']).unwrap_or(rest.len());
+    let (hostport, path) = (&rest[..cut], &rest[cut..]);
+    let path = if path.is_empty() { "/".to_string() } else if path.starts_with('?') { format!("/{path}") } else { path.to_string() };
+    let path = path.as_str();
+    // "user:password@server": only the server is used.
+    let hostport = hostport.rsplit('@').next().unwrap_or(hostport);
     let (host, port) = match hostport.rsplit_once(':') {
         Some((h, p)) if p.chars().all(|c| c.is_ascii_digit()) && !p.is_empty() => (h, p.parse::<u16>().unwrap_or(if secure { 443 } else { 80 })),
         _ => (hostport, if secure { 443 } else { 80 }),
@@ -322,14 +334,18 @@ fn parse_duration(v: &str) -> Option<CDuration> {
             _ => {
                 let n: i64 = num.parse().ok()?;
                 num.clear();
-                total += match (c, in_time) {
-                    ('W', _) => n * 7 * 86400,
-                    ('D', _) => n * 86400,
-                    ('H', true) => n * 3600,
-                    ('M', true) => n * 60,
-                    ('S', true) => n,
+                let unit: i64 = match (c, in_time) {
+                    ('W', _) => 7 * 86400,
+                    ('D', _) => 86400,
+                    ('H', true) => 3600,
+                    ('M', true) => 60,
+                    ('S', true) => 1,
                     _ => return None,
                 };
+                total = total.checked_add(n.checked_mul(unit)?)?;
+                if total > 10 * 366 * 86400 {
+                    return None; // longer than 10 years: not a real event
+                }
             }
         }
     }
@@ -372,27 +388,31 @@ struct Rule {
     until: Option<NaiveDateTime>,
     by_day: Vec<(i32, Weekday)>,
     by_month_day: Vec<i32>,
+    by_month: Vec<u32>,
 }
 
 fn parse_rule(v: &str) -> Option<Rule> {
-    let mut r = Rule { freq: String::new(), interval: 1, count: None, until: None, by_day: Vec::new(), by_month_day: Vec::new() };
+    let mut r = Rule { freq: String::new(), interval: 1, count: None, until: None, by_day: Vec::new(), by_month_day: Vec::new(), by_month: Vec::new() };
     for part in v.split(';') {
         let Some((k, val)) = part.split_once('=') else { continue };
         match k.trim().to_ascii_uppercase().as_str() {
             "FREQ" => r.freq = val.trim().to_ascii_uppercase(),
-            "INTERVAL" => r.interval = val.trim().parse::<i64>().unwrap_or(1).max(1),
+            "INTERVAL" => r.interval = val.trim().parse::<i64>().unwrap_or(1).clamp(1, 1000),
             "COUNT" => r.count = val.trim().parse().ok(),
             "UNTIL" => r.until = parse_value(val, val.trim().len() == 8).map(|(t, all)| if all { t + CDuration::days(1) - CDuration::seconds(1) } else { t }),
             "BYDAY" => {
                 for d in val.split(',') {
                     let d = d.trim().to_ascii_uppercase();
-                    let (num, code) = d.split_at(d.len().saturating_sub(2));
+                    // The last two characters are the day ("MO"), any number before them the week.
+                    let cut = d.char_indices().rev().nth(1).map(|(i, _)| i).unwrap_or(0);
+                    let (num, code) = d.split_at(cut);
                     if let Some(wd) = weekday(code) {
                         r.by_day.push((num.parse::<i32>().unwrap_or(0), wd));
                     }
                 }
             }
             "BYMONTHDAY" => r.by_month_day = val.split(',').filter_map(|x| x.trim().parse().ok()).collect(),
+            "BYMONTH" => r.by_month = val.split(',').filter_map(|x| x.trim().parse().ok()).filter(|m| (1..=12).contains(m)).collect(),
             _ => {}
         }
     }
@@ -427,11 +447,18 @@ fn expand(start: NaiveDateTime, rule: &Rule, to: NaiveDateTime) -> Vec<NaiveDate
         let k = step * rule.interval;
         let mut dates: Vec<NaiveDate> = Vec::new();
         match rule.freq.as_str() {
-            "DAILY" => dates.push(d0 + CDuration::days(k)),
+            "DAILY" => {
+                let Some(d) = d0.checked_add_signed(CDuration::days(k)) else { break };
+                // "Every weekday" = daily on MO..FR.
+                if rule.by_day.is_empty() || rule.by_day.iter().any(|(_, wd)| *wd == d.weekday()) {
+                    dates.push(d);
+                }
+            }
             "WEEKLY" => {
-                let week_start = d0 - CDuration::days(d0.weekday().num_days_from_monday() as i64) + CDuration::weeks(k);
+                let Some(week_start) = (d0 - CDuration::days(d0.weekday().num_days_from_monday() as i64)).checked_add_signed(CDuration::weeks(k)) else { break };
                 if rule.by_day.is_empty() {
-                    dates.push(d0 + CDuration::weeks(k));
+                    let Some(d) = d0.checked_add_signed(CDuration::weeks(k)) else { break };
+                    dates.push(d);
                 } else {
                     let mut ds: Vec<NaiveDate> = rule.by_day.iter().map(|(_, wd)| week_start + CDuration::days(wd.num_days_from_monday() as i64)).collect();
                     ds.sort();
@@ -465,7 +492,21 @@ fn expand(start: NaiveDateTime, rule: &Rule, to: NaiveDateTime) -> Vec<NaiveDate
                 }
                 dates.sort();
             }
-            "YEARLY" => dates.extend(NaiveDate::from_ymd_opt(d0.year() + k as i32, d0.month(), d0.day())),
+            "YEARLY" => {
+                let Some(y) = i32::try_from(k).ok().and_then(|k| d0.year().checked_add(k)).filter(|y| *y < 9999) else { break };
+                let months: Vec<u32> = if rule.by_month.is_empty() { vec![d0.month()] } else { rule.by_month.clone() };
+                for m in months {
+                    if rule.by_day.iter().any(|(n, _)| *n != 0) {
+                        // e.g. "the 2nd Tuesday of November"
+                        for (n, wd) in rule.by_day.iter().filter(|(n, _)| *n != 0) {
+                            dates.extend(nth_weekday(y, m, *n, *wd));
+                        }
+                    } else {
+                        dates.extend(NaiveDate::from_ymd_opt(y, m, d0.day()));
+                    }
+                }
+                dates.sort();
+            }
             _ => {
                 out.push(start);
                 return out;
@@ -581,7 +622,7 @@ pub fn parse(text: &str, from: NaiveDate, to: NaiveDate) -> (Option<String>, Vec
             _ => vec![start],
         };
         for s in starts {
-            let end = s + length;
+            let Some(end) = s.checked_add_signed(length) else { continue };
             // Touches the window (an event of zero length counts at its start).
             if s < to_t && (end > from_t || (end == s && s >= from_t)) {
                 out.push(Occurrence { start: s, end, all_day, title: title.clone() });
@@ -635,6 +676,18 @@ mod tests {
         let (_, ev) = parse(cal, d(2026, 11, 22), d(2026, 11, 30));
         let v: Vec<String> = ev.iter().map(|e| format!("{} {}", e.start.format("%d %H"), e.title)).collect();
         assert_eq!(v, vec!["23 10 Daily", "24 15 Daily (moved)", "25 10 Daily"]);
+    }
+
+    #[test]
+    fn weekdays_yearly_nth_and_bad_input() {
+        let cal = "BEGIN:VCALENDAR\nBEGIN:VEVENT\nDTSTART:20261120T080000\nRRULE:FREQ=DAILY;BYDAY=MO,TU,WE,TH,FR;COUNT=4\nSUMMARY:Work\nEND:VEVENT\nBEGIN:VEVENT\nDTSTART;VALUE=DATE:20251111\nRRULE:FREQ=YEARLY;BYMONTH=11;BYDAY=2TU\nSUMMARY:Second Tuesday\nEND:VEVENT\nBEGIN:VEVENT\nDTSTART:20261123T080000\nDURATION:P99999999999D\nRRULE:FREQ=DAILY;INTERVAL=99999999999;BYDAY=a\u{e9}\nSUMMARY:Broken\nEND:VEVENT\nEND:VCALENDAR\n";
+        let (_, ev) = parse(cal, d(2026, 11, 1), d(2026, 11, 30));
+        let v: Vec<String> = ev.iter().map(|e| format!("{} {}", e.start.format("%a %d"), e.title)).collect();
+        // Fri 20, (weekend skipped) Mon 23, Tue 24, Wed 25; 2nd Tuesday of Nov 2026 = 10th; the
+        // broken event is read without crashing (its huge duration is ignored).
+        assert!(v.contains(&"Tue 10 Second Tuesday".to_string()), "{v:?}");
+        let work: Vec<&String> = v.iter().filter(|s| s.ends_with("Work")).collect();
+        assert_eq!(work, ["Fri 20 Work", "Mon 23 Work", "Tue 24 Work", "Wed 25 Work"]);
     }
 
     #[test]
