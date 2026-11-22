@@ -96,6 +96,9 @@ struct UiState {
     open_search: bool,
     /// Scroll this icon (lower-case path) into view in its box (type to jump).
     scroll_to: Option<String>,
+    /// Each box's icons as last drawn (paths, in order) and how many fit in a row, for the arrow
+    /// keys and Ctrl+A.
+    grid_order: HashMap<u64, (Vec<String>, usize)>,
     /// Commands for box windows from elsewhere (menus, monitor changes): box id, command.
     box_cmds: Vec<(u64, ViewportCommand)>,
     /// Boxes whose next position update comes from a move or resize by the person.
@@ -152,6 +155,11 @@ pub struct DeskApp {
     restack_at: Vec<Instant>,
     /// The quick-search window, while open.
     search: Option<SearchState>,
+    /// The rename window (F2), while open: the item and the new name being typed.
+    rename: Option<RenameState>,
+    /// Files pasted with Ctrl+V that landed on the desktop, to put in the box worked in:
+    /// (path, box, tab). Filled by the paste thread.
+    pasted: Arc<Mutex<Vec<(String, u64, usize)>>>,
     /// What an open Windows menu is for: clicked path, all paths, "Move to" box ids by position.
     menu_ctx: Option<(String, Vec<String>, Vec<u64>)>,
     /// The quick-search shortcut registered with Windows (index into SEARCH_HOTKEYS) and
@@ -327,6 +335,8 @@ impl DeskApp {
             restack_at: Vec::new(),
             search: None,
             menu_ctx: None,
+            rename: None,
+            pasted: Arc::new(Mutex::new(Vec::new())),
             hotkey_applied: usize::MAX,
             hotkey_ok: true,
             ta_buf: String::new(),
@@ -624,24 +634,44 @@ impl DeskApp {
         #[cfg(windows)]
         if self.persist {
             let mode = self.layout.settings.desktop_typing;
-            let want = mode != 0 && self.layout.settings.hide_desktop_icons && desktop::foreground_is_desktop();
+            let want = self.layout.settings.hide_desktop_icons && desktop::foreground_is_desktop();
             crate::runloop::set_typing_keys(want);
-            for vk in crate::runloop::take_typed() {
-                if vk == 0x0D {
-                    // Enter opens what was just found.
-                    let recent = self.ta_last.map(|t| t.elapsed() < Duration::from_secs(30)).unwrap_or(false);
-                    if let (true, Some(p)) = (recent, self.ui.selected.clone()) {
-                        desktop::open_item(&p);
-                        self.actions.push(Act::Opened(p));
-                    }
-                } else if let Some(c) = char::from_u32(vk).map(|c| c.to_ascii_lowercase()) {
-                    if mode == 2 {
-                        if self.search.is_none() {
-                            self.search = Some(SearchState { query: c.to_string(), ..Default::default() });
+            for (mods, vk) in crate::runloop::take_typed() {
+                let ctrl = mods & 0x0002 != 0;
+                match (ctrl, vk) {
+                    (false, 0x0D) => {
+                        // Enter opens what is selected.
+                        if let Some(p) = self.ui.selected.clone() {
+                            desktop::open_item(&p);
+                            self.actions.push(Act::Opened(p));
                         }
-                    } else {
-                        self.type_ahead(c);
                     }
+                    (false, 0x1B) => {
+                        self.ui.selection.clear();
+                        self.ui.selected = None;
+                        self.redraw_all = true;
+                    }
+                    (false, 0x25..=0x28) => self.arrow_key(vk),
+                    (false, 0x2E) => self.delete_selected(),
+                    (false, 0x71) => self.start_rename(),
+                    (true, 0x41) => self.select_all_in_box(),
+                    (true, 0x43) | (true, 0x58) => {
+                        let paths = self.selected_paths();
+                        crate::fileops::set_clipboard_files(crate::runloop::main_hwnd(), &paths, vk == 0x58);
+                    }
+                    (true, 0x56) => self.paste_files(),
+                    (false, _) => {
+                        if let Some(c) = char::from_u32(vk).map(|c| c.to_ascii_lowercase()).filter(|c| c.is_ascii_alphanumeric()) {
+                            if mode == 2 {
+                                if self.search.is_none() {
+                                    self.search = Some(SearchState { query: c.to_string(), ..Default::default() });
+                                }
+                            } else if mode == 1 {
+                                self.type_ahead(c);
+                            }
+                        }
+                    }
+                    _ => {}
                 }
             }
         }
@@ -805,6 +835,11 @@ impl DeskApp {
             }
             let _ = self.scan_wake.send(());
         }
+        // Files pasted with Ctrl+V: put them in the box they were pasted into.
+        let pasted: Vec<(String, u64, usize)> = self.pasted.lock().map(|mut p| std::mem::take(&mut *p)).unwrap_or_default();
+        for (path, to, tab) in pasted {
+            self.actions.push(Act::MoveItem { path, to, tab });
+        }
         if !self.actions.is_empty() {
             self.redraw_all = true;
         }
@@ -937,6 +972,11 @@ impl DeskApp {
                 self.show_search(ctx);
             } else if let Some(h) = self.hosts.as_mut() {
                 h.close_panel(SEARCH_PANEL);
+            }
+            if self.rename.is_some() {
+                self.show_rename(ctx);
+            } else if let Some(h) = self.hosts.as_mut() {
+                h.close_panel(RENAME_PANEL);
             }
         }
         // Commands for box windows from the menus (focus for renaming, roll up/down).
@@ -1308,6 +1348,7 @@ fn fence_window(
                         st.band = None;
                     }
                     let pad = ((width - cols as f32 * cell.x) / 2.0).max(0.0).min(cell.x * 0.5);
+                    st.grid_order.insert(fence.id, (items.iter().map(|i| i.path.clone()).collect(), cols));
                     let mut reorder: Option<(String, String)> = None;
                     // (icon rectangles were only needed by the old see-through drag copy)
                     let clip = ui.clip_rect();
@@ -3133,5 +3174,224 @@ impl DeskApp {
         self.ui.selected = Some(path);
         self.ui.scroll_to = Some(key);
         self.redraw_all = true;
+    }
+}
+
+/// The rename window's state (F2).
+#[derive(Default)]
+struct RenameState {
+    /// The item being renamed.
+    path: String,
+    /// The new name as typed (without a hidden extension).
+    text: String,
+    was_focused: bool,
+    /// The whole name was selected once (typing replaces it, like Explorer).
+    selected_once: bool,
+}
+
+#[cfg(windows)]
+const RENAME_PANEL: u64 = u64::MAX - 4;
+
+impl DeskApp {
+    /// Paths of the selected icons (the clicked one first).
+    fn selected_paths(&self) -> Vec<String> {
+        let mut v: Vec<String> = Vec::new();
+        if let Some(p) = &self.ui.selected {
+            v.push(p.clone());
+        }
+        for k in &self.ui.selection {
+            if let Some(it) = self.items.get(k) {
+                if !v.iter().any(|p| p.eq_ignore_ascii_case(&it.path)) {
+                    v.push(it.path.clone());
+                }
+            }
+        }
+        v
+    }
+
+    /// The box holding the selected icon (as last drawn), with its icons and row length.
+    fn active_box(&self) -> Option<(u64, Vec<String>, usize)> {
+        let sel = self.ui.selected.as_ref()?;
+        self.ui
+            .grid_order
+            .iter()
+            .find(|(_, (paths, _))| paths.iter().any(|p| p.eq_ignore_ascii_case(sel)))
+            .map(|(id, (paths, cols))| (*id, paths.clone(), *cols))
+    }
+
+    fn select_one(&mut self, path: String) {
+        let key = path.to_lowercase();
+        self.ui.selection.clear();
+        self.ui.selection.insert(key.clone());
+        self.ui.selected = Some(path);
+        self.ui.scroll_to = Some(key);
+        self.redraw_all = true;
+    }
+
+    /// Arrow keys: move the selection between icons of the same box (left/right one step,
+    /// up/down one row).
+    fn arrow_key(&mut self, vk: u32) {
+        let Some((_, paths, cols)) = self.active_box() else { return };
+        let Some(sel) = self.ui.selected.clone() else { return };
+        let Some(i) = paths.iter().position(|p| p.eq_ignore_ascii_case(&sel)) else { return };
+        let cols = cols.max(1) as isize;
+        let step = match vk {
+            0x25 => -1,
+            0x27 => 1,
+            0x26 => -cols,
+            _ => cols,
+        };
+        let j = i as isize + step;
+        if j >= 0 && (j as usize) < paths.len() {
+            self.select_one(paths[j as usize].clone());
+        }
+    }
+
+    /// Ctrl+A: every icon in the box of the selected one.
+    fn select_all_in_box(&mut self) {
+        let Some((_, paths, _)) = self.active_box() else { return };
+        self.ui.selection = paths.iter().map(|p| p.to_lowercase()).collect();
+        self.redraw_all = true;
+    }
+
+    /// Delete: the selected files go to the Recycle Bin (Windows' own operation, can be undone).
+    fn delete_selected(&mut self) {
+        let paths = self.selected_paths();
+        if paths.is_empty() {
+            return;
+        }
+        #[cfg(windows)]
+        {
+            let wake = self.scan_wake.clone();
+            crate::fileops::recycle(paths, move || {
+                let _ = wake.send(());
+            });
+        }
+        self.ui.selection.clear();
+        self.ui.selected = None;
+        self.redraw_all = true;
+    }
+
+    /// Ctrl+V: files from the clipboard are copied (or moved, if cut) to the desktop and put in
+    /// the box being worked in.
+    fn paste_files(&mut self) {
+        let Some(dest) = desktop::desktop_dirs().into_iter().next() else { return };
+        let target = self.active_box().map(|b| b.0).filter(|id| self.layout.fences.iter().any(|f| f.id == *id && !f.auto_sort && f.widget.is_none()));
+        let tab = target.and_then(|id| self.layout.fences.iter().find(|f| f.id == id)).map(|f| f.sel_tab).unwrap_or(0);
+        #[cfg(windows)]
+        {
+            let wake = self.scan_wake.clone();
+            let landed = self.pasted.clone();
+            crate::fileops::paste_into(crate::runloop::main_hwnd(), dest.to_string_lossy().to_string(), move |paths| {
+                if let (Some(to), Ok(mut l)) = (target, landed.lock()) {
+                    l.extend(paths.into_iter().map(|p| (p, to, tab)));
+                }
+                let _ = wake.send(());
+                crate::runloop::wake_after(Duration::ZERO);
+            });
+        }
+        #[cfg(not(windows))]
+        let _ = (dest, target, tab);
+    }
+
+    /// F2: a small window to rename the selected item.
+    fn start_rename(&mut self) {
+        let Some(p) = self.ui.selected.clone() else { return };
+        let Some(it) = self.items.get(&p.to_lowercase()) else { return };
+        self.rename = Some(RenameState { path: it.path.clone(), text: it.name.clone(), was_focused: false, selected_once: false });
+    }
+
+    /// Renames the file, keeping a hidden extension, and updates every box that holds it.
+    fn finish_rename(&mut self, path: &str, new_name: &str) {
+        let new_name = new_name.trim();
+        if new_name.is_empty() || new_name.contains(['\\', '/', ':', '*', '?', '"', '<', '>', '|']) {
+            return;
+        }
+        let Some(it) = self.items.get(&path.to_lowercase()).cloned() else { return };
+        let old = std::path::Path::new(&it.path);
+        let Some(dir) = old.parent() else { return };
+        let file = if it.is_dir || it.ext.is_empty() { new_name.to_string() } else { format!("{new_name}.{}", it.ext) };
+        let new_path = dir.join(file);
+        if new_path.exists() {
+            storage::log_line(&format!("rename: {} already exists", new_path.display()));
+            return;
+        }
+        if let Err(e) = std::fs::rename(old, &new_path) {
+            storage::log_line(&format!("rename failed: {e}"));
+            return;
+        }
+        let new_s = new_path.to_string_lossy().to_string();
+        for f in &mut self.layout.fences {
+            for t in &mut f.tabs {
+                for p in &mut t.items {
+                    if p.eq_ignore_ascii_case(&it.path) {
+                        *p = new_s.clone();
+                    }
+                }
+            }
+        }
+        if let Some(c) = self.layout.open_counts.remove(&it.path.to_lowercase()) {
+            self.layout.open_counts.insert(new_s.to_lowercase(), c);
+        }
+        self.select_one(new_s);
+        self.mark_dirty();
+        let _ = self.scan_wake.send(());
+    }
+
+    #[cfg(windows)]
+    fn show_rename(&mut self, ctx: &egui::Context) {
+        let Some(mut r) = self.rename.take() else { return };
+        let scale = desktop::system_scale();
+        let [sw, sh] = desktop::primary_screen_points();
+        let (w, h) = (440.0_f32.min(sw - 40.0), 96.0);
+        let (x, y) = (((sw - w) / 2.0).max(0.0), (sh * 0.2).max(0.0));
+        let rect_px = [(x * scale) as i32, (y * scale) as i32, (w * scale) as i32, (h * scale) as i32];
+        let mut close = false;
+        let mut done: Option<String> = None;
+        let force = self.panel_force;
+        if let Some(mut hosts) = self.hosts.take() {
+            hosts.panel(RENAME_PANEL, crate::host::PanelKind::Menu, "DeskBoxes rename", rect_px, true, force, |pctx| {
+                match pctx.input(|i| i.viewport().focused) {
+                    Some(true) => r.was_focused = true,
+                    Some(false) if r.was_focused => close = true,
+                    _ => {}
+                }
+                let (esc, enter) = pctx.input(|i| (i.key_pressed(egui::Key::Escape) || i.viewport().close_requested(), i.key_pressed(egui::Key::Enter)));
+                if esc {
+                    close = true;
+                }
+                if enter {
+                    done = Some(r.text.clone());
+                }
+                let frame = egui::Frame::new().fill(Color32::from_rgb(40, 40, 43)).stroke(egui::Stroke::new(1.0_f32, Color32::from_white_alpha(30))).inner_margin(egui::Margin::same(12));
+                egui::CentralPanel::default().frame(frame).show(pctx, |ui| {
+                    ui.label(egui::RichText::new("Rename").size(13.0).color(Color32::from_gray(170)));
+                    let out = egui::TextEdit::singleline(&mut r.text).font(FontId::proportional(16.0)).desired_width(f32::INFINITY).show(ui);
+                    let te = out.response.clone();
+                    if !r.selected_once {
+                        // Select the whole name, so typing replaces it.
+                        let mut state = out.state;
+                        let all = egui::text::CCursorRange::two(egui::text::CCursor::new(0), egui::text::CCursor::new(r.text.chars().count()));
+                        state.cursor.set_char_range(Some(all));
+                        state.store(ui.ctx(), te.id);
+                        r.selected_once = true;
+                    }
+                    if !te.has_focus() && !close && done.is_none() {
+                        te.request_focus();
+                    }
+                    ui.label(egui::RichText::new("Enter renames, Esc cancels.").size(11.5).color(Color32::from_gray(140)));
+                });
+            });
+            if close || done.is_some() {
+                hosts.close_panel(RENAME_PANEL);
+            }
+            self.hosts = Some(hosts);
+        }
+        let _ = ctx;
+        if let Some(name) = done {
+            self.finish_rename(&r.path.clone(), &name);
+        } else if !close {
+            self.rename = Some(r);
+        }
     }
 }

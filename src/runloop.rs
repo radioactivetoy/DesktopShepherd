@@ -69,17 +69,22 @@ pub fn set_search_hotkey(index: usize) -> bool {
     }
 }
 
-/// Keys borrowed while the desktop has the focus (type to jump to an icon): virtual-key codes
-/// pressed since the last pass.
-static TYPED: Mutex<Vec<u32>> = Mutex::new(Vec::new());
+/// Keys borrowed while the desktop has the focus (type to jump, keyboard in boxes): modifier
+/// keys and virtual-key code of each press since the last pass.
+static TYPED: Mutex<Vec<(u32, u32)>> = Mutex::new(Vec::new());
 /// The typing keys are currently borrowed.
 static TYPING_ON: AtomicBool = AtomicBool::new(false);
 /// Hotkey ids of the typing keys start here (1 = quick search).
 const TYPING_ID: i32 = 100;
 
-/// The keys borrowed for typing on the desktop: digits, letters and Enter.
-fn typing_keys() -> impl Iterator<Item = u32> {
-    (0x30..=0x39u32).chain(0x41..=0x5Au32).chain(std::iter::once(0x0Du32))
+/// The keys borrowed while the desktop has the focus, as (modifiers, key): digits and letters
+/// (type to jump), Enter, Esc, arrows, Delete, F2, and Ctrl+A / C / X / V.
+fn typing_keys() -> impl Iterator<Item = (u32, u32)> {
+    (0x30..=0x39u32)
+        .chain(0x41..=0x5Au32)
+        .chain([0x0D, 0x1B, 0x25, 0x26, 0x27, 0x28, 0x2E, 0x71])
+        .map(|vk| (0u32, vk))
+        .chain([0x41u32, 0x43, 0x56, 0x58].map(|vk| (0x0002u32, vk)))
 }
 
 /// Borrows (true) or gives back (false) the letter, digit and Enter keys. Only ever on while
@@ -93,11 +98,20 @@ pub fn set_typing_keys(on: bool) {
     }
     let hwnd = HWND(h as *mut _);
     unsafe {
-        for (i, vk) in typing_keys().enumerate() {
+        for (i, (mods, vk)) in typing_keys().enumerate() {
             let id = TYPING_ID + i as i32;
             if on {
                 // 0x4000 = MOD_NOREPEAT. A key another program already uses is simply skipped.
-                let _ = RegisterHotKey(hwnd, id, HOT_KEY_MODIFIERS(0x4000), vk);
+                if RegisterHotKey(hwnd, id, HOT_KEY_MODIFIERS(mods | 0x4000), vk).is_err() {
+                    // Logged once per key: another program already uses it.
+                    static WARNED: Mutex<Vec<(u32, u32)>> = Mutex::new(Vec::new());
+                    if let Ok(mut w) = WARNED.lock() {
+                        if !w.contains(&(mods, vk)) {
+                            w.push((mods, vk));
+                            crate::storage::log_line(&format!("desktop key {vk:#x} (modifiers {mods}) is used by another program; DeskBoxes leaves it alone"));
+                        }
+                    }
+                }
             } else {
                 let _ = UnregisterHotKey(hwnd, id);
             }
@@ -105,8 +119,8 @@ pub fn set_typing_keys(on: bool) {
     }
 }
 
-/// Keys typed on the desktop since the last call (virtual-key codes).
-pub fn take_typed() -> Vec<u32> {
+/// Keys pressed on the desktop since the last call: (modifiers, virtual-key code).
+pub fn take_typed() -> Vec<(u32, u32)> {
     TYPED.lock().map(|mut t| std::mem::take(&mut *t)).unwrap_or_default()
 }
 
@@ -165,6 +179,11 @@ pub fn request_quit() {
     post_wake();
 }
 
+/// The hidden main window (clipboard owner for copied files); 0 if none.
+pub fn main_hwnd() -> isize {
+    WAKE_HWND.load(Ordering::SeqCst)
+}
+
 unsafe extern "system" fn main_wndproc(h: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     // Windows' right-click menu, while open, draws its submenus through its owner (us).
     if let Some(r) = crate::shellmenu::handle_menu_msg(m, wp, lp) {
@@ -176,9 +195,10 @@ unsafe extern "system" fn main_wndproc(h: HWND, m: u32, wp: WPARAM, lp: LPARAM) 
             let id = wp.0 as i32;
             if id >= TYPING_ID {
                 let vk = ((lp.0 >> 16) & 0xFFFF) as u32;
+                let mods = (lp.0 & 0xFFFF) as u32;
                 if crate::desktop::foreground_is_desktop() {
                     if let Ok(mut t) = TYPED.lock() {
-                        t.push(vk);
+                        t.push((mods, vk));
                     }
                     wake_after(Duration::ZERO);
                 } else {
@@ -186,8 +206,14 @@ unsafe extern "system" fn main_wndproc(h: HWND, m: u32, wp: WPARAM, lp: LPARAM) 
                     // back now and pass this key on, so the person's typing is never lost.
                     set_typing_keys(false);
                     use windows::Win32::UI::Input::KeyboardAndMouse::{keybd_event, KEYEVENTF_KEYUP};
+                    if mods & 0x0002 != 0 {
+                        keybd_event(0x11, 0, Default::default(), 0);
+                    }
                     keybd_event(vk as u8, 0, Default::default(), 0);
                     keybd_event(vk as u8, 0, KEYEVENTF_KEYUP, 0);
+                    if mods & 0x0002 != 0 {
+                        keybd_event(0x11, 0, KEYEVENTF_KEYUP, 0);
+                    }
                     wake_after(Duration::ZERO);
                 }
                 return LRESULT(0);

@@ -15,6 +15,8 @@ mod import_original;
 mod model;
 mod search;
 #[cfg(windows)]
+mod fileops;
+#[cfg(windows)]
 mod shellmenu;
 mod snap;
 #[cfg(windows)]
