@@ -984,3 +984,14 @@ pub fn show_box_window(hwnd: isize, show: bool) {
         send_to_bottom(hwnd);
     }
 }
+
+/// A short name for a monitor setup: each display's name and size, e.g.
+/// "DISPLAY1 2048x1152 + DISPLAY2 2048x1152". The same monitors give the same name.
+pub fn setup_key(monitors: &[Monitor]) -> String {
+    let mut parts: Vec<String> = monitors
+        .iter()
+        .map(|m| format!("{} {}x{}", m.name.trim_start_matches("\\\\.\\"), m.rect.width().round(), m.rect.height().round()))
+        .collect();
+    parts.sort();
+    parts.join(" + ")
+}

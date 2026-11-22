@@ -178,6 +178,8 @@ pub struct DeskApp {
     hide_hotkey_applied: usize,
     hide_hotkey_ok: bool,
     boxes_hidden: bool,
+    /// The monitor setup the boxes are placed for (see `desktop::setup_key`).
+    current_setup: String,
     /// Type to jump: what was typed recently on the desktop and when (a pause starts over).
     ta_buf: String,
     ta_last: Option<Instant>,
@@ -358,13 +360,14 @@ impl DeskApp {
             hide_hotkey_applied: usize::MAX,
             hide_hotkey_ok: true,
             boxes_hidden: false,
+            current_setup: String::new(),
             ta_buf: String::new(),
             ta_last: None,
             layout,
         };
         if app.persist {
             app.bind_unassigned();
-            app.relayout_monitors();
+            app.switch_setup_or_relayout();
         }
         app.apply_icon_hiding();
         Some(app)
@@ -416,6 +419,10 @@ impl DeskApp {
         self.dirty_at = None;
         if !self.persist {
             return;
+        }
+        if self.layout.settings.per_setup && !self.current_setup.is_empty() {
+            let map = self.layout.fences.iter().map(|f| (f.id, f.rect)).collect();
+            self.layout.setup_positions.insert(self.current_setup.clone(), map);
         }
         if let Ok(mut e) = self.extra_paths.lock() {
             *e = clean_paths(&self.layout);
@@ -809,7 +816,7 @@ impl DeskApp {
                     }
                     self.monitors = now_monitors;
                 }
-                self.relayout_monitors();
+                self.switch_setup_or_relayout();
                 // When a monitor goes away Windows rearranges windows, and boxes can end up above
                 // some apps: put them back just above the desktop now and again as things settle.
                 let now = Instant::now();
@@ -2427,6 +2434,8 @@ impl DeskApp {
     }
 
     fn page_settings(&mut self, ui: &mut egui::Ui) {
+        let s_setups: Vec<String> = { let mut k: Vec<String> = self.layout.setup_positions.keys().cloned().collect(); k.sort(); k };
+        let mut forget_setup: Option<String> = None;
         let s = &mut self.layout.settings;
         let mut dirty = false;
         let mut icons_changed = false;
@@ -2490,6 +2499,24 @@ impl DeskApp {
         ui.label(egui::RichText::new("Frosted glass: set each box's blur in its menu (Personalize > Blur).").color(Color32::from_gray(150)).size(12.0));
         ui.add_space(10.0);
         ui.heading("Monitors");
+        if ui.checkbox(&mut s.per_setup, "Remember box positions for each monitor setup (e.g. laptop alone / docked)").changed() {
+            dirty = true;
+        }
+        if s.per_setup {
+            let mut forget = None;
+            for key in s_setups.iter() {
+                ui.horizontal(|ui| {
+                    let here = *key == self.current_setup;
+                    ui.label(egui::RichText::new(format!("{}{key}", if here { "● " } else { "   " })).size(12.0).color(Color32::from_gray(170)));
+                    if !here && ui.small_button("Forget").clicked() {
+                        forget = Some(key.clone());
+                    }
+                });
+            }
+            if let Some(k) = forget {
+                forget_setup = Some(k);
+            }
+        }
         let before = s.monitor_mode;
         ui.radio_value(
             &mut s.monitor_mode,
@@ -2632,6 +2659,10 @@ impl DeskApp {
         }
         if monitors_changed && self.persist {
             self.relayout_monitors();
+        }
+        if let Some(k) = forget_setup {
+            self.layout.setup_positions.remove(&k);
+            self.mark_dirty();
         }
     }
 }
@@ -3492,5 +3523,44 @@ impl DeskApp {
             desktop::show_box_window(*h, !hidden);
         }
         self.redraw_all = true;
+    }
+}
+
+impl DeskApp {
+    /// After monitors changed (and at start): with "remember per monitor setup" on, put every
+    /// box back where it was the last time this setup was used; otherwise (or for a new setup)
+    /// re-place boxes by monitor role / fixed monitor as before.
+    fn switch_setup_or_relayout(&mut self) {
+        let key = desktop::setup_key(&self.monitors);
+        let per_setup = self.layout.settings.per_setup;
+        if per_setup && !self.current_setup.is_empty() && key != self.current_setup {
+            // Keep the positions of the setup we are leaving.
+            let map = self.layout.fences.iter().map(|f| (f.id, f.rect)).collect();
+            self.layout.setup_positions.insert(self.current_setup.clone(), map);
+        }
+        let saved = if per_setup { self.layout.setup_positions.get(&key).cloned() } else { None };
+        self.current_setup = key;
+        match saved {
+            Some(map) => {
+                let mut moved = false;
+                for f in &mut self.layout.fences {
+                    if let Some(r) = map.get(&f.id) {
+                        if f.rect != *r {
+                            f.rect = *r;
+                            moved = true;
+                        }
+                    }
+                }
+                if moved {
+                    let ids: Vec<u64> = self.layout.fences.iter().map(|f| f.id).collect();
+                    for id in ids {
+                        self.place_box(id);
+                    }
+                    self.ui.rebind.extend(self.layout.fences.iter().map(|f| f.id));
+                    self.mark_dirty();
+                }
+            }
+            None => self.relayout_monitors(),
+        }
     }
 }

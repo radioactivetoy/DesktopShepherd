@@ -207,6 +207,8 @@ pub struct Settings {
     pub desktop_typing: u8,
     /// Hide/show-all-boxes shortcut: index into `runloop::SEARCH_HOTKEYS` (0 = off; 5 = Ctrl+Alt+D).
     pub hide_hotkey: usize,
+    /// Remember box positions separately for each monitor setup (laptop alone, docked, …).
+    pub per_setup: bool,
 }
 
 impl Default for Settings {
@@ -228,6 +230,7 @@ impl Default for Settings {
             search_hotkey: 1,
             desktop_typing: 1,
             hide_hotkey: 5,
+            per_setup: false,
         }
     }
 }
@@ -241,6 +244,9 @@ pub struct Layout {
     pub fences: Vec<Fence>,
     /// Times each item was opened from a box (lower-case path), for 'Sort by times opened'.
     pub open_counts: std::collections::HashMap<String, u32>,
+    /// Box positions remembered per monitor setup (see `desktop::setup_key`): setup ->
+    /// box id -> rectangle. Used when Settings.per_setup is on.
+    pub setup_positions: std::collections::HashMap<String, std::collections::HashMap<u64, [f32; 4]>>,
 }
 
 impl Layout {
