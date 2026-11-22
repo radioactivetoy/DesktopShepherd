@@ -2453,16 +2453,16 @@ impl DeskApp {
         ui.add_space(10.0);
         ui.heading("Auto-sort tabs");
         ui.label(
-            egui::RichText::new("Each tab collects these file types (folders and everything else get their own tabs).")
+            egui::RichText::new("Each tab collects items by file type, name pattern (* and ?) and/or how recently they changed; the first matching rule wins. Folders and everything else get their own tabs.")
                 .color(Color32::from_gray(150))
                 .size(12.0),
         );
         let mut remove = None;
-        egui::Grid::new("cats").num_columns(3).spacing([10.0, 6.0]).show(ui, |ui| {
+        egui::Grid::new("cats").num_columns(5).spacing([10.0, 6.0]).show(ui, |ui| {
             for (i, r) in s.categories.iter_mut().enumerate() {
                 dirty |= ui.add_sized([120.0, 26.0], egui::TextEdit::singleline(&mut r.name)).changed();
                 let mut exts = r.exts.join(", ");
-                if ui.add_sized([420.0, 26.0], egui::TextEdit::singleline(&mut exts).hint_text("zip, rar, 7z")).changed() {
+                if ui.add_sized([300.0, 26.0], egui::TextEdit::singleline(&mut exts).hint_text("types: zip, rar, 7z")).changed() {
                     r.exts = exts
                         .split([',', ' ', ';'])
                         .map(|e| e.trim().trim_start_matches('.').to_lowercase())
@@ -2470,6 +2470,11 @@ impl DeskApp {
                         .collect();
                     dirty = true;
                 }
+                dirty |= ui.add_sized([150.0, 26.0], egui::TextEdit::singleline(&mut r.pattern).hint_text("name: *invoice*")).changed();
+                ui.horizontal(|ui| {
+                    ui.label("changed in last");
+                    dirty |= ui.add(egui::DragValue::new(&mut r.days).range(0..=3650).suffix(" days")).on_hover_text("0 = any age").changed();
+                });
                 if ui.small_button("Remove").clicked() {
                     remove = Some(i);
                 }
@@ -2482,7 +2487,7 @@ impl DeskApp {
         }
         ui.horizontal(|ui| {
             if ui.button("Add tab rule").clicked() {
-                s.categories.push(crate::model::CategoryRule { name: "New tab".into(), exts: vec![] });
+                s.categories.push(crate::model::CategoryRule { name: "New tab".into(), ..Default::default() });
                 dirty = true;
             }
             if ui.button("Reset to defaults").clicked() {

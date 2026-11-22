@@ -308,16 +308,64 @@ pub struct DeskItem {
     pub modified: u64,
 }
 
-/// A named group of file extensions; the auto-sort box shows one tab per rule that has items.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+/// A rule for the auto-sort box: one tab per rule that has items. An item matches when every
+/// condition that is set matches: its file type, its name (pattern with * and ?), and how
+/// recently it changed. Rules are checked in order; the first match wins.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
 pub struct CategoryRule {
     pub name: String,
-    /// Lower-case extensions without the dot, e.g. ["zip", "rar"].
+    /// Lower-case extensions without the dot, e.g. ["zip", "rar"] (empty = any type).
     pub exts: Vec<String>,
+    /// Name pattern, e.g. "*invoice*" or "screenshot*" (empty = any name).
+    #[serde(default)]
+    pub pattern: String,
+    /// Only items changed in the last this-many days (0 = any age).
+    #[serde(default)]
+    pub days: u32,
+}
+
+impl CategoryRule {
+    /// Whether `item` belongs to this rule's tab (`now`: seconds since 1970).
+    pub fn matches(&self, item: &DeskItem, now: u64) -> bool {
+        if self.exts.is_empty() && self.pattern.trim().is_empty() && self.days == 0 {
+            return false; // an empty rule takes nothing
+        }
+        let ext_ok = self.exts.is_empty() || self.exts.iter().any(|e| e.trim_start_matches('.').eq_ignore_ascii_case(&item.ext));
+        let name_ok = self.pattern.trim().is_empty() || wildcard(&self.pattern.trim().to_lowercase(), &item.name.to_lowercase());
+        let age_ok = self.days == 0 || now.saturating_sub(item.modified) <= self.days as u64 * 86_400;
+        ext_ok && name_ok && age_ok
+    }
+}
+
+/// Simple wildcard match: `*` = any run of characters, `?` = one character.
+pub fn wildcard(pattern: &str, text: &str) -> bool {
+    let p: Vec<char> = pattern.chars().collect();
+    let t: Vec<char> = text.chars().collect();
+    let (mut pi, mut ti, mut star, mut mark) = (0usize, 0usize, None::<usize>, 0usize);
+    while ti < t.len() {
+        if pi < p.len() && (p[pi] == '?' || p[pi] == t[ti]) {
+            pi += 1;
+            ti += 1;
+        } else if pi < p.len() && p[pi] == '*' {
+            star = Some(pi);
+            mark = ti;
+            pi += 1;
+        } else if let Some(s) = star {
+            pi = s + 1;
+            mark += 1;
+            ti = mark;
+        } else {
+            return false;
+        }
+    }
+    while pi < p.len() && p[pi] == '*' {
+        pi += 1;
+    }
+    pi == p.len()
 }
 
 fn rule(name: &str, exts: &[&str]) -> CategoryRule {
-    CategoryRule { name: name.into(), exts: exts.iter().map(|e| e.to_string()).collect() }
+    CategoryRule { name: name.into(), exts: exts.iter().map(|e| e.to_string()).collect(), ..Default::default() }
 }
 
 pub fn default_categories() -> Vec<CategoryRule> {
@@ -332,14 +380,42 @@ pub fn default_categories() -> Vec<CategoryRule> {
 /// The auto-sort tab an item belongs to: the first rule listing its extension; folders go to
 /// "Folders" and everything else to "Other" (original item kinds: 0x1801942f0).
 pub fn tab_name_for(item: &DeskItem, rules: &[CategoryRule]) -> String {
-    if item.is_dir {
-        return "Folders".into();
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    // Folders only match rules without file types (name or date rules).
+    if let Some(r) = rules.iter().find(|r| (!item.is_dir || r.exts.is_empty()) && r.matches(item, now)) {
+        return r.name.clone();
     }
-    rules
-        .iter()
-        .find(|r| r.exts.iter().any(|e| e.trim_start_matches('.').eq_ignore_ascii_case(&item.ext)))
-        .map(|r| r.name.clone())
-        .unwrap_or_else(|| "Other".into())
+    if item.is_dir { "Folders".into() } else { "Other".into() }
+}
+
+#[cfg(test)]
+mod rule_tests {
+    use super::*;
+
+    fn item(name: &str, ext: &str, days_old: u64) -> DeskItem {
+        DeskItem { path: format!("C:\\D\\{name}.{ext}"), name: name.into(), ext: ext.into(), is_dir: false, category: Category::Other, on_desktop: true, size: 0, modified: 1_000_000_000 - days_old * 86_400 }
+    }
+
+    #[test]
+    fn wildcards() {
+        assert!(wildcard("*invoice*", "my invoice 2024"));
+        assert!(wildcard("screenshot*", "screenshot 12"));
+        assert!(!wildcard("screenshot*", "my screenshot"));
+        assert!(wildcard("a?c", "abc"));
+        assert!(!wildcard("a?c", "abbc"));
+    }
+
+    #[test]
+    fn rules_by_type_name_and_age() {
+        let now = 1_000_000_000;
+        let week = CategoryRule { name: "This week".into(), days: 7, ..Default::default() };
+        let inv = CategoryRule { name: "Invoices".into(), pattern: "*invoice*".into(), exts: vec!["pdf".into()], ..Default::default() };
+        assert!(week.matches(&item("x", "txt", 2), now));
+        assert!(!week.matches(&item("x", "txt", 10), now));
+        assert!(inv.matches(&item("March invoice", "pdf", 100), now));
+        assert!(!inv.matches(&item("March invoice", "docx", 100), now));
+        assert!(!CategoryRule::default().matches(&item("x", "txt", 0), now));
+    }
 }
 /// How boxes are tied to monitors.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
