@@ -775,6 +775,17 @@ impl HostSystem {
         self.hosts.get(&id).map(|h| h.hwnd.0 as isize)
     }
 
+    /// A box that isn't shown (another page, or all boxes hidden) gives back its drawing memory:
+    /// its picture shrinks to a few pixels and grows back on its next frame.
+    pub fn release_hidden(&mut self, id: u64) {
+        if let Some(h) = self.hosts.get_mut(&id) {
+            if h.size != [8, 8] && self.renderer.resize(&h.swapchain, 8, 8).is_ok() {
+                h.size = [8, 8];
+                h.applied = None; // the glass layers are re-sized when it shows again
+            }
+        }
+    }
+
     /// A panel window's handle (menu, settings, search…), if it is open.
     pub fn panel_hwnd(&self, id: u64) -> Option<isize> {
         self.panels.get(&id).map(|p| p.hwnd.0 as isize)

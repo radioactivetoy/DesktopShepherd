@@ -20,6 +20,8 @@ pub struct IconCache {
     rx: Receiver<Answer>,
     working: Working,
     textures: HashMap<Key, Option<TextureHandle>>,
+    /// When each icon was last asked for (icons not shown for a while are dropped).
+    last_used: HashMap<Key, Instant>,
     pending: HashSet<Key>,
     /// When the loader was last replaced, so a broken shell can't make us spawn threads in a loop.
     last_restart: Option<Instant>,
@@ -61,7 +63,7 @@ fn spawn_loader(ctx: &egui::Context) -> (Sender<Key>, Receiver<Answer>, Working)
 impl IconCache {
     pub fn new(ctx: &egui::Context) -> Self {
         let (tx, rx, working) = spawn_loader(ctx);
-        Self { tx, rx, working, textures: HashMap::new(), pending: HashSet::new(), last_restart: None }
+        Self { tx, rx, working, textures: HashMap::new(), last_used: HashMap::new(), pending: HashSet::new(), last_restart: None }
     }
 
     /// Moves finished icons into textures. Call once per frame. Returns true when any arrived
@@ -115,17 +117,34 @@ impl IconCache {
         let size = px.clamp(16, 256);
         let key = (path.to_string(), size);
         if let Some(t) = self.textures.get(&key) {
-            return t.as_ref().map(|t| t.id());
+            let id = t.as_ref().map(|t| t.id());
+            self.last_used.insert(key, Instant::now());
+            return id;
         }
+        self.last_used.insert(key.clone(), Instant::now());
         if self.pending.insert(key.clone()) {
             let _ = self.tx.send(key);
         }
         None
     }
 
+    /// Drops icons not asked for within `age` (boxes on another page, items gone from view): they
+    /// are loaded again if they are needed. Returns how many were dropped.
+    pub fn drop_unused(&mut self, age: Duration) -> usize {
+        let now = Instant::now();
+        let before = self.textures.len();
+        let used = &self.last_used;
+        self.textures.retain(|k, _| used.get(k).map(|t| now.duration_since(*t) < age).unwrap_or(false));
+        let textures = &self.textures;
+        let pending = &self.pending;
+        self.last_used.retain(|k, _| textures.contains_key(k) || pending.contains(k));
+        before - self.textures.len()
+    }
+
     /// Drops every texture (after a graphics reset they are made again on demand).
     pub fn clear(&mut self) {
         self.textures.clear();
+        self.last_used.clear();
         self.pending.clear();
     }
 

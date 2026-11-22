@@ -171,6 +171,8 @@ pub struct DeskApp {
     icon_sizes: Vec<u32>,
     /// The quick search or the settings window was open last pass (they use extra icon sizes).
     extra_icons_open: bool,
+    /// When unused icons were last dropped.
+    icon_sweep_at: Instant,
     /// Fonts the boxes use, loaded into the drawing context (see `setup_style`).
     font_names: Vec<String>,
     /// When to put all boxes back just above the desktop after a display change.
@@ -383,6 +385,7 @@ impl DeskApp {
             redraw_all: true,
             icon_sizes: Vec::new(),
             extra_icons_open: false,
+            icon_sweep_at: Instant::now(),
             font_names: Vec::new(),
             restack_at: Vec::new(),
             search: None,
@@ -801,8 +804,14 @@ impl DeskApp {
             let want = (self.layout.current_page, self.boxes_hidden, self.layout.fences.iter().map(|f| (f.id, f.page)).collect::<Vec<_>>());
             if self.shown_for.as_ref() != Some(&want) {
                 for f in &self.layout.fences {
+                    let show = !self.boxes_hidden && f.page == self.layout.current_page;
                     if let Some(h) = self.ui.hwnds.get(&f.id) {
-                        desktop::show_box_window(*h, !self.boxes_hidden && f.page == self.layout.current_page);
+                        desktop::show_box_window(*h, show);
+                    }
+                    if !show {
+                        if let Some(hosts) = self.hosts.as_mut() {
+                            hosts.release_hidden(f.id);
+                        }
                     }
                 }
                 self.shown_for = Some(want);
@@ -887,6 +896,11 @@ impl DeskApp {
         };
         #[cfg(not(windows))]
         let icons_arrived = self.icons.poll(ctx);
+        // Once a minute: drop icons no box has shown for 5 minutes (they load again when needed).
+        if self.icon_sweep_at.elapsed() >= Duration::from_secs(60) {
+            self.icon_sweep_at = Instant::now();
+            self.icons.drop_unused(Duration::from_secs(300));
+        }
         if icons_arrived {
             self.redraw_all = true;
         }
