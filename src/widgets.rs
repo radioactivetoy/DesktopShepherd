@@ -754,7 +754,7 @@ fn agenda_edit(ui: &mut Ui, data: &mut Value, urls: &[String], cals: &[crate::ag
             if ui.button("Refresh now").clicked() {
                 crate::agenda::request_refresh();
             }
-            ui.label(egui::RichText::new("Calendars are downloaded every 30 minutes while this widget is shown. This is the only part of DesktopShepherd that uses the internet.").size(11.0).color(Color32::from_gray(150)));
+            ui.label(egui::RichText::new("Calendars are downloaded every 30 minutes while this widget is shown.").size(11.0).color(Color32::from_gray(150)));
     });
     out.changed
 }

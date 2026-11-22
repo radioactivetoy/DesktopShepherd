@@ -16,9 +16,10 @@ changing anything. The owner does not code: explain results in plain words, no j
 2. **Performance.** Idle CPU must stay ~0 %. Don't add per-frame polling or continuous
    repaints; repaint only on input, data changes or a widget's `repaint_after`. Measure memory
    and CPU before/after big changes (see "Measuring").
-3. **No network, no web engine.** No telemetry, no online features. One exception, approved by the
-   owner (2026-11-22): the agenda widget downloads the iCal links the person adds to it
-   (`src/agenda.rs`, WinHTTP, every 30 min, only while shown). Nothing else may use the network.
+3. **No web engine, no telemetry.** Online features are allowed since 2026-11-22 (owner's
+   decision), on these terms: only for a feature the person turns on or adds (e.g. agenda links),
+   with Windows' own WinHTTP (no extra network crates), on a background thread, never blocking the
+   UI, rate-limited and only while the feature is shown, and nothing sent about the person.
 4. **Never `cargo update`.** Pinned crates keep the GNU build working (see `docs/BUILDING.md`).
 5. Keep the fallback chain working: hardware DirectX + glass, then software DirectX (WARP) +
    glass (`d3d::Renderer::new`), then no glass (plain windows, solid dark background; test with

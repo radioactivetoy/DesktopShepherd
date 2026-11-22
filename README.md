@@ -80,8 +80,8 @@ an original Rust program; its behaviour was modelled on an existing desktop orga
 - Multi-monitor: boxes follow a monitor **role** (main/second…) or stay on a **fixed** monitor.
 - Tray icon, Windows 11 style menus and settings page, start with Windows, low CPU priority,
   layout backups.
-- No network (except the agenda widget, which downloads only the calendar links you add to it),
-  no web engine, no Explorer hooks.
+- No telemetry, no web engine, no Explorer hooks. Online features only when you turn them on (e.g.
+  the agenda downloads only the calendar links you add).
 
 ## Build and run
 
