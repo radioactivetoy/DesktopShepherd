@@ -102,3 +102,13 @@ pub fn halo_label(ui: &mut egui::Ui, text: String, size: f32, color: Color32) {
     ui.painter().galley_with_override_text_color(rect.min + egui::vec2(1.0, 1.0), g.clone(), halo());
     ui.painter().galley(rect.min, g, color);
 }
+
+/// Background of an entry field on a box: darkens behind light text, lightens behind dark text.
+pub fn field() -> Color32 {
+    pick(Color32::from_black_alpha(70), Color32::from_white_alpha(110))
+}
+
+/// A hovered row on a box: a quieter version of `field`.
+pub fn row_hover() -> Color32 {
+    pick(Color32::from_black_alpha(40), Color32::from_white_alpha(70))
+}

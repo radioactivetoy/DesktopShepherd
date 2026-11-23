@@ -528,9 +528,9 @@ impl DeskWidget for Todo {
         // The task being typed (not saved until it is added).
         let nid = ui.make_persistent_id("todo-new");
         let mut new: String = ui.ctx().data(|d| d.get_temp(nid)).unwrap_or_default();
-        let hint = egui::RichText::new(t("Add a task, then Enter")).color(crate::ink::faint());
+        let hint = egui::RichText::new(t("Add a task, then Enter")).color(crate::ink::soft());
         let r = egui::Frame::new()
-            .fill(crate::ink::line())
+            .fill(crate::ink::field())
             .corner_radius(8)
             .inner_margin(egui::Margin::symmetric(8, 5))
             .show(ui, |ui| {
@@ -587,7 +587,7 @@ impl DeskWidget for Todo {
                 let hovered = ui.rect_contains_pointer(rect);
                 let p = ui.painter();
                 if hovered {
-                    p.rect_filled(rect, 7, crate::ink::line());
+                    p.rect_filled(rect, 7, crate::ink::row_hover());
                 }
                 // Round check box.
                 let c = egui::pos2(rect.left() + 16.0, rect.center().y);
@@ -600,7 +600,7 @@ impl DeskWidget for Todo {
                     p.circle_stroke(c, 7.5, egui::Stroke::new(1.5_f32, if hovered { crate::ink::text() } else { crate::ink::soft() }));
                 }
                 // Text.
-                let col = if done { crate::ink::faint() } else { crate::ink::text() };
+                let col = if done { crate::ink::soft() } else { crate::ink::text() };
                 let tw = (rect.width() - 34.0 - 28.0).max(20.0);
                 let mut job = egui::text::LayoutJob::simple_singleline(text.to_string(), egui::FontId::proportional(14.0), col);
                 job.wrap.max_width = tw;
