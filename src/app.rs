@@ -3279,6 +3279,8 @@ impl DeskApp {
             egui::TopBottomPanel::top("mgr-top").frame(egui::Frame::new().fill(crate::theme::bar()).inner_margin(10.0)).show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(egui::RichText::new("DesktopShepherd").size(20.0).strong().color(crate::theme::strong()));
+                    // The version, small next to the name (also in Settings > Updates).
+                    ui.label(egui::RichText::new(env!("CARGO_PKG_VERSION")).size(12.0).color(crate::theme::faint()));
                     ui.add_space(20.0);
                     ui.selectable_value(&mut self.page, Page::Boxes, t("Boxes"));
                     ui.selectable_value(&mut self.page, Page::Layout, t("Layout"));
