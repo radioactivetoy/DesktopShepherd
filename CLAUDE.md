@@ -101,6 +101,9 @@ for daily use.)
 
 ## Where to start for common tasks
 
+- Adaptive text (dark ink on bright wallpapers) → `src/backdrop.rs` (wallpaper brightness grid per
+  monitor, helper thread) + `src/ink.rs` (palette for text drawn on boxes; `ink::set` per box in
+  the box loop of `app.rs`). New text/line colours on boxes must use `ink::` (or `ink::adapt`).
 - Every visible text goes through `crate::i18n::t("English")` / `tf("… {} …", &[&x])` with
   entries in the ES and CA tables of `src/i18n.rs` (a test checks both tables match). Dates:
   `i18n::long_date`, `month_year`, `weekday_short`…
@@ -124,4 +127,9 @@ for daily use.)
   portable zip; built with MSVC on GitHub, so this PC's GNU workarounds don't apply there).
 - Installer / uninstaller → `src/install.rs`; build the setup file with `scripts\make-setup.ps1`.
 - Pages of boxes → `Fence.page`, `Layout.current_page`, page block in `update_inner` (`app.rs`).
+- Light or dark menus and settings → `src/theme.rs` (`Settings.theme`: 0 like Windows, 1 dark,
+  2 light; use its palette functions in panel UI, not fixed colours; the panel pass in `host.rs`
+  swaps in `theme::panel_visuals`).
+- Weather looks and icons → `src/weather.rs` (looks via the widget settings, which may set
+  `resize_to` in the widget data) and `assets/meteocons/` (PNG icons, embedded with `include_bytes!`).
 - Next suggested work: see "Improvement ideas" in `docs/STATUS.md`.

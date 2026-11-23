@@ -174,6 +174,10 @@ a second) or a wake-up posted by another thread.
 | `model.rs` | saved data types: `Layout`, `Fence`, `Tab`, `Settings`, `CategoryRule`, widgets config. Look fields on `Fence` (all with defaults; `sanitize()` repairs odd values): `border_width`, `text_color`, `text_shadow`, `font`, `title_size`, `caption_size`, `show_captions`, `icon_spacing`; `Fence::copy_look_from` backs "Apply this look to all boxes" (`Act::ApplyLookToAll`) |
 | `agenda.rs` | the agenda widget's data: WinHTTP download of iCal links (the only network use, background thread, every 30 min while shown), iCal reading incl. repeating events (4 unit tests) |
 | `storage.rs` | load/save/backups/log; `data_dir()` moves the old `%APPDATA%DeskBoxes` folder to `%APPDATA%DesktopShepherd` once |
+| `theme.rs` | light/dark theme for menus and settings (`Settings.theme`; reads the Windows app mode from `HKCU\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize\AppsUseLightTheme`; palette functions bg, bar, menu, card, text, soft, faint, line, hover, warn; `panel_visuals` for the panel pass in `host.rs`) |
+| `backdrop.rs` | wallpaper brightness for adaptive text: helper thread (COM `IDesktopWallpaper`, checks file dates every 30 s and on `poke()`), per-monitor 48x27 luminance grid, `brightness(rect_px)`, `generation()` |
+| `ink.rs` | text palette for boxes (`set(dark)` per box while it draws; `text`, `strong`, `soft`, `faint`, `line`, `halo`, `adapt`, `gray`, `white_alpha`, `halo_label`) |
+| `weather.rs` | weather widget: looks (Compact / Standard / Detailed / adaptive), Meteocons icons from `assets/meteocons/` (MIT, licence file there) embedded as 128 px PNGs |
 | `widgets.rs` | widget registry (clock, note, drawing pad, system monitor, calendar, to-do list, agenda, picture frame; the search box is drawn by `search_widget` in `app.rs`) – add new widgets here. The system monitor shares one reading for all monitors (CPU/RAM every 2 s, drives every 60 s) and reads only while shown |
 
 (`wallpaper.rs` and the classic GL drawing path were deleted in phase C.)

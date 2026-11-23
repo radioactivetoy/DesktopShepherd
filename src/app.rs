@@ -61,7 +61,20 @@ enum Act {
     /// Right-click on an item: Windows' own menu (and the other selected items with it), with
     /// DesktopShepherd' entries on top, shown by a helper process.
     ItemMenu { from: u64, path: String },
+    /// An icon renamed in place (F2): its path and the new name.
+    RenameItem { path: String, name: String },
     Quit,
+}
+
+/// F2 on an icon: its name becomes editable right under the icon, like Explorer.
+struct IconRename {
+    path: String,
+    box_id: u64,
+    text: String,
+    /// The whole name was selected once (typing replaces it).
+    selected_once: bool,
+    /// The box had the keyboard at least once (losing it afterwards keeps the new name).
+    had_focus: bool,
 }
 
 #[derive(Default)]
@@ -79,6 +92,8 @@ struct UiState {
     drag_up_since: Option<Instant>,
     /// (box id, tab index or None for the box title, text being typed)
     renaming: Option<(u64, Option<usize>, String)>,
+    /// An icon being renamed in place.
+    icon_rename: Option<IconRename>,
     confirm_delete: Option<u64>,
     hover_open: HashSet<u64>,
     menu: Option<OpenMenu>,
@@ -230,6 +245,12 @@ pub struct DeskApp {
     started_at: Instant,
     /// The accent setting last applied.
     accent_applied: Option<bool>,
+    /// Adaptive text: per box, does it draw dark ink now; the rectangle (pixels) and wallpaper
+    /// generation the decision was made for; the setting last applied.
+    ink_dark: HashMap<u64, bool>,
+    ink_rects: HashMap<u64, [i32; 4]>,
+    ink_gen: u64,
+    ink_applied: Option<bool>,
     /// OneDrive sync: the shared file's time we last wrote or loaded, and when it was checked.
     sync_seen: Option<std::time::SystemTime>,
     sync_check_at: Instant,
@@ -303,6 +324,8 @@ impl DeskApp {
         // The language, before any text is made (tray menu, windows).
         crate::i18n::set_lang(layout.settings.language);
         refresh_accent(layout.settings.follow_accent);
+        crate::theme::refresh();
+        crate::theme::set_choice(layout.settings.theme);
         if persist {
             storage::backup_now(&layout);
             if first_run {
@@ -446,6 +469,10 @@ impl DeskApp {
             pending_checked: false,
             started_at: Instant::now(),
             accent_applied: None,
+            ink_dark: HashMap::new(),
+            ink_rects: HashMap::new(),
+            ink_gen: 0,
+            ink_applied: None,
             sync_seen: None,
             sync_check_at: Instant::now() - Duration::from_secs(60),
             vdesk_seen: None,
@@ -729,6 +756,11 @@ impl DeskApp {
                             }
                         }
                     }
+                }
+                Act::RenameItem { path, name } => {
+                    self.finish_rename(&path, &name);
+                    // The keyboard goes back to the desktop (F2, Ctrl+C... work again on the icons).
+                    desktop::focus_desktop();
                 }
                 Act::Opened(p) => {
                     *self.layout.open_counts.entry(p.to_lowercase()).or_insert(0) += 1;
@@ -1169,6 +1201,27 @@ impl DeskApp {
             self.font_names = vec!["\u{0}restyle".into()]; // forces the restyle below
         }
         self.accent_applied = Some(self.layout.settings.follow_accent);
+        // Adaptive text: the wallpaper reader runs only while the setting is on.
+        #[cfg(windows)]
+        {
+            let on = self.layout.settings.auto_ink;
+            if self.ink_applied != Some(on) {
+                crate::backdrop::set_enabled(on);
+                if !on {
+                    self.ink_dark.clear();
+                    self.ink_rects.clear();
+                }
+                self.redraw_all = true;
+                self.ink_applied = Some(on);
+            } else if on && colour_changed {
+                crate::backdrop::poke();
+            }
+        }
+        // Light or dark menus and settings: Windows changed, or the setting did.
+        let theme_changed = (colour_changed && crate::theme::refresh()) | crate::theme::set_choice(self.layout.settings.theme);
+        if theme_changed {
+            self.panel_force = true;
+        }
         // Fonts chosen in boxes: load the ones in use (before any box draws this pass).
         let mut wanted: Vec<String> = self.layout.fences.iter().filter(|f| !f.font.is_empty()).map(|f| f.font.clone()).collect();
         wanted.sort();
@@ -1440,6 +1493,7 @@ impl DeskApp {
             self.ui.snap_grid = if self.layout.settings.snap_grid { self.layout.settings.grid_size.clamp(4.0, 200.0) } else { 0.0 };
             let ids: Vec<u64> = self.layout.fences.iter().map(|f| f.id).collect();
             hosts.retain(&ids);
+            let ink_gen_now = crate::backdrop::generation();
             for fence in self.layout.fences.iter_mut() {
                 if self.boxes_hidden || fence.page != self.layout.current_page {
                     continue; // on another page, or all hidden: nothing to draw
@@ -1457,7 +1511,37 @@ impl DeskApp {
                 let icons = &mut self.icons;
                 let actions = &mut self.actions;
                 let t0 = Instant::now();
-                let drew = hosts.frame(id, rect, &look, force_all, |ctx| {
+                // Adaptive text: dark ink when the wallpaper behind this box is bright (with
+                // hysteresis; looked at again only when the wallpaper, the box or the setting changed).
+                let mut ink_force = false;
+                let mut dark = false;
+                if self.layout.settings.auto_ink && hosts.has_glass() {
+                    let sc = desktop::system_scale();
+                    let px = [(rect[0] * sc).round() as i32, (rect[1] * sc).round() as i32, ((rect[0] + rect[2]) * sc).round() as i32, ((rect[1] + rect[3]) * sc).round() as i32];
+                    let was = self.ink_dark.get(&id).copied();
+                    if was.is_none() || ink_gen_now != self.ink_gen || self.ink_rects.get(&id) != Some(&px) {
+                        let prev = was.unwrap_or(false);
+                        let now = match crate::backdrop::brightness(px) {
+                            Some(b) => {
+                                if prev {
+                                    b > 0.50
+                                } else {
+                                    b > 0.60
+                                }
+                            }
+                            None => false,
+                        };
+                        if std::env::var_os("DESKTOPSHEPHERD_DEBUG_INK").is_some() {
+                            storage::log_line(&format!("ink: box {id} {px:?} brightness {:?} dark {now}", crate::backdrop::brightness(px)));
+                        }
+                        self.ink_rects.insert(id, px);
+                        self.ink_dark.insert(id, now);
+                        ink_force = was.is_some() && was != Some(now);
+                    }
+                    dark = self.ink_dark.get(&id).copied().unwrap_or(false);
+                }
+                crate::ink::set(dark);
+                let drew = hosts.frame(id, rect, &look, force_all || ink_force, |ctx| {
                     let r = fence_window(ctx, fence, &desk, icons, ui_state, actions, expand_on_hover);
                     dirty |= r.0;
                     wake_scan |= r.1;
@@ -1503,6 +1587,8 @@ impl DeskApp {
                     DRAW_US.fetch_add(t0.elapsed().as_micros() as u64, std::sync::atomic::Ordering::Relaxed);
                 }
             }
+            crate::ink::set(false);
+            self.ink_gen = ink_gen_now;
             // Wake up again when the earliest box timer is due (see HostSystem::next_due).
             if let Some(t) = hosts.next_due() {
                 ctx.request_repaint_after(t.saturating_duration_since(Instant::now()).max(crate::host::MIN_PASS_GAP));
@@ -1870,6 +1956,17 @@ fn fence_window(
         // Widget content.
         if let Some(wc) = fence.widget.as_mut() {
             let mut child = ui.new_child(UiBuilder::new().max_rect(a.content).layout(egui::Layout::top_down(Align::Min)));
+            if crate::ink::is_dark() {
+                // Bright wallpaper: plain text in widgets turns dark too.
+                let v = child.visuals_mut();
+                v.override_text_color = Some(crate::ink::text());
+                // Entry fields and small controls turn light, so the dark text reads on them.
+                v.extreme_bg_color = Color32::from_white_alpha(150);
+                v.widgets.inactive.weak_bg_fill = Color32::from_white_alpha(110);
+                v.widgets.inactive.bg_fill = Color32::from_white_alpha(110);
+                v.widgets.hovered.weak_bg_fill = Color32::from_white_alpha(160);
+                v.widgets.active.weak_bg_fill = Color32::from_white_alpha(190);
+            }
             match widgets::find(&wc.kind) {
                 Some(_) if wc.kind == "search" => search_widget(&mut child, fence.id, desk, icons, actions),
                 Some(kind) => {
@@ -1939,7 +2036,7 @@ fn fence_window(
                             page_n = p;
                         }
                         let alpha = if p == page_n { 235 } else if resp.hovered() { 160 } else { 90 };
-                        ui.painter().circle_filled(c, if p == page_n { 3.5 } else { 3.0 }, Color32::from_white_alpha(alpha));
+                        ui.painter().circle_filled(c, if p == page_n { 3.5 } else { 3.0 }, if crate::ink::is_dark() { Color32::from_black_alpha(alpha) } else { Color32::from_white_alpha(alpha) });
                     }
                 }
                 ctx.data_mut(|d| d.insert_temp(pid, page_n));
@@ -2010,7 +2107,14 @@ fn fence_window(
                         }
                         let selected = st.selection.contains(&key);
                         let hl = if selected { 50 } else if resp.hovered() { 22 } else { 0 };
-                        fv::paint_item(ui.painter(), icons, it, cr, icon, 1.0, hl, &style);
+                        let renaming_this = st.icon_rename.as_ref().map(|r| r.box_id == fence.id && r.path.eq_ignore_ascii_case(&it.path)).unwrap_or(false);
+                        if renaming_this {
+                            let plain = fv::TextStyle { captions: false, ..style.clone() };
+                            fv::paint_item(ui.painter(), icons, it, cr, icon, 1.0, hl, &plain);
+                            rename_in_place(ui, st, actions, cr, icon, &style);
+                        } else {
+                            fv::paint_item(ui.painter(), icons, it, cr, icon, 1.0, hl, &style);
+                        }
                         if resp.clicked() {
                             // Click: just this icon; Ctrl+click: add or remove it.
                             if ui.input(|i| i.modifiers.ctrl) {
@@ -2123,7 +2227,7 @@ fn fence_window(
                             t("Drag files here, or right-click an icon › Move to.")
                         };
                         ui.add_space(8.0);
-                        ui.label(egui::RichText::new(msg).color(Color32::from_gray(150)).size(12.0));
+                        ui.label(egui::RichText::new(msg).color(crate::ink::faint()).size(12.0));
                     }
                 });
         }
@@ -2258,9 +2362,9 @@ fn row(ui: &mut egui::Ui, icon_char: char, text: &str, mark: Option<char>, enabl
     let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), h), if enabled { Sense::click() } else { Sense::hover() });
     let p = ui.painter();
     if enabled && resp.hovered() {
-        p.rect_filled(rect, egui::CornerRadius::same(4), Color32::from_white_alpha(20));
+        p.rect_filled(rect, egui::CornerRadius::same(4), crate::theme::hover());
     }
-    let fg = if enabled { Color32::from_gray(240) } else { Color32::from_gray(120) };
+    let fg = if enabled { crate::theme::text() } else { crate::theme::disabled() };
     let font = FontId::proportional(14.0);
     p.text(Pos2::new(rect.min.x + 14.0, rect.center().y), egui::Align2::LEFT_CENTER, icon_char.to_string(), FontId::proportional(16.0), fg);
     p.text(Pos2::new(rect.min.x + 44.0, rect.center().y), egui::Align2::LEFT_CENTER, text, font.clone(), fg);
@@ -2291,7 +2395,7 @@ fn back(ui: &mut egui::Ui, page: &mut MenuPage, title: &str) {
 
 fn sep(ui: &mut egui::Ui) {
     let (r, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 9.0), Sense::hover());
-    ui.painter().hline(r.x_range().shrink(4.0), r.center().y, egui::Stroke::new(1.0_f32, Color32::from_white_alpha(22)));
+    ui.painter().hline(r.x_range().shrink(4.0), r.center().y, egui::Stroke::new(1.0_f32, crate::theme::line()));
 }
 
 /// A row that opens an inline colour picker (no pop-up: it would be cut off by the menu window).
@@ -2300,7 +2404,7 @@ fn color_row(ui: &mut egui::Ui, id: &str, label: &str, color: &mut Color32, alph
     let mut changed = false;
     let mut job = egui::text::LayoutJob::default();
     job.append("\u{25A0}  ", 0.0, egui::TextFormat { font_id: FontId::proportional(16.0), color: color.to_opaque(), ..Default::default() });
-    job.append(label, 0.0, egui::TextFormat { font_id: FontId::proportional(14.0), color: Color32::from_gray(225), ..Default::default() });
+    job.append(label, 0.0, egui::TextFormat { font_id: FontId::proportional(14.0), color: crate::theme::text(), ..Default::default() });
     ui.horizontal(|ui| {
         ui.add_space(8.0);
         ui.vertical(|ui| {
@@ -2318,7 +2422,7 @@ fn heading(ui: &mut egui::Ui, text: &str) {
     ui.add_space(4.0);
     ui.horizontal(|ui| {
         ui.add_space(14.0);
-        ui.label(egui::RichText::new(text).size(12.0).color(Color32::from_gray(160)));
+        ui.label(egui::RichText::new(text).size(12.0).color(crate::theme::faint()));
     });
 }
 
@@ -2329,10 +2433,10 @@ fn slider_row(ui: &mut egui::Ui, label: &str, value: String, slider: &mut dyn Fn
     ui.horizontal(|ui| {
         ui.add_space(14.0);
         let (lr, _) = ui.allocate_exact_size(Vec2::new(70.0, 30.0), Sense::hover());
-        ui.painter().text(Pos2::new(lr.min.x, lr.center().y), egui::Align2::LEFT_CENTER, label, FontId::proportional(14.0), Color32::from_gray(225));
+        ui.painter().text(Pos2::new(lr.min.x, lr.center().y), egui::Align2::LEFT_CENTER, label, FontId::proportional(14.0), crate::theme::text());
         ui.spacing_mut().slider_width = 130.0;
         changed = slider(ui);
-        ui.add_sized([40.0, 30.0], egui::Label::new(egui::RichText::new(value).size(13.0).color(Color32::from_gray(180))).halign(Align::Max));
+        ui.add_sized([40.0, 30.0], egui::Label::new(egui::RichText::new(value).size(13.0).color(crate::theme::soft())).halign(Align::Max));
     });
     changed
 }
@@ -2359,11 +2463,11 @@ fn look_left(ui: &mut egui::Ui, fence: &mut Fence) -> bool {
                         } else {
                             p.circle_filled(c, 10.0, Color32::from_rgb(rgb[0], rgb[1], rgb[2]));
                         }
-                        p.circle_stroke(c, 10.0, egui::Stroke::new(1.0_f32, Color32::from_white_alpha(70)));
+                        p.circle_stroke(c, 10.0, egui::Stroke::new(1.0_f32, crate::theme::text().linear_multiply(0.3)));
                         if selected {
                             p.circle_stroke(c, 13.0, egui::Stroke::new(2.0_f32, accent()));
                         } else if resp.hovered() {
-                            p.circle_stroke(c, 13.0, egui::Stroke::new(1.0_f32, Color32::from_white_alpha(90)));
+                            p.circle_stroke(c, 13.0, egui::Stroke::new(1.0_f32, crate::theme::text().linear_multiply(0.4)));
                         }
                         if resp.on_hover_text(t(*name)).clicked() {
                             fence.color = *rgb;
@@ -2424,7 +2528,7 @@ fn look_right(ui: &mut egui::Ui, fence: &mut Fence, actions: &mut Vec<Act>) -> b
                 ui.horizontal(|ui| {
                     ui.add_space(14.0);
                     let (lr, _) = ui.allocate_exact_size(Vec2::new(70.0, 30.0), Sense::hover());
-                    ui.painter().text(Pos2::new(lr.min.x, lr.center().y), egui::Align2::LEFT_CENTER, t("Font"), FontId::proportional(14.0), Color32::from_gray(225));
+                    ui.painter().text(Pos2::new(lr.min.x, lr.center().y), egui::Align2::LEFT_CENTER, t("Font"), FontId::proportional(14.0), crate::theme::text());
                     let shown = if fence.font.is_empty() { "Segoe UI".to_string() } else { fence.font.clone() };
                     egui::ComboBox::from_id_salt("font-list").selected_text(shown.clone()).width(190.0).height(320.0).show_ui(ui, |ui| {
                         for name in fv::installed_fonts() {
@@ -2454,12 +2558,12 @@ fn look_right(ui: &mut egui::Ui, fence: &mut Fence, actions: &mut Vec<Act>) -> b
                     ui.horizontal(|ui| {
                         ui.add_space(14.0);
                         let (lr, _) = ui.allocate_exact_size(Vec2::new(70.0, 30.0), Sense::hover());
-                        ui.painter().text(Pos2::new(lr.min.x, lr.center().y), egui::Align2::LEFT_CENTER, label, FontId::proportional(14.0), Color32::from_gray(225));
+                        ui.painter().text(Pos2::new(lr.min.x, lr.center().y), egui::Align2::LEFT_CENTER, label, FontId::proportional(14.0), crate::theme::text());
                         ui.spacing_mut().item_spacing.x = 4.0;
                         for (i, text) in [first, second].into_iter().enumerate() {
                             let on = (i == 0) == is_first;
-                            let fill = if on { accent().linear_multiply(0.35) } else { Color32::from_white_alpha(10) };
-                            let b = egui::Button::new(egui::RichText::new(text).size(13.0).color(if on { Color32::WHITE } else { Color32::from_gray(200) }))
+                            let fill = if on { accent().linear_multiply(0.35) } else { crate::theme::hover() };
+                            let b = egui::Button::new(egui::RichText::new(text).size(13.0).color(if on { crate::theme::strong() } else { crate::theme::soft() }))
                                 .fill(fill)
                                 .corner_radius(egui::CornerRadius::same(4))
                                 .min_size(Vec2::new(78.0, 26.0));
@@ -2474,12 +2578,12 @@ fn look_right(ui: &mut egui::Ui, fence: &mut Fence, actions: &mut Vec<Act>) -> b
                 ui.horizontal(|ui| {
                     ui.add_space(14.0);
                     let (lr, _) = ui.allocate_exact_size(Vec2::new(70.0, 30.0), Sense::hover());
-                    ui.painter().text(Pos2::new(lr.min.x, lr.center().y), egui::Align2::LEFT_CENTER, t("Title"), FontId::proportional(14.0), Color32::from_gray(225));
+                    ui.painter().text(Pos2::new(lr.min.x, lr.center().y), egui::Align2::LEFT_CENTER, t("Title"), FontId::proportional(14.0), crate::theme::text());
                     ui.spacing_mut().item_spacing.x = 4.0;
                     for (pos, text) in [(TitlePos::Hidden, t("Off")), (TitlePos::Left, t("Left")), (TitlePos::Top, t("Top")), (TitlePos::Bottom, t("Bottom"))] {
                         let on = fence.title_pos == pos;
-                        let fill = if on { accent().linear_multiply(0.35) } else { Color32::from_white_alpha(10) };
-                        let b = egui::Button::new(egui::RichText::new(text).size(13.0).color(if on { Color32::WHITE } else { Color32::from_gray(200) }))
+                        let fill = if on { accent().linear_multiply(0.35) } else { crate::theme::hover() };
+                        let b = egui::Button::new(egui::RichText::new(text).size(13.0).color(if on { crate::theme::strong() } else { crate::theme::soft() }))
                             .fill(fill)
                             .corner_radius(egui::CornerRadius::same(4))
                             .min_size(Vec2::new(54.0, 26.0));
@@ -2498,6 +2602,49 @@ fn look_right(ui: &mut egui::Ui, fence: &mut Fence, actions: &mut Vec<Act>) -> b
                     actions.push(Act::ApplyLookToAll(fence.id));
                 }
                 ui.add_space(4.0);    dirty
+}
+
+/// The name field under an icon being renamed (F2): Enter or a click elsewhere keeps the new name,
+/// Esc cancels. The whole name is selected at first, like Explorer.
+fn rename_in_place(ui: &mut egui::Ui, st: &mut UiState, actions: &mut Vec<Act>, cell: Rect, icon: f32, style: &fv::TextStyle) {
+    let Some(mut r) = st.icon_rename.take() else { return };
+    let font = FontId::new(style.size, style.family.clone());
+    let top = cell.min.y + 6.0 + icon + 2.0;
+    let rect = Rect::from_min_max(Pos2::new(cell.min.x + 1.0, top), Pos2::new(cell.max.x - 1.0, top + style.size * 1.45 + 6.0));
+    ui.painter().rect_filled(rect, egui::CornerRadius::same(2), Color32::from_rgb(32, 32, 35));
+    ui.painter().rect_stroke(rect, egui::CornerRadius::same(2), egui::Stroke::new(1.0_f32, Color32::from_rgb(0, 120, 215)), egui::StrokeKind::Inside);
+    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect.shrink2(Vec2::new(3.0, 2.0))));
+    let out = egui::TextEdit::singleline(&mut r.text)
+        .font(font)
+        .frame(false)
+        .horizontal_align(Align::Center)
+        .text_color(Color32::WHITE)
+        .desired_width(rect.width() - 6.0)
+        .show(&mut child);
+    let te = out.response.clone();
+    if !r.selected_once {
+        let mut state = out.state;
+        let all = egui::text::CCursorRange::two(egui::text::CCursor::new(0), egui::text::CCursor::new(r.text.chars().count()));
+        state.cursor.set_char_range(Some(all));
+        state.store(ui.ctx(), te.id);
+        r.selected_once = true;
+    }
+    let window_focused = ui.input(|i| i.viewport().focused.unwrap_or(false));
+    if window_focused {
+        r.had_focus = true;
+    }
+    let (enter, esc) = ui.input(|i| (i.key_pressed(egui::Key::Enter), i.key_pressed(egui::Key::Escape)));
+    let clicked_elsewhere = ui.input(|i| i.pointer.any_pressed()) && !ui.rect_contains_pointer(rect);
+    if esc {
+        desktop::focus_desktop();
+    } else if enter || clicked_elsewhere || (r.had_focus && !window_focused) {
+        actions.push(Act::RenameItem { path: r.path, name: r.text });
+    } else {
+        if !te.has_focus() {
+            te.request_focus();
+        }
+        st.icon_rename = Some(r);
+    }
 }
 
 /// The box menu. Returns (layout changed, close the menu).
@@ -2628,7 +2775,7 @@ fn fence_menu(ui: &mut egui::Ui, fence: &mut Fence, st: &mut UiState, page: &mut
                     close = true;
                 }
             }
-            ui.label(egui::RichText::new(t("Brings the box into view; pressed again, rolls it up or down.")).size(11.5).color(Color32::from_gray(150)));
+            ui.label(egui::RichText::new(t("Brings the box into view; pressed again, rolls it up or down.")).size(11.5).color(crate::theme::faint()));
         }
         MenuPage::Pages => {
             back(ui, page, t("Move to page"));
@@ -2646,7 +2793,7 @@ fn fence_menu(ui: &mut egui::Ui, fence: &mut Fence, st: &mut UiState, page: &mut
                 dirty = true;
                 close = true;
             }
-            ui.label(egui::RichText::new(t("Switch pages with Ctrl+Alt+PageDown / PageUp or the tray icon.")).size(11.5).color(Color32::from_gray(150)));
+            ui.label(egui::RichText::new(t("Switch pages with Ctrl+Alt+PageDown / PageUp or the tray icon.")).size(11.5).color(crate::theme::faint()));
         }
         MenuPage::New => {
             back(ui, page, t("New"));
@@ -2864,8 +3011,8 @@ impl DeskApp {
                 *close = true;
             }
             let frame = egui::Frame::new()
-                .fill(Color32::from_rgb(44, 44, 46))
-                .stroke(egui::Stroke::new(1.0_f32, Color32::from_white_alpha(26)))
+                .fill(crate::theme::menu())
+                .stroke(egui::Stroke::new(1.0_f32, crate::theme::line()))
                 .inner_margin(egui::Margin::same(5));
             egui::CentralPanel::default().frame(frame).show(ctx, |ui| {
                 ui.spacing_mut().item_spacing.y = 0.0;
@@ -2957,16 +3104,16 @@ impl DeskApp {
 
     fn manager_contents(&mut self, ctx: &egui::Context) {
         {
-            egui::TopBottomPanel::top("mgr-top").frame(egui::Frame::new().fill(Color32::from_rgb(24, 25, 28)).inner_margin(10.0)).show(ctx, |ui| {
+            egui::TopBottomPanel::top("mgr-top").frame(egui::Frame::new().fill(crate::theme::bar()).inner_margin(10.0)).show(ctx, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("DesktopShepherd").size(20.0).strong().color(Color32::WHITE));
+                    ui.label(egui::RichText::new("DesktopShepherd").size(20.0).strong().color(crate::theme::strong()));
                     ui.add_space(20.0);
                     ui.selectable_value(&mut self.page, Page::Boxes, t("Boxes"));
                     ui.selectable_value(&mut self.page, Page::Layout, t("Layout"));
                     ui.selectable_value(&mut self.page, Page::Settings, t("Settings"));
                 });
             });
-            egui::CentralPanel::default().frame(egui::Frame::new().fill(Color32::from_rgb(16, 17, 19)).inner_margin(12.0)).show(ctx, |ui| {
+            egui::CentralPanel::default().frame(egui::Frame::new().fill(crate::theme::deep()).inner_margin(12.0)).show(ctx, |ui| {
                 match self.page {
                     Page::Boxes => self.page_boxes(ui),
                     Page::Layout => self.page_layout(ui),
@@ -3008,7 +3155,7 @@ impl DeskApp {
             ui.add_space(4.0);
             let mut restore = None;
             ui.horizontal_wrapped(|ui| {
-                ui.label(egui::RichText::new(t("Recently deleted:")).color(Color32::from_gray(170)));
+                ui.label(egui::RichText::new(t("Recently deleted:")).color(crate::theme::soft()));
                 for (i, (f, _)) in self.deleted.iter().enumerate().rev() {
                     if ui.button(format!("↶ {}", f.name)).on_hover_text(t("Bring this box back")).clicked() {
                         restore = Some(i);
@@ -3033,7 +3180,7 @@ impl DeskApp {
                 "{} items on the desktop, {} not in a box yet. Tip: right-click a box for its options; double-click its title to roll it up.",
                 &[&self.items.values().filter(|v| v.on_desktop).count(), &unsorted],
             ))
-            .color(Color32::from_gray(170)),
+            .color(crate::theme::soft()),
         );
         ui.add_space(8.0);
         let mut dirty = false;
@@ -3073,7 +3220,7 @@ impl DeskApp {
                         dirty |= ui.checkbox(&mut f.locked, t("Locked")).changed();
                     });
                     if self.ui.confirm_delete == Some(f.id) {
-                        if ui.button(egui::RichText::new(t("Confirm delete")).color(Color32::from_rgb(255, 120, 110))).clicked() {
+                        if ui.button(egui::RichText::new(t("Confirm delete")).color(crate::theme::warn())).clicked() {
                             self.actions.push(Act::DeleteFence(f.id));
                             self.ui.confirm_delete = None;
                         }
@@ -3120,7 +3267,7 @@ impl DeskApp {
             } else {
                 label_of(view - 1, &monitors[view - 1])
             };
-            ui.label(egui::RichText::new(title).color(Color32::from_gray(210)).size(15.0));
+            ui.label(egui::RichText::new(title).color(crate::theme::soft()).size(15.0));
             ui.add_space(12.0);
             let [sw, sh] = desktop::primary_screen_points();
             if self.persist && ui.button(t("Export layout…")).on_hover_text(t("Save all boxes and settings to a file (it includes your agenda links)")).clicked() {
@@ -3149,7 +3296,7 @@ impl DeskApp {
                     t("Boxes follow the monitor's role: main, second… (Settings > Monitors: by role).")
                 })
                 .size(12.0)
-                .color(Color32::from_gray(150)),
+                .color(crate::theme::faint()),
             );
         }
         ui.add_space(6.0);
@@ -3224,7 +3371,7 @@ impl DeskApp {
                     view = i;
                 }
                 let alpha = if i == view { 235 } else if resp.hovered() { 160 } else { 90 };
-                ui.painter().circle_filled(c, if i == view { 4.0 } else { 3.5 }, Color32::from_white_alpha(alpha));
+                ui.painter().circle_filled(c, if i == view { 4.0 } else { 3.5 }, crate::theme::text().linear_multiply(alpha as f32 / 255.0));
             }
         }
         ui.ctx().data_mut(|d| d.insert_temp(vid, view));
@@ -3250,12 +3397,12 @@ impl DeskApp {
         ui.add_space(6.0);
         ui.heading(t("Desktop"));
         dirty |= ui.checkbox(&mut s.desktop_menu, t("Add \"DesktopShepherd\" to the desktop's right-click menu (new box or widget where you click)")).changed();
-        ui.label(egui::RichText::new(t("On Windows 11 it is under \"Show more options\". Or press Ctrl+Alt+B anywhere and drag a rectangle.")).color(Color32::from_gray(150)).size(12.0));
+        ui.label(egui::RichText::new(t("On Windows 11 it is under \"Show more options\". Or press Ctrl+Alt+B anywhere and drag a rectangle.")).color(crate::theme::faint()).size(12.0));
         if ui.checkbox(&mut s.hide_desktop_icons, t("Hide Windows' own desktop icons (the boxes show them)")).changed() {
             dirty = true;
             icons_changed = true;
         }
-        ui.label(egui::RichText::new(t("They always come back when DesktopShepherd closes, even after a crash.")).color(Color32::from_gray(150)).size(12.0));
+        ui.label(egui::RichText::new(t("They always come back when DesktopShepherd closes, even after a crash.")).color(crate::theme::faint()).size(12.0));
         dirty |= ui.checkbox(&mut s.expand_on_hover, t("Open rolled-up boxes while the mouse is over them")).changed();
         ui.horizontal(|ui| {
             dirty |= ui.checkbox(&mut s.fade_idle, t("Fade boxes while the mouse is away")).changed();
@@ -3276,8 +3423,18 @@ impl DeskApp {
             ui.label(t("size"));
             dirty |= ui.add(egui::DragValue::new(&mut s.grid_size).range(4.0..=200.0).speed(1.0).suffix(" pt")).changed();
         });
-        ui.label(egui::RichText::new(t("Hold Alt while moving or resizing a box to place it freely.")).color(Color32::from_gray(150)).size(12.0));
+        ui.label(egui::RichText::new(t("Hold Alt while moving or resizing a box to place it freely.")).color(crate::theme::faint()).size(12.0));
         dirty |= ui.checkbox(&mut s.follow_accent, t("Use Windows' accent colour for highlights")).changed();
+        dirty |= ui.checkbox(&mut s.auto_ink, t("Darker text on bright wallpapers")).changed();
+        ui.horizontal_wrapped(|ui| {
+            ui.label(t("Menus and settings:"));
+            for (i, label) in [t("Like Windows"), t("Dark"), t("Light")].into_iter().enumerate() {
+                if ui.selectable_label(s.theme as usize == i, label).clicked() && s.theme as usize != i {
+                    s.theme = i as u8;
+                    dirty = true;
+                }
+            }
+        });
         dirty |= ui.checkbox(&mut s.search_apps, t("Quick search also finds programs (from the Start menu)")).changed();
         #[cfg(windows)]
         ui.horizontal_wrapped(|ui| {
@@ -3291,7 +3448,7 @@ impl DeskApp {
         });
         #[cfg(windows)]
         if !self.hotkey_ok {
-            ui.label(egui::RichText::new(t("That shortcut is already used by another program: pick another one.")).color(Color32::from_rgb(255, 160, 120)).size(12.0));
+            ui.label(egui::RichText::new(t("That shortcut is already used by another program: pick another one.")).color(crate::theme::warn()).size(12.0));
         }
         #[cfg(windows)]
         ui.horizontal_wrapped(|ui| {
@@ -3305,7 +3462,7 @@ impl DeskApp {
         });
         #[cfg(windows)]
         if !self.hide_hotkey_ok {
-            ui.label(egui::RichText::new(t("That shortcut is already used by another program: pick another one.")).color(Color32::from_rgb(255, 160, 120)).size(12.0));
+            ui.label(egui::RichText::new(t("That shortcut is already used by another program: pick another one.")).color(crate::theme::warn()).size(12.0));
         }
         #[cfg(windows)]
         ui.horizontal_wrapped(|ui| {
@@ -3317,8 +3474,8 @@ impl DeskApp {
                 }
             }
         });
-        ui.label(egui::RichText::new(t("Click an empty part of the desktop, then type: the same letter again goes to the next match, Enter opens it.")).color(Color32::from_gray(150)).size(12.0));
-        ui.label(egui::RichText::new(t("Frosted glass: set each box's blur in its menu (Personalize > Blur).")).color(Color32::from_gray(150)).size(12.0));
+        ui.label(egui::RichText::new(t("Click an empty part of the desktop, then type: the same letter again goes to the next match, Enter opens it.")).color(crate::theme::faint()).size(12.0));
+        ui.label(egui::RichText::new(t("Frosted glass: set each box's blur in its menu (Personalize > Blur).")).color(crate::theme::faint()).size(12.0));
         ui.add_space(10.0);
         ui.heading(t("Monitors"));
         dirty |= ui.checkbox(&mut s.link_vdesks, t("Each Windows virtual desktop shows its own page of boxes (desktop 1 = page 1, desktop 2 = page 2…)")).changed();
@@ -3330,7 +3487,7 @@ impl DeskApp {
             for key in s_setups.iter() {
                 ui.horizontal(|ui| {
                     let here = *key == self.current_setup;
-                    ui.label(egui::RichText::new(format!("{}{key}", if here { "● " } else { "   " })).size(12.0).color(Color32::from_gray(170)));
+                    ui.label(egui::RichText::new(format!("{}{key}", if here { "● " } else { "   " })).size(12.0).color(crate::theme::soft()));
                     if !here && ui.small_button(t("Forget")).clicked() {
                         forget = Some(key.clone());
                     }
@@ -3353,7 +3510,7 @@ impl DeskApp {
             crate::model::MonitorMode::Fixed,
             t("The monitor itself: boxes always stay on the monitor where they were created or moved"),
         );
-        ui.label(egui::RichText::new(t("Moving a box to another monitor binds it there. Settings > Layout shows each monitor.")).color(Color32::from_gray(150)).size(12.0));
+        ui.label(egui::RichText::new(t("Moving a box to another monitor binds it there. Settings > Layout shows each monitor.")).color(crate::theme::faint()).size(12.0));
         let monitors_changed = s.monitor_mode != before;
         dirty |= monitors_changed;
         for (i, m) in self.monitors.iter().enumerate() {
@@ -3376,7 +3533,7 @@ impl DeskApp {
                     "{}: {} × {} ({}) — {} box(es)",
                     &[&role, &m.rect.width().round(), &m.rect.height().round(), &m.name.trim_start_matches("\\\\.\\"), &count],
                 ))
-                .color(Color32::from_gray(160))
+                .color(crate::theme::faint())
                 .size(12.0),
             );
         }
@@ -3384,7 +3541,7 @@ impl DeskApp {
         ui.heading(t("Auto-sort tabs"));
         ui.label(
             egui::RichText::new(t("Each tab collects items by file type, name pattern (* and ?) and/or how recently they changed; the first matching rule wins. Folders and everything else get their own tabs."))
-                .color(Color32::from_gray(150))
+                .color(crate::theme::faint())
                 .size(12.0),
         );
         let mut remove = None;
@@ -3439,7 +3596,7 @@ impl DeskApp {
             }
             dirty = true;
         }
-        ui.label(egui::RichText::new(t("New, renamed and removed desktop files show up as soon as Windows reports them.")).color(Color32::from_gray(150)).size(12.0));
+        ui.label(egui::RichText::new(t("New, renamed and removed desktop files show up as soon as Windows reports them.")).color(crate::theme::faint()).size(12.0));
         ui.add_space(10.0);
         ui.heading(t("Sync"));
         match storage::sync_path() {
@@ -3450,10 +3607,10 @@ impl DeskApp {
                         self.sync_seen = None;
                     }
                 }
-                ui.label(egui::RichText::new(tf("File: {}. Changes from another PC are loaded within half a minute; your layout is backed up first.", &[&p.display()])).size(12.0).color(Color32::from_gray(150)));
+                ui.label(egui::RichText::new(tf("File: {}. Changes from another PC are loaded within half a minute; your layout is backed up first.", &[&p.display()])).size(12.0).color(crate::theme::faint()));
             }
             None => {
-                ui.label(egui::RichText::new(t("OneDrive isn't set up on this PC.")).size(12.0).color(Color32::from_gray(150)));
+                ui.label(egui::RichText::new(t("OneDrive isn't set up on this PC.")).size(12.0).color(crate::theme::faint()));
             }
         }
         ui.add_space(10.0);
@@ -3463,7 +3620,7 @@ impl DeskApp {
             ui.horizontal(|ui| {
                 ui.label(tf("This is version {}.", &[&env!("CARGO_PKG_VERSION")]));
                 if busy {
-                    ui.label(egui::RichText::new(t("Checking…")).color(Color32::from_gray(160)));
+                    ui.label(egui::RichText::new(t("Checking…")).color(crate::theme::faint()));
                 } else if ui.button(t("Check now")).clicked() {
                     crate::update::check(Duration::ZERO, true);
                 }
@@ -3471,23 +3628,23 @@ impl DeskApp {
             dirty |= ui.checkbox(&mut s.check_updates, t("Look for new versions automatically (once a day)")).changed();
             if let Some(rel) = newer {
                 ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new(tf("Version {} is available.", &[&rel.version])).strong().color(Color32::from_rgb(120, 210, 130)));
+                    ui.label(egui::RichText::new(tf("Version {} is available.", &[&rel.version])).strong().color(if crate::theme::is_light() { Color32::from_rgb(20, 120, 40) } else { Color32::from_rgb(120, 210, 130) }));
                     if ui.button(t("Update now")).clicked() {
                         crate::update::install(rel.clone());
                     }
                 });
             } else if let Some(e) = err {
-                ui.label(egui::RichText::new(e).size(12.0).color(Color32::from_rgb(255, 190, 130)));
+                ui.label(egui::RichText::new(e).size(12.0).color(crate::theme::warn()));
             } else if !busy && crate::update::checked() {
-                ui.label(egui::RichText::new(t("You have the newest version.")).size(12.0).color(Color32::from_gray(160)));
+                ui.label(egui::RichText::new(t("You have the newest version.")).size(12.0).color(crate::theme::faint()));
             }
             if let Some(n) = note {
-                ui.label(egui::RichText::new(n).size(12.0).color(Color32::from_gray(190)));
+                ui.label(egui::RichText::new(n).size(12.0).color(crate::theme::soft()));
             }
         }
         ui.add_space(10.0);
         ui.heading(t("Saved layouts"));
-        ui.label(egui::RichText::new(t("A copy of your layout is kept each time DesktopShepherd starts (the last 10).")).color(Color32::from_gray(150)).size(12.0));
+        ui.label(egui::RichText::new(t("A copy of your layout is kept each time DesktopShepherd starts (the last 10).")).color(crate::theme::faint()).size(12.0));
         let mut restore = None;
         for b in self.backups.iter().rev().take(10) {
             ui.horizontal(|ui| {
@@ -3507,7 +3664,7 @@ impl DeskApp {
             }
         });
         ui.add_space(6.0);
-        ui.label(egui::RichText::new(tf("{} desktop items", &[&self.items.len()])).color(Color32::from_gray(110)).size(11.0));
+        ui.label(egui::RichText::new(tf("{} desktop items", &[&self.items.len()])).color(crate::theme::disabled()).size(11.0));
         if let Some(p) = restore {
             self.actions.push(Act::RestoreBackup(p));
         }
@@ -4071,13 +4228,13 @@ impl DeskApp {
                 }
                 let ppp = pctx.pixels_per_point();
                 let frame = egui::Frame::new()
-                    .fill(Color32::from_rgb(40, 40, 43))
-                    .stroke(egui::Stroke::new(1.0_f32, Color32::from_white_alpha(30)))
+                    .fill(crate::theme::card())
+                    .stroke(egui::Stroke::new(1.0_f32, crate::theme::line()))
                     .inner_margin(egui::Margin::same(10));
                 egui::CentralPanel::default().frame(frame).show(pctx, |ui| {
                     let top = ui.cursor().min.y;
                     ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new(icon::SEARCH.to_string()).size(18.0).color(Color32::from_gray(190)));
+                        ui.label(egui::RichText::new(icon::SEARCH.to_string()).size(18.0).color(crate::theme::soft()));
                         let te = ui.add(
                             egui::TextEdit::singleline(&mut s.query)
                                 .hint_text(t("Search the desktop…"))
@@ -4094,9 +4251,9 @@ impl DeskApp {
                     });
                     ui.add_space(6.0);
                     if s.query.trim().is_empty() {
-                        ui.label(egui::RichText::new(t("Type part of a name. Enter opens, Ctrl+Enter opens its folder, Esc closes.")).size(12.5).color(Color32::from_gray(150)));
+                        ui.label(egui::RichText::new(t("Type part of a name. Enter opens, Ctrl+Enter opens its folder, Esc closes.")).size(12.5).color(crate::theme::faint()));
                     } else if results.is_empty() {
-                        ui.label(egui::RichText::new(t("Nothing on the desktop matches.")).size(13.0).color(Color32::from_gray(160)));
+                        ui.label(egui::RichText::new(t("Nothing on the desktop matches.")).size(13.0).color(crate::theme::faint()));
                     }
                     for (i, it) in results.iter().enumerate() {
                         let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 34.0), Sense::click());
@@ -4113,13 +4270,13 @@ impl DeskApp {
                                 p.image(t, ir, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
                             }
                             None => {
-                                p.rect_filled(ir.shrink(3.0), egui::CornerRadius::same(3), Color32::from_gray(110));
+                                p.rect_filled(ir.shrink(3.0), egui::CornerRadius::same(3), crate::theme::disabled());
                             }
                         }
                         let key = it.path.to_lowercase();
                         let home = homes.get(&key).cloned().unwrap_or_else(|| if app_paths.contains(&key) { t("Program").to_string() } else { other.clone() });
-                        p.text(Pos2::new(rect.min.x + 38.0, rect.center().y), egui::Align2::LEFT_CENTER, &it.name, FontId::proportional(14.5), Color32::from_gray(240));
-                        p.text(Pos2::new(rect.max.x - 8.0, rect.center().y), egui::Align2::RIGHT_CENTER, home, FontId::proportional(12.0), Color32::from_gray(150));
+                        p.text(Pos2::new(rect.min.x + 38.0, rect.center().y), egui::Align2::LEFT_CENTER, &it.name, FontId::proportional(14.5), crate::theme::text());
+                        p.text(Pos2::new(rect.max.x - 8.0, rect.center().y), egui::Align2::RIGHT_CENTER, home, FontId::proportional(12.0), crate::theme::faint());
                         if resp.clicked() {
                             open = Some((it.path.clone(), ctrl));
                         }
@@ -4314,7 +4471,21 @@ impl DeskApp {
     /// the box being worked in.
     fn paste_files(&mut self) {
         let Some(dest) = desktop::desktop_dirs().into_iter().next() else { return };
-        let target = self.active_box().map(|b| b.0).filter(|id| self.layout.fences.iter().any(|f| f.id == *id && !f.auto_sort && f.widget.is_none()));
+        // The box under the mouse (like pasting in an Explorer window); with the mouse elsewhere,
+        // the box of the selected icon.
+        let under_mouse = desktop::cursor_points(desktop::system_scale()).and_then(|c| {
+            let page = self.layout.current_page;
+            self.layout
+                .fences
+                .iter()
+                .filter(|f| !self.boxes_hidden && f.page == page)
+                .find(|f| {
+                    let h = if f.expanded { f.rect[3] } else { ROLLED_HEIGHT };
+                    egui::Rect::from_min_size(Pos2::new(f.rect[0], f.rect[1]), Vec2::new(f.rect[2], h)).contains(c)
+                })
+                .map(|f| f.id)
+        });
+        let target = under_mouse.or_else(|| self.active_box().map(|b| b.0)).filter(|id| self.layout.fences.iter().any(|f| f.id == *id && !f.auto_sort && f.widget.is_none()));
         let tab = target.and_then(|id| self.layout.fences.iter().find(|f| f.id == id)).map(|f| f.sel_tab).unwrap_or(0);
         #[cfg(windows)]
         {
@@ -4336,6 +4507,12 @@ impl DeskApp {
     fn start_rename(&mut self) {
         let Some(p) = self.ui.selected.clone() else { return };
         let Some(it) = self.items.get(&p.to_lowercase()) else { return };
+        if let Some((box_id, _, _)) = self.active_box() {
+            self.ui.icon_rename = Some(IconRename { path: it.path.clone(), box_id, text: it.name.clone(), selected_once: false, had_focus: false });
+            self.ui.box_cmds.push((box_id, ViewportCommand::Focus));
+            self.redraw_all = true;
+            return;
+        }
         self.rename = Some(RenameState { path: it.path.clone(), text: it.name.clone(), was_focused: false, selected_once: false });
     }
 
@@ -4413,9 +4590,9 @@ impl DeskApp {
                 if enter {
                     done = Some(r.text.clone());
                 }
-                let frame = egui::Frame::new().fill(Color32::from_rgb(40, 40, 43)).stroke(egui::Stroke::new(1.0_f32, Color32::from_white_alpha(30))).inner_margin(egui::Margin::same(12));
+                let frame = egui::Frame::new().fill(crate::theme::card()).stroke(egui::Stroke::new(1.0_f32, crate::theme::line())).inner_margin(egui::Margin::same(12));
                 egui::CentralPanel::default().frame(frame).show(pctx, |ui| {
-                    ui.label(egui::RichText::new(t("Rename")).size(13.0).color(Color32::from_gray(170)));
+                    ui.label(egui::RichText::new(t("Rename")).size(13.0).color(crate::theme::soft()));
                     let out = egui::TextEdit::singleline(&mut r.text).font(FontId::proportional(16.0)).desired_width(f32::INFINITY).show(ui);
                     let te = out.response.clone();
                     if !r.selected_once {
@@ -4429,7 +4606,7 @@ impl DeskApp {
                     if !te.has_focus() && !close && done.is_none() {
                         te.request_focus();
                     }
-                    ui.label(egui::RichText::new(t("Enter renames, Esc cancels.")).size(11.5).color(Color32::from_gray(140)));
+                    ui.label(egui::RichText::new(t("Enter renames, Esc cancels.")).size(11.5).color(crate::theme::faint()));
                 });
             });
             if close || done.is_some() {
@@ -4532,7 +4709,7 @@ fn search_widget(ui: &mut egui::Ui, id: u64, desk: &DeskState, icons: &mut IconC
     }
     ui.add_space(6.0);
     if !q.trim().is_empty() && results.is_empty() {
-        ui.label(egui::RichText::new(t("Nothing found")).size(13.0).color(Color32::from_gray(150)));
+        ui.label(egui::RichText::new(t("Nothing found")).size(13.0).color(crate::ink::faint()));
     }
     let px = (20.0 * ui.ctx().pixels_per_point()).round() as u32;
     for (i, it) in results.iter().enumerate() {
@@ -4552,7 +4729,7 @@ fn search_widget(ui: &mut egui::Ui, id: u64, desk: &DeskState, icons: &mut IconC
                 ui.painter().rect_filled(ir.shrink(3.0), 3.0, Color32::from_gray(110));
             }
         }
-        let text = ui.painter().layout(it.name.clone(), FontId::proportional(13.5), Color32::from_gray(235), rect.width() - 40.0);
+        let text = ui.painter().layout(it.name.clone(), FontId::proportional(13.5), if i == sel { Color32::WHITE } else { crate::ink::text() }, rect.width() - 40.0);
         ui.painter().with_clip_rect(rect).galley(Pos2::new(rect.min.x + 34.0, rect.center().y - text.size().y / 2.0), text, Color32::WHITE);
         if resp.clicked() {
             open = Some(it.path.clone());
@@ -4593,16 +4770,17 @@ impl DeskApp {
             let fences = &mut self.layout.fences;
             let actions = &mut self.actions;
             let mut tab = self.personalize_tab;
+            let mut resize = false;
             hosts.panel(PERSONALIZE_PANEL, crate::host::PanelKind::Settings, "Personalize", rect_px, false, force, |pctx| {
                 if pctx.input(|i| i.viewport().close_requested() || i.key_pressed(egui::Key::Escape)) {
                     close = true;
                 }
                 let Some(fence) = fences.iter_mut().find(|f| f.id == id) else { return };
                 let widget_kind = fence.widget.as_ref().and_then(|w| widgets::find(&w.kind));
-                egui::TopBottomPanel::top("look-top").frame(egui::Frame::new().fill(Color32::from_rgb(24, 25, 28)).inner_margin(10.0)).show(pctx, |ui| {
+                egui::TopBottomPanel::top("look-top").frame(egui::Frame::new().fill(crate::theme::bar()).inner_margin(10.0)).show(pctx, |ui| {
                     ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new(t("Personalize")).size(20.0).strong().color(Color32::WHITE));
-                        ui.label(egui::RichText::new(format!("  {}", fence.name)).size(15.0).color(Color32::from_gray(170)));
+                        ui.label(egui::RichText::new(t("Personalize")).size(20.0).strong().color(crate::theme::strong()));
+                        ui.label(egui::RichText::new(format!("  {}", fence.name)).size(15.0).color(crate::theme::soft()));
                         if widget_kind.map(|k| (k.make)().has_settings()).unwrap_or(false) {
                             ui.add_space(24.0);
                             ui.selectable_value(&mut tab, 0, egui::RichText::new(t("Look")).size(14.0));
@@ -4617,12 +4795,20 @@ impl DeskApp {
                         });
                     });
                 });
-                egui::CentralPanel::default().frame(egui::Frame::new().fill(Color32::from_rgb(32, 33, 36)).inner_margin(10.0)).show(pctx, |ui| {
+                egui::CentralPanel::default().frame(egui::Frame::new().fill(crate::theme::bg()).inner_margin(10.0)).show(pctx, |ui| {
                     ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
                         match (tab, widget_kind, fence.widget.as_mut()) {
                             (1, Some(kind), Some(wc)) => {
                                 ui.spacing_mut().item_spacing.y = 8.0;
                                 dirty |= (kind.make)().settings(ui, &mut wc.data);
+                                // A widget can ask for a box size that fits a look it offers.
+                                if let Some(size) = wc.data.as_object_mut().and_then(|o| o.remove("resize_to")) {
+                                    if let (Some(w), Some(h)) = (size[0].as_f64(), size[1].as_f64()) {
+                                        fence.rect[2] = w as f32;
+                                        fence.rect[3] = h as f32;
+                                        resize = true;
+                                    }
+                                }
                             }
                             _ => {
                                 ui.columns(2, |cols| {
@@ -4643,6 +4829,9 @@ impl DeskApp {
                 self.personalize = None;
             }
             self.hosts = Some(hosts);
+            if resize {
+                self.place_box(id);
+            }
             if dirty {
                 self.mark_dirty();
                 self.redraw_all = true;
@@ -4670,10 +4859,10 @@ impl DeskApp {
         let mut undo = false;
         if let Some(mut hosts) = self.hosts.take() {
             hosts.panel(UNDO_PANEL, crate::host::PanelKind::Menu, "DesktopShepherd undo", rect_px, true, force, |pctx| {
-                let frame = egui::Frame::new().fill(Color32::from_rgb(44, 44, 46)).stroke(egui::Stroke::new(1.0_f32, Color32::from_white_alpha(30))).inner_margin(egui::Margin::symmetric(14, 10));
+                let frame = egui::Frame::new().fill(crate::theme::menu()).stroke(egui::Stroke::new(1.0_f32, crate::theme::line())).inner_margin(egui::Margin::symmetric(14, 10));
                 egui::CentralPanel::default().frame(frame).show(pctx, |ui| {
                     ui.horizontal(|ui| {
-                        ui.add(egui::Label::new(egui::RichText::new(tf("“{}” deleted", &[&name])).size(14.0).color(Color32::WHITE)).truncate());
+                        ui.add(egui::Label::new(egui::RichText::new(tf("“{}” deleted", &[&name])).size(14.0).color(crate::theme::strong())).truncate());
                         ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
                             if ui.button(egui::RichText::new(t("Undo")).size(14.0)).clicked() {
                                 undo = true;
@@ -4710,10 +4899,10 @@ impl DeskApp {
         let (mut update, mut later) = (false, false);
         if let Some(mut hosts) = self.hosts.take() {
             hosts.panel(UPDATE_PANEL, crate::host::PanelKind::Menu, "DesktopShepherd update", rect_px, true, force, |pctx| {
-                let frame = egui::Frame::new().fill(Color32::from_rgb(44, 44, 46)).stroke(egui::Stroke::new(1.0_f32, Color32::from_white_alpha(30))).inner_margin(egui::Margin::symmetric(14, 10));
+                let frame = egui::Frame::new().fill(crate::theme::menu()).stroke(egui::Stroke::new(1.0_f32, crate::theme::line())).inner_margin(egui::Margin::symmetric(14, 10));
                 egui::CentralPanel::default().frame(frame).show(pctx, |ui| {
                     ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new(tf("DesktopShepherd {} is available", &[&rel.version])).size(14.0).color(Color32::WHITE));
+                        ui.label(egui::RichText::new(tf("DesktopShepherd {} is available", &[&rel.version])).size(14.0).color(crate::theme::strong()));
                         ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
                             if ui.button(t("Later")).clicked() {
                                 later = true;

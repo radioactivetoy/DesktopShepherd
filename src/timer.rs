@@ -77,14 +77,14 @@ impl DeskWidget for Timer {
             t("Timer")
         };
         let p = ui.painter();
-        p.text(Pos2::new(full.center().x, full.min.y + 12.0), egui::Align2::CENTER_CENTER, label, egui::FontId::proportional(12.5), Color32::from_gray(200));
+        p.text(Pos2::new(full.center().x, full.min.y + 12.0), egui::Align2::CENTER_CENTER, label, egui::FontId::proportional(12.5), crate::ink::gray(200));
         let shown = if running { left } else if paused > 0 { paused } else { data["len"].as_i64().unwrap_or(len) };
         let big = (full.height() * 0.32).clamp(22.0, 54.0);
-        p.text(Pos2::new(full.center().x, full.min.y + 18.0 + big * 0.7), egui::Align2::CENTER_CENTER, mmss(shown), egui::FontId::proportional(big), Color32::WHITE);
+        p.text(Pos2::new(full.center().x, full.min.y + 18.0 + big * 0.7), egui::Align2::CENTER_CENTER, mmss(shown), egui::FontId::proportional(big), crate::ink::strong());
         // Progress ring would be nice; a thin bar is lighter.
         let bar_y = full.min.y + 22.0 + big * 1.35;
         let bar = egui::Rect::from_min_size(Pos2::new(full.min.x + 8.0, bar_y), egui::vec2(full.width() - 16.0, 3.0));
-        p.rect_filled(bar, 1.5, Color32::from_white_alpha(35));
+        p.rect_filled(bar, 1.5, crate::ink::white_alpha(35));
         let total = data["len"].as_i64().unwrap_or(len).max(1) as f32;
         let mut fill = bar;
         fill.set_width(bar.width() * (1.0 - shown as f32 / total).clamp(0.0, 1.0));

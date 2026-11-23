@@ -246,6 +246,10 @@ pub struct Settings {
     pub skipped_version: String,
     /// Highlights use Windows' accent colour.
     pub follow_accent: bool,
+    /// Dark text in boxes that sit on a bright wallpaper.
+    pub auto_ink: bool,
+    /// Menus and settings windows: 0 = like Windows, 1 = dark, 2 = light.
+    pub theme: u8,
     /// Keep the layout in OneDrive, shared by this user's PCs.
     pub sync_onedrive: bool,
 }
@@ -280,6 +284,8 @@ impl Default for Settings {
             check_updates: true,
             skipped_version: String::new(),
             follow_accent: true,
+            auto_ink: true,
+            theme: 0,
             sync_onedrive: false,
         }
     }

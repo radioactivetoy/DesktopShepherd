@@ -1057,19 +1057,14 @@ pub fn focus_desktop() {
     #[cfg(windows)]
     unsafe {
         use windows::core::{w, PCWSTR};
-        use windows::Win32::System::Threading::GetCurrentProcessId;
-        use windows::Win32::UI::WindowsAndMessaging::{FindWindowW, GetForegroundWindow, GetWindowThreadProcessId, SetForegroundWindow};
+        use windows::Win32::UI::WindowsAndMessaging::{FindWindowW, SetForegroundWindow};
         if foreground_is_desktop() {
             return;
         }
-        // Only take the keyboard back from a window of ours (a sticky note, the search box…):
-        // another program in front stays as it is (activating the desktop over it could also
-        // lift the desktop, and the boxes with it, above that program).
-        let mut pid = 0u32;
-        GetWindowThreadProcessId(GetForegroundWindow(), Some(&mut pid));
-        if pid != GetCurrentProcessId() {
-            return;
-        }
+        // A click on an icon gives the keyboard to the desktop, from whichever window had it (our
+        // own or another program's), like a click on Windows' own desktop icons: Ctrl+C / V / X /
+        // A, F2, Delete, Enter and typing then act on the icons. (Only called for a click in a
+        // box, never on its own, so nothing is taken from a program the person is using.)
         if let Ok(p) = FindWindowW(w!("Progman"), PCWSTR::null()) {
             let _ = SetForegroundWindow(p);
         }

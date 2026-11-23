@@ -79,6 +79,7 @@ egui font atlases, and the icon textures.
 - Done (2026-11-22): when a move or resize ends, the box's monitor assignment is updated at
   once, so a later monitor change no longer sends it back to its old monitor. Checked: a box
   moved to DISPLAY2 was recorded as monitor 1 / `\\.\DISPLAY2`, and back as monitor 0 / DISPLAY1.
+- New (2026-11-23): adaptive text (Settings > Desktop "Darker text on bright wallpapers", default on). `src/backdrop.rs` reads each monitor's wallpaper (IDesktopWallpaper; fallbacks TranscodedWallpaper, CachedFiles, plain background colour) into a 48x27 brightness grid; a box whose backdrop is brighter than 0.60 (back below 0.50) draws its text with dark ink (`src/ink.rs`). Glass is unchanged. Not yet checked live.
 - New (2026-11-22): snapping (`src/snap.rs`, `cargo test snap` passes). Checked live: a box
   dropped about 5 px off snaps into line with the box below; with Alt it stays; moving back
   snaps again. Settings > Desktop: "Snap boxes to each other and to the screen edges" and "gap".
@@ -116,12 +117,21 @@ egui font atlases, and the icon textures.
   WM_DWMCOLORIZATIONCOLORCHANGED / WM_SETTINGCHANGE; dark accents lightened for contrast). OneDrive
   sync (setting sync_onedrive; `storage::write_sync` only writes when the contents differ, a newer
   shared file is loaded through RestoreBackup; checked with a stand-in OneDrive folder: a change from
-  the "other PC" arrived in ~20 s). Weather: several places, dots to switch. Light mode for menus
-  and settings is not done (they stay dark).
+  the "other PC" arrived in ~20 s). Weather: several places, dots to switch.
+- New (2026-11-23): light and dark menus and settings (`src/theme.rs`). Settings > Desktop
+  "Menus and settings": Like Windows (default, follows the Windows app mode and updates when
+  Windows colours change) / Dark / Light. Menus and settings windows use the theme colours; boxes
+  and widget faces keep their own colours.
+- New (2026-11-23): weather widget with Meteocons icons (MIT licence, stored in `assets/meteocons/`).
+  Shows feels-like, humidity, wind with direction, chance of rain, sunrise and sunset, UV, an hourly
+  strip and 7 days with range bars. Widget settings offer Compact (current weather only), Standard
+  (like the old widget), Detailed (everything) or "Adapts to the box size"; choosing one resizes the box.
+- New (2026-11-23): icons: Ctrl+C / Ctrl+X / Ctrl+V on icons also work with files copied from other
+  apps (Explorer), and paste goes to the box under the mouse. F2 renames the icon in place. Copy and
+  cut survive the Windows menu helper closing. A click on an icon always gives the keyboard to the desktop.
 - To do: Windows drop shadow on boxes (`desktop::set_shadow`, field `Fence.shadow`) is wired but
   showed no shadow in testing (box windows are composition windows with WS_EX_NOREDIRECTIONBITMAP);
-  the Personalize checkbox is hidden until it works. Weather icons: use Meteocons later.
-- New (2026-11-22, evening): internet allowed (CLAUDE.md rule 3). Widgets "Laptop status"
+  the Personalize checkbox is hidden until it works.- New (2026-11-22, evening): internet allowed (CLAUDE.md rule 3). Widgets "Laptop status"
   (GetSystemPowerStatus, WLAN API, Bluetooth API; helper thread every 5 s while shown) and "Now
   playing" (Windows media session API: title, artist, cover, play/pause/next/previous, progress;
   helper thread every 2 s while shown; blank when nothing plays). Quick search also lists Start

@@ -253,7 +253,8 @@ unsafe extern "system" fn wndproc(h: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LR
         }
         WM_LBUTTONDOWN => {
             // An icon box is part of the desktop: a click gives the keyboard to the desktop.
-            if shared.lock().map(|s| s.no_activate).unwrap_or(false) {
+            // (Not while the box itself has the keyboard: an icon's name is being edited.)
+            if shared.lock().map(|s| s.no_activate).unwrap_or(false) && GetForegroundWindow() != h {
                 crate::desktop::focus_desktop();
             }
             SetCapture(h);
@@ -536,7 +537,7 @@ impl Panel {
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, Arc::into_raw(shared.clone()) as isize);
             {
                 use windows::Win32::Graphics::Dwm::{DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND};
-                let dark = BOOL(1);
+                let dark = BOOL(if crate::theme::is_light() { 0 } else { 1 }); // title bar matches the window
                 let _ = DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark as *const _ as *const _, 4);
                 if kind == PanelKind::Menu {
                     let round = DWMWCP_ROUND;
@@ -908,7 +909,16 @@ impl HostSystem {
                 focused,
                 ..Default::default()
             };
+            // Menus and settings windows may be light (the boxes share this context and stay as they are).
+            let light = crate::theme::is_light();
+            let dark = light.then(|| self.ctx.style().visuals.clone());
+            if let Some(d) = &dark {
+                self.ctx.set_visuals(crate::theme::panel_visuals(d));
+            }
             let out = self.ctx.run(raw, |c| ui(c));
+            if let Some(d) = dark {
+                self.ctx.set_visuals(d);
+            }
             if let Ok(mut s) = p.shared.lock() {
                 s.cursor = out.platform_output.cursor_icon;
             }

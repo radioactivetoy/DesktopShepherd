@@ -150,9 +150,11 @@ pub fn paste_into(owner: isize, dest: String, done: impl FnOnce(Vec<String>) + S
         };
         let before = list(&dest);
         let dest_l = dest.trim_end_matches(['\\', '/']).to_lowercase();
-        // Files already in this folder (cut and pasted in place): nothing to move, just place them.
+        // Files already in this folder that were cut: nothing to move, just place them. (Copied
+        // ones are copied again, as Explorer does: "x - Copy".)
         let in_place: Vec<String> = files
             .iter()
+            .filter(|_| cut)
             .filter(|f| std::path::Path::new(f).parent().map(|p| p.to_string_lossy().to_lowercase() == dest_l).unwrap_or(false))
             .cloned()
             .collect();

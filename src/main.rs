@@ -9,6 +9,9 @@ mod timer;
 mod update;
 mod weather;
 mod app;
+#[cfg(windows)]
+mod backdrop;
+mod ink;
 mod comp_trial;
 #[cfg(windows)]
 mod d3d;
@@ -35,6 +38,7 @@ mod snap;
 #[cfg(windows)]
 mod runloop;
 mod storage;
+mod theme;
 mod widgets;
 
 use std::path::PathBuf;

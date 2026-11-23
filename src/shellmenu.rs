@@ -12,7 +12,8 @@
 use std::cell::RefCell;
 use windows::core::{w, Interface, HSTRING, PCSTR, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
-use windows::Win32::System::Com::{CoInitializeEx, CoTaskMemFree, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE};
+use windows::Win32::System::Com::CoTaskMemFree;
+use windows::Win32::System::Ole::{OleFlushClipboard, OleInitialize};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Shell::Common::ITEMIDLIST;
 use windows::Win32::UI::Shell::{
@@ -73,6 +74,9 @@ pub fn spawn(paths: &[String], extras: &[Extra]) -> bool {
     let Ok(exe) = std::env::current_exe() else { return false };
     let mut cmd = std::process::Command::new(exe);
     cmd.arg("--shell-menu");
+    if crate::theme::is_light() {
+        cmd.arg("--light");
+    }
     for p in paths {
         cmd.arg("--path").arg(p);
     }
@@ -143,8 +147,11 @@ pub fn run_helper(args: &[String]) -> i32 {
     unsafe {
         use windows::Win32::UI::HiDpi::{SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2};
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
-        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
-        dark_menus();
+        // OLE (not just COM): Windows' Copy / Cut put the files on the clipboard through it.
+        let _ = OleInitialize(None);
+        if !args.iter().any(|a| a == "--light") {
+            dark_menus();
+        }
         let Ok(inst) = GetModuleHandleW(None) else { return 0 };
         let wc = WNDCLASSW { lpfnWndProc: Some(owner_proc), hInstance: inst.into(), lpszClassName: w!("DesktopShepherdMenuOwner"), ..Default::default() };
         RegisterClassW(&wc);
@@ -301,6 +308,10 @@ unsafe fn show_inner(owner: HWND, paths: &[String], extras: &[Extra]) -> windows
                 ..Default::default()
             };
             cm.InvokeCommand(&info as *const CMINVOKECOMMANDINFOEX as *const CMINVOKECOMMANDINFO)?;
+            // Copy / Cut left the files on the clipboard as data this helper hands out on request;
+            // it closes soon, which would empty the clipboard. Hand everything over now (does
+            // nothing if the command did not touch the clipboard).
+            let _ = OleFlushClipboard();
         }
         Ok(0)
     })();

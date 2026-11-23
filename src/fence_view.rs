@@ -47,6 +47,7 @@ pub fn family(fence: &Fence) -> egui::FontFamily {
 }
 
 /// How a box draws its icon captions.
+#[derive(Clone)]
 pub struct TextStyle {
     pub family: egui::FontFamily,
     pub color: Color32,
@@ -56,7 +57,7 @@ pub struct TextStyle {
 }
 
 pub fn text_style(fence: &Fence) -> TextStyle {
-    let [r, g, b] = fence.text_color;
+    let [r, g, b] = ink_rgb(fence.text_color);
     TextStyle { family: family(fence), color: Color32::from_rgb(r, g, b), shadow: fence.text_shadow, captions: fence.show_captions, size: fence.caption_size }
 }
 
@@ -216,9 +217,23 @@ pub fn border_stroke(fence: &Fence, scale: f32) -> Stroke {
     }
 }
 
+/// On a bright backdrop (dark ink) a light text colour turns dark; a dark or coloured choice stays.
+fn ink_rgb(c: [u8; 3]) -> [u8; 3] {
+    if crate::ink::is_dark() && c.iter().all(|v| *v > 170) {
+        [20, 20, 20]
+    } else {
+        c
+    }
+}
+
 /// The box's text colour, dimmed (`f` < 1) for less important text.
 fn text_color(fence: &Fence, f: f32) -> Color32 {
-    let [r, g, b] = fence.text_color;
+    let [r, g, b] = ink_rgb(fence.text_color);
+    if crate::ink::is_dark() && [r, g, b] == [20, 20, 20] {
+        // Dark ink: dimming means lighter, towards the backdrop.
+        let v = (20.0 + (1.0 - f) * 90.0).round().clamp(0.0, 255.0) as u8;
+        return Color32::from_rgb(v, v, v);
+    }
     let m = |v: u8| (v as f32 * f).round().clamp(0.0, 255.0) as u8;
     Color32::from_rgb(m(r), m(g), m(b))
 }
@@ -320,7 +335,7 @@ pub fn caption_galley(painter: &egui::Painter, text: &str, width: f32, font: Fon
 #[allow(clippy::too_many_arguments)]
 pub fn paint_item(painter: &egui::Painter, icons: &mut IconCache, item: &DeskItem, cell: Rect, icon: f32, scale: f32, highlight: u8, style: &TextStyle) {
     if highlight > 0 {
-        painter.rect_filled(cell.shrink(2.0 * scale), CornerRadius::same((4.0 * scale) as u8), Color32::from_white_alpha(highlight));
+        painter.rect_filled(cell.shrink(2.0 * scale), CornerRadius::same((4.0 * scale) as u8), if crate::ink::is_dark() { Color32::from_black_alpha(highlight) } else { Color32::from_white_alpha(highlight) });
     }
     let icon_rect = Rect::from_center_size(Pos2::new(cell.center().x, cell.min.y + 6.0 * scale + icon / 2.0), Vec2::splat(icon));
     // In real pixels at the box's own size (the layout preview reuses the boxes' icons).
@@ -343,9 +358,10 @@ pub fn paint_item(painter: &egui::Painter, icons: &mut IconCache, item: &DeskIte
     let pos = Pos2::new(cell.center().x, icon_rect.max.y + 4.0 * scale);
     let clip = painter.with_clip_rect(cell);
     if style.shadow {
-        clip.galley_with_override_text_color(pos + Vec2::splat(1.0 * scale.max(0.6)), galley.clone(), Color32::from_black_alpha(220));
+        clip.galley_with_override_text_color(pos + Vec2::splat(1.0 * scale.max(0.6)), galley.clone(), crate::ink::halo());
     }
-    clip.galley(pos, galley, style.color);
+    // The galley is laid out white: the colour is given here (the box's text colour, or dark ink).
+    clip.galley_with_override_text_color(pos, galley, style.color);
 }
 
 /// Non-interactive drawing of a whole box at `rect` (used by the layout preview).

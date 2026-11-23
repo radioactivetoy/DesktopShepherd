@@ -46,7 +46,7 @@ pub const REGISTRY: &[WidgetKind] = &[
     WidgetKind { id: "sysmon", label: "System monitor", icon: '\u{E9D9}', default_size: [310.0, 270.0], make: || Box::new(SysMon) },
     WidgetKind { id: "laptop", label: "Laptop status", icon: '\u{E83F}', default_size: [300.0, 150.0], make: || Box::new(Laptop) },
     WidgetKind { id: "media", label: "Now playing", icon: '\u{E8D6}', default_size: [360.0, 140.0], make: || Box::new(Media) },
-    WidgetKind { id: "weather", label: "Weather", icon: '\u{E706}', default_size: [330.0, 160.0], make: || Box::new(crate::weather::Weather) },
+    WidgetKind { id: "weather", label: "Weather", icon: '\u{E706}', default_size: [340.0, 330.0], make: || Box::new(crate::weather::Weather) },
     WidgetKind { id: "timer", label: "Timer", icon: '\u{E916}', default_size: [260.0, 190.0], make: || Box::new(crate::timer::Timer) },
     WidgetKind { id: "calendar", label: "Calendar", icon: '\u{E787}', default_size: [290.0, 270.0], make: || Box::new(Calendar) },
     WidgetKind { id: "todo", label: "To-do list", icon: '\u{E73A}', default_size: [290.0, 280.0], make: || Box::new(Todo) },
@@ -74,8 +74,8 @@ impl DeskWidget for Clock {
         let resp = ui
             .vertical_centered(|ui| {
                 ui.add_space(4.0);
-                ui.label(egui::RichText::new(time).size(44.0).color(Color32::WHITE));
-                ui.label(egui::RichText::new(crate::i18n::long_date(now.date_naive())).size(14.0).color(Color32::from_gray(200)));
+                crate::ink::halo_label(ui, time, 44.0, crate::ink::strong());
+                ui.label(egui::RichText::new(crate::i18n::long_date(now.date_naive())).size(14.0).color(crate::ink::gray(200)));
             })
             .response;
         resp.context_menu(|ui| {
@@ -120,7 +120,7 @@ impl DeskWidget for Note {
             egui::TextEdit::multiline(&mut text)
                 .hint_text(t("Type a note…"))
                 .frame(false)
-                .text_color(Color32::from_gray(235)),
+                .text_color(crate::ink::gray(235)),
         );
         let mut out = WidgetOutput::default();
         if r.changed() {
@@ -142,7 +142,7 @@ impl DeskWidget for Sketch {
             data["strokes"] = json!([]);
         }
         let colors = [
-            Color32::WHITE,
+            crate::ink::strong(),
             Color32::from_rgb(255, 99, 99),
             Color32::from_rgb(255, 210, 80),
             Color32::from_rgb(110, 220, 120),
@@ -366,6 +366,10 @@ fn read_now() -> Snapshot {
 }
 
 fn level_color(f: f32) -> Color32 {
+    crate::ink::adapt(level_color_raw(f))
+}
+
+fn level_color_raw(f: f32) -> Color32 {
     if f >= 0.9 {
         Color32::from_rgb(255, 110, 100)
     } else if f >= 0.7 {
@@ -378,15 +382,15 @@ fn level_color(f: f32) -> Color32 {
 /// One line: label, a bar, and the text on the right.
 fn meter(ui: &mut Ui, label: &str, frac: f32, text: &str) {
     ui.horizontal(|ui| {
-        ui.add_sized([40.0, 18.0], egui::Label::new(egui::RichText::new(label).size(13.0).color(Color32::from_gray(210))));
+        ui.add_sized([40.0, 18.0], egui::Label::new(egui::RichText::new(label).size(13.0).color(crate::ink::gray(210))));
         let w = (ui.available_width() - 100.0).max(30.0);
         let (r, _) = ui.allocate_exact_size(egui::vec2(w, 8.0), Sense::hover());
         let p = ui.painter();
-        p.rect_filled(r, 4.0, Color32::from_white_alpha(28));
+        p.rect_filled(r, 4.0, crate::ink::white_alpha(28));
         let mut fill = r;
         fill.set_width(r.width() * frac.clamp(0.0, 1.0));
         p.rect_filled(fill, 4.0, level_color(frac));
-        ui.label(egui::RichText::new(text).size(12.5).color(Color32::from_gray(225)));
+        ui.label(egui::RichText::new(text).size(12.5).color(crate::ink::gray(225)));
     });
 }
 
@@ -422,7 +426,7 @@ impl DeskWidget for SysMon {
 // ---- Calendar -----------------------------------------------------------------------------
 
 fn arrow_button(ui: &mut Ui, glyph: &str) -> bool {
-    ui.add(egui::Button::new(egui::RichText::new(glyph).size(20.0).color(Color32::WHITE)).frame(false)).clicked()
+    ui.add(egui::Button::new(egui::RichText::new(glyph).size(20.0).color(crate::ink::strong())).frame(false)).clicked()
 }
 
 struct Calendar;
@@ -445,7 +449,7 @@ impl DeskWidget for Calendar {
                     if arrow_button(ui, "‹") {
                         shift -= 1;
                     }
-                    let title = egui::RichText::new(crate::i18n::month_year(first)).size(15.0).color(Color32::WHITE);
+                    let title = egui::RichText::new(crate::i18n::month_year(first)).size(15.0).color(crate::ink::strong());
                     let w = (ui.available_width() - 24.0).max(40.0);
                     if ui.add_sized([w, 20.0], egui::Button::new(title).frame(false)).on_hover_text(t("Back to today")).clicked() {
                         shift = 0;
@@ -464,7 +468,7 @@ impl DeskWidget for Calendar {
                 let (head, _) = ui.allocate_exact_size(egui::vec2(cw * 7.0, 18.0), Sense::hover());
                 for (i, n) in names.iter().enumerate() {
                     let c = Pos2::new(head.min.x + cw * (i as f32 + 0.5), head.center().y);
-                    ui.painter().text(c, egui::Align2::CENTER_CENTER, *n, egui::FontId::proportional(11.5), Color32::from_gray(215));
+                    ui.painter().text(c, egui::Align2::CENTER_CENTER, *n, egui::FontId::proportional(11.5), crate::ink::gray(215));
                 }
                 let lead = if sunday_first { first.weekday().num_days_from_sunday() } else { first.weekday().num_days_from_monday() } as i64;
                 let (grid, _) = ui.allocate_exact_size(egui::vec2(cw * 7.0, ch * 6.0), Sense::hover());
@@ -478,7 +482,7 @@ impl DeskWidget for Calendar {
                     if day == today {
                         ui.painter().circle_filled(c, (ch.min(cw) / 2.0 - 1.0).max(7.0), Color32::from_rgb(70, 140, 230));
                     }
-                    let col = if day == today { Color32::WHITE } else { Color32::from_gray(230) };
+                    let col = if day == today { crate::ink::strong() } else { crate::ink::gray(230) };
                     ui.painter().text(c, egui::Align2::CENTER_CENTER, day.day().to_string(), egui::FontId::proportional(13.0), col);
                 }
             })
@@ -551,10 +555,10 @@ impl DeskWidget for Todo {
                             toggle = Some(i);
                         }
                         let mut t = egui::RichText::new(text).size(13.5);
-                        t = if done { t.strikethrough().color(Color32::from_gray(130)) } else { t.color(Color32::from_gray(235)) };
+                        t = if done { t.strikethrough().color(crate::ink::gray(130)) } else { t.color(crate::ink::gray(235)) };
                         let w = (ui.available_width() - 22.0).max(20.0);
                         ui.allocate_ui_with_layout(egui::vec2(w, 18.0), egui::Layout::left_to_right(egui::Align::Center), |ui| ui.add(egui::Label::new(t).truncate()));
-                        if ui.add(egui::Button::new(egui::RichText::new("✕").size(11.0).color(Color32::from_gray(150))).frame(false)).on_hover_text(crate::i18n::t("Delete")).clicked() {
+                        if ui.add(egui::Button::new(egui::RichText::new("✕").size(11.0).color(crate::ink::gray(150))).frame(false)).on_hover_text(crate::i18n::t("Delete")).clicked() {
                             remove = Some(i);
                         }
                     });
@@ -617,12 +621,12 @@ impl DeskWidget for Agenda {
         }
         if urls.is_empty() {
             ui.add_space(6.0);
-            ui.label(egui::RichText::new(t("Right-click here and choose \"Widget settings…\" to add a calendar link (iCal / .ics).")).size(13.0).color(Color32::from_gray(220)));
+            ui.label(egui::RichText::new(t("Right-click here and choose \"Widget settings…\" to add a calendar link (iCal / .ics).")).size(13.0).color(crate::ink::gray(220)));
             ui.add_space(4.0);
             ui.label(
                 egui::RichText::new(t("Google Calendar: Settings > your calendar > \"Secret address in iCal format\". Outlook: Settings > Calendar > Shared calendars > Publish."))
                     .size(11.5)
-                    .color(Color32::from_gray(170)),
+                    .color(crate::ink::gray(170)),
             );
             return out;
         }
@@ -651,9 +655,9 @@ impl DeskWidget for Agenda {
                 let failed = cals.iter().filter(|c| c.error.is_some()).count();
                 if failed > 0 {
                     let first = cals.iter().find_map(|c| c.error.clone()).unwrap_or_default();
-                    child.label(egui::RichText::new(tf("⚠ {} calendar(s) not updated: {}", &[&failed, &first])).size(11.0).color(Color32::from_rgb(255, 190, 130))).on_hover_text(first);
+                    child.label(egui::RichText::new(tf("⚠ {} calendar(s) not updated: {}", &[&failed, &first])).size(11.0).color(crate::ink::adapt(Color32::from_rgb(255, 190, 130)))).on_hover_text(first);
                 } else if cals.iter().any(|c| c.loading && c.events.is_empty()) {
-                    child.label(egui::RichText::new(t("Loading…")).size(11.5).color(Color32::from_gray(170)));
+                    child.label(egui::RichText::new(t("Loading…")).size(11.5).color(crate::ink::gray(170)));
                 }
             }
         }
@@ -679,7 +683,7 @@ impl DeskWidget for Agenda {
                 ui.ctx().request_repaint();
             }
             let alpha = if i == view { 235 } else if resp.hovered() { 160 } else { 90 };
-            ui.painter().circle_filled(c, if i == view { 3.5 } else { 3.0 }, Color32::from_white_alpha(alpha));
+            ui.painter().circle_filled(c, if i == view { 3.5 } else { 3.0 }, crate::ink::white_alpha(alpha));
         }
         out
     }
@@ -763,7 +767,7 @@ fn agenda_edit(ui: &mut Ui, data: &mut Value, urls: &[String], cals: &[crate::ag
             if ui.button(t("Refresh now")).clicked() {
                 crate::agenda::request_refresh();
             }
-            ui.label(egui::RichText::new(t("Calendars are downloaded every 30 minutes while this widget is shown.")).size(11.0).color(Color32::from_gray(150)));
+            ui.label(egui::RichText::new(t("Calendars are downloaded every 30 minutes while this widget is shown.")).size(11.0).color(crate::ink::gray(150)));
     });
     out.changed
 }
@@ -815,7 +819,7 @@ impl DeskWidget for Picture {
         let rect = ui.max_rect();
         if path.is_empty() {
             ui.add_space(6.0);
-            ui.label(egui::RichText::new(t("Right-click here and choose \"Widget settings…\" to pick a picture.")).size(13.0).color(Color32::from_gray(220)));
+            ui.label(egui::RichText::new(t("Right-click here and choose \"Widget settings…\" to pick a picture.")).size(13.0).color(crate::ink::gray(220)));
             return out;
         }
         // The texture, once made, lives in this box's memory; the decoded copy is dropped.
@@ -846,7 +850,7 @@ impl DeskWidget for Picture {
                     }
                 }
                 if let Some(e) = error {
-                    ui.label(egui::RichText::new(format!("⚠ {e}")).size(12.5).color(Color32::from_rgb(255, 190, 130)));
+                    ui.label(egui::RichText::new(format!("⚠ {e}")).size(12.5).color(crate::ink::adapt(Color32::from_rgb(255, 190, 130))));
                     return out;
                 }
                 if made.is_none() {
@@ -978,14 +982,14 @@ fn agenda_day_title(day: chrono::NaiveDate) -> String {
 fn agenda_nav(ui: &mut Ui, title: &str) -> Option<i32> {
     let mut step = None;
     ui.horizontal(|ui| {
-        if ui.add(egui::Button::new(egui::RichText::new("‹").size(18.0).color(Color32::WHITE)).frame(false)).clicked() {
+        if ui.add(egui::Button::new(egui::RichText::new("‹").size(18.0).color(crate::ink::strong())).frame(false)).clicked() {
             step = Some(-1);
         }
         let w = (ui.available_width() - 24.0).max(40.0);
-        if ui.add_sized([w, 20.0], egui::Button::new(egui::RichText::new(title).size(14.0).color(Color32::WHITE)).frame(false)).on_hover_text(t("Back to today")).clicked() {
+        if ui.add_sized([w, 20.0], egui::Button::new(egui::RichText::new(title).size(14.0).color(crate::ink::strong())).frame(false)).on_hover_text(t("Back to today")).clicked() {
             step = Some(0);
         }
-        if ui.add(egui::Button::new(egui::RichText::new("›").size(18.0).color(Color32::WHITE)).frame(false)).clicked() {
+        if ui.add(egui::Button::new(egui::RichText::new("›").size(18.0).color(crate::ink::strong())).frame(false)).clicked() {
             step = Some(1);
         }
     });
@@ -1012,7 +1016,7 @@ fn agenda_month(ui: &mut Ui, cals: &[crate::agenda::CalView], open: &mut Option<
     let ch = ((ui.available_height() - 40.0) / 6.0).clamp(18.0, 44.0);
     let (head, _) = ui.allocate_exact_size(egui::vec2(cw * 7.0, 16.0), Sense::hover());
     for (i, n) in [0, 1, 2, 3, 4, 5, 6].map(crate::i18n::weekday_short).iter().enumerate() {
-        ui.painter().text(Pos2::new(head.min.x + cw * (i as f32 + 0.5), head.center().y), egui::Align2::CENTER_CENTER, *n, egui::FontId::proportional(11.0), Color32::from_gray(200));
+        ui.painter().text(Pos2::new(head.min.x + cw * (i as f32 + 0.5), head.center().y), egui::Align2::CENTER_CENTER, *n, egui::FontId::proportional(11.0), crate::ink::gray(200));
     }
     let lead = first.weekday().num_days_from_monday() as i64;
     let (grid, _) = ui.allocate_exact_size(egui::vec2(cw * 7.0, ch * 6.0), Sense::hover());
@@ -1025,13 +1029,13 @@ fn agenda_month(ui: &mut Ui, cals: &[crate::agenda::CalView], open: &mut Option<
         let evs = agenda_day_events(cals, day);
         let resp = ui.interact(r, ui.id().with(("agenda-day", day)), Sense::click());
         if resp.hovered() && !evs.is_empty() {
-            ui.painter().rect_filled(r.shrink(1.0), 4.0, Color32::from_white_alpha(22));
+            ui.painter().rect_filled(r.shrink(1.0), 4.0, crate::ink::white_alpha(22));
         }
         let num_c = Pos2::new(r.center().x, r.min.y + (ch * 0.42).min(14.0));
         if day == today {
             ui.painter().circle_filled(num_c, 9.5, Color32::from_rgb(70, 140, 230));
         }
-        ui.painter().text(num_c, egui::Align2::CENTER_CENTER, day.day().to_string(), egui::FontId::proportional(12.5), Color32::from_gray(if day == today { 255 } else { 230 }));
+        ui.painter().text(num_c, egui::Align2::CENTER_CENTER, day.day().to_string(), egui::FontId::proportional(12.5), crate::ink::gray(if day == today { 255 } else { 230 }));
         // One dot per calendar with events that day (at most three).
         let mut seen: Vec<usize> = Vec::new();
         for (ci, _) in &evs {
@@ -1079,7 +1083,7 @@ fn agenda_week(ui: &mut Ui, cals: &[crate::agenda::CalView], open: &mut Option<A
         let day = monday + chrono::Duration::days(i);
         let col = egui::Rect::from_min_size(Pos2::new(area.min.x + cw * i as f32, top), egui::vec2(cw, height));
         if i > 0 {
-            ui.painter().line_segment([col.left_top(), col.left_bottom()], egui::Stroke::new(1.0_f32, Color32::from_white_alpha(18)));
+            ui.painter().line_segment([col.left_top(), col.left_bottom()], egui::Stroke::new(1.0_f32, crate::ink::white_alpha(18)));
         }
         let evs = agenda_day_events(cals, day);
         // Day name and number (today highlighted); click = the whole day.
@@ -1088,10 +1092,10 @@ fn agenda_week(ui: &mut Ui, cals: &[crate::agenda::CalView], open: &mut Option<A
         if day == today {
             ui.painter().rect_filled(head.shrink(2.0), 4.0, Color32::from_rgb(70, 140, 230).linear_multiply(0.6));
         } else if hresp.hovered() && !evs.is_empty() {
-            ui.painter().rect_filled(head.shrink(2.0), 4.0, Color32::from_white_alpha(22));
+            ui.painter().rect_filled(head.shrink(2.0), 4.0, crate::ink::white_alpha(22));
         }
-        ui.painter().text(Pos2::new(head.center().x, head.min.y + 8.0), egui::Align2::CENTER_CENTER, wd_abbr(day), egui::FontId::proportional(10.5), Color32::from_gray(205));
-        ui.painter().text(Pos2::new(head.center().x, head.min.y + 21.0), egui::Align2::CENTER_CENTER, day.day().to_string(), egui::FontId::proportional(13.0), Color32::WHITE);
+        ui.painter().text(Pos2::new(head.center().x, head.min.y + 8.0), egui::Align2::CENTER_CENTER, wd_abbr(day), egui::FontId::proportional(10.5), crate::ink::gray(205));
+        ui.painter().text(Pos2::new(head.center().x, head.min.y + 21.0), egui::Align2::CENTER_CENTER, day.day().to_string(), egui::FontId::proportional(13.0), crate::ink::strong());
         if hresp.clicked() && !evs.is_empty() {
             *open = Some((agenda_day_title(day), evs.clone()));
         }
@@ -1104,8 +1108,8 @@ fn agenda_week(ui: &mut Ui, cals: &[crate::agenda::CalView], open: &mut Option<A
             let resp = ui.interact(r, ui.id().with(("agenda-chip", day, k)), Sense::click());
             ui.painter().rect_filled(r, 3.0, color.linear_multiply(if resp.hovered() { 0.75 } else { 0.5 }));
             let text = if e.all_day || e.start.date() != day { e.title.clone() } else { format!("{} {}", e.start.format("%H:%M"), e.title) };
-            let g = ui.painter().layout_no_wrap(text, egui::FontId::proportional(11.0), Color32::WHITE);
-            ui.painter().with_clip_rect(r.shrink(2.0)).galley(Pos2::new(r.min.x + 3.0, r.center().y - g.size().y / 2.0), g, Color32::WHITE);
+            let g = ui.painter().layout_no_wrap(text, egui::FontId::proportional(11.0), crate::ink::strong());
+            ui.painter().with_clip_rect(r.shrink(2.0)).galley(Pos2::new(r.min.x + 3.0, r.center().y - g.size().y / 2.0), g, crate::ink::strong());
             if resp.clicked() {
                 *open = Some((agenda_day_title(day), vec![(*ci, e.clone())]));
             }
@@ -1114,7 +1118,7 @@ fn agenda_week(ui: &mut Ui, cals: &[crate::agenda::CalView], open: &mut Option<A
         if evs.len() > shown {
             let r = egui::Rect::from_min_size(Pos2::new(col.min.x + 2.0, col.min.y + 34.0 + shown as f32 * (chip_h + 2.0)), egui::vec2(cw - 4.0, chip_h));
             let resp = ui.interact(r, ui.id().with(("agenda-more", day)), Sense::click());
-            ui.painter().text(r.center(), egui::Align2::CENTER_CENTER, format!("+{}", evs.len() - shown), egui::FontId::proportional(11.5), Color32::from_gray(if resp.hovered() { 255 } else { 200 }));
+            ui.painter().text(r.center(), egui::Align2::CENTER_CENTER, format!("+{}", evs.len() - shown), egui::FontId::proportional(11.5), crate::ink::gray(if resp.hovered() { 255 } else { 200 }));
             if resp.clicked() {
                 *open = Some((agenda_day_title(day), evs.clone()));
             }
@@ -1151,7 +1155,7 @@ fn agenda_list(ui: &mut Ui, cals: &[crate::agenda::CalView], days: i64, open: &m
     let status_h = if cals.iter().any(|c| c.error.is_some() || (c.loading && c.events.is_empty())) { 20.0 } else { 0.0 };
     egui::ScrollArea::vertical().max_height((ui.available_height() - status_h).max(30.0)).auto_shrink([false, true]).show(ui, |ui| {
         if rows.is_empty() && cals.iter().all(|c| !c.loading) {
-            ui.label(egui::RichText::new(tf("Nothing in the next {} days.", &[&days])).size(13.0).color(Color32::from_gray(190)));
+            ui.label(egui::RichText::new(tf("Nothing in the next {} days.", &[&days])).size(13.0).color(crate::ink::gray(190)));
         }
         let mut last_day = None;
         for (k, (day, ci, e)) in rows.iter().enumerate() {
@@ -1163,20 +1167,20 @@ fn agenda_list(ui: &mut Ui, cals: &[crate::agenda::CalView], days: i64, open: &m
                     _ => crate::i18n::long_date(*day),
                 };
                 ui.add_space(3.0);
-                ui.label(egui::RichText::new(label).size(12.0).strong().color(Color32::from_gray(200)));
+                ui.label(egui::RichText::new(label).size(12.0).strong().color(crate::ink::gray(200)));
             }
             let (r, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 19.0), Sense::click());
             let resp = ui.interact(r, ui.id().with(("agenda-row", k)), Sense::click()).union(resp);
             if resp.hovered() {
-                ui.painter().rect_filled(r, 3.0, Color32::from_white_alpha(22));
+                ui.painter().rect_filled(r, 3.0, crate::ink::white_alpha(22));
             }
             ui.painter().circle_filled(Pos2::new(r.min.x + 5.0, r.center().y), 3.5, CAL_COLORS[ci % CAL_COLORS.len()]);
             let when = if e.all_day { t("all day").to_string() } else { e.start.format("%H:%M").to_string() };
-            ui.painter().text(Pos2::new(r.min.x + 14.0, r.center().y), egui::Align2::LEFT_CENTER, when, egui::FontId::proportional(12.5), Color32::from_gray(185));
+            ui.painter().text(Pos2::new(r.min.x + 14.0, r.center().y), egui::Align2::LEFT_CENTER, when, egui::FontId::proportional(12.5), crate::ink::gray(185));
             let happening = !e.all_day && e.start <= now && now < e.end;
-            let g = ui.painter().layout_no_wrap(e.title.clone(), egui::FontId::proportional(13.0), if happening { Color32::WHITE } else { Color32::from_gray(230) });
+            let g = ui.painter().layout_no_wrap(e.title.clone(), egui::FontId::proportional(13.0), if happening { crate::ink::strong() } else { crate::ink::gray(230) });
             let text_r = egui::Rect::from_min_max(Pos2::new(r.min.x + 62.0, r.min.y), r.max);
-            ui.painter().with_clip_rect(text_r).galley(Pos2::new(text_r.min.x, r.center().y - g.size().y / 2.0), g, Color32::WHITE);
+            ui.painter().with_clip_rect(text_r).galley(Pos2::new(text_r.min.x, r.center().y - g.size().y / 2.0), g, crate::ink::strong());
             if resp.clicked() {
                 *open = Some((agenda_day_title(*day), vec![(*ci, (*e).clone())]));
             }
@@ -1188,10 +1192,10 @@ fn agenda_list(ui: &mut Ui, cals: &[crate::agenda::CalView], days: i64, open: &m
 fn agenda_details(ui: &mut Ui, (heading, evs): &AgendaDetails, names: &[String]) -> bool {
     let mut back = false;
     ui.horizontal(|ui| {
-        if ui.add(egui::Button::new(egui::RichText::new(t("‹ Back")).size(13.0).color(Color32::from_gray(220))).frame(false)).clicked() {
+        if ui.add(egui::Button::new(egui::RichText::new(t("‹ Back")).size(13.0).color(crate::ink::gray(220))).frame(false)).clicked() {
             back = true;
         }
-        ui.label(egui::RichText::new(heading).size(13.0).strong().color(Color32::WHITE));
+        ui.label(egui::RichText::new(heading).size(13.0).strong().color(crate::ink::strong()));
     });
     ui.add_space(2.0);
     egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
@@ -1203,7 +1207,7 @@ fn agenda_details(ui: &mut Ui, (heading, evs): &AgendaDetails, names: &[String])
             ui.horizontal(|ui| {
                 let (r, _) = ui.allocate_exact_size(egui::vec2(10.0, 18.0), Sense::hover());
                 ui.painter().circle_filled(r.center(), 4.0, CAL_COLORS[ci % CAL_COLORS.len()]);
-                ui.add(egui::Label::new(egui::RichText::new(&e.title).size(14.5).strong().color(Color32::WHITE)).wrap());
+                ui.add(egui::Label::new(egui::RichText::new(&e.title).size(14.5).strong().color(crate::ink::strong())).wrap());
             });
             let when = if e.all_day {
                 let last = e.end.date() - chrono::Duration::days(1);
@@ -1222,16 +1226,16 @@ fn agenda_details(ui: &mut Ui, (heading, evs): &AgendaDetails, names: &[String])
             } else {
                 format!("{}, {}", wd_date(e.start.date()), e.start.format("%H:%M"))
             };
-            ui.label(egui::RichText::new(when).size(12.5).color(Color32::from_gray(215)));
+            ui.label(egui::RichText::new(when).size(12.5).color(crate::ink::gray(215)));
             if let Some(n) = names.get(*ci) {
-                ui.label(egui::RichText::new(n).size(11.5).color(Color32::from_gray(165)));
+                ui.label(egui::RichText::new(n).size(11.5).color(crate::ink::gray(165)));
             }
             if !e.location.is_empty() {
-                ui.add(egui::Label::new(egui::RichText::new(tf("Where: {}", &[&e.location])).size(12.5).color(Color32::from_gray(225))).wrap());
+                ui.add(egui::Label::new(egui::RichText::new(tf("Where: {}", &[&e.location])).size(12.5).color(crate::ink::gray(225))).wrap());
             }
             if !e.description.is_empty() {
                 ui.add_space(2.0);
-                ui.add(egui::Label::new(egui::RichText::new(&*e.description).size(12.5).color(Color32::from_gray(205))).wrap());
+                ui.add(egui::Label::new(egui::RichText::new(&*e.description).size(12.5).color(crate::ink::gray(205))).wrap());
             }
         }
     });
@@ -1371,11 +1375,11 @@ fn laptop_now() -> LaptopInfo {
 /// One status line: icon, text, and a small detail on the right.
 fn status_line(ui: &mut Ui, icon: char, text: &str, detail: &str, color: Color32) {
     ui.horizontal(|ui| {
-        ui.add_sized([24.0, 22.0], egui::Label::new(egui::RichText::new(icon.to_string()).size(17.0).color(color)));
-        ui.add(egui::Label::new(egui::RichText::new(text).size(13.5).color(Color32::from_gray(235))).truncate());
+        ui.add_sized([24.0, 22.0], egui::Label::new(egui::RichText::new(icon.to_string()).size(17.0).color(crate::ink::adapt(color))));
+        ui.add(egui::Label::new(egui::RichText::new(text).size(13.5).color(crate::ink::gray(235))).truncate());
         if !detail.is_empty() {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(egui::RichText::new(detail).size(12.0).color(Color32::from_gray(175)));
+                ui.label(egui::RichText::new(detail).size(12.0).color(crate::ink::gray(175)));
             });
         }
     });
@@ -1399,13 +1403,13 @@ impl DeskWidget for Laptop {
                 status_line(ui, icon, &tf("Battery {} %", &[&pct]), &detail, level_color(1.0 - pct as f32 / 100.0));
                 // The charge as a bar.
                 let (r, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 6.0), Sense::hover());
-                ui.painter().rect_filled(r, 3.0, Color32::from_white_alpha(28));
+                ui.painter().rect_filled(r, 3.0, crate::ink::white_alpha(28));
                 let mut fill = r;
                 fill.set_width(r.width() * pct as f32 / 100.0);
                 ui.painter().rect_filled(fill, 3.0, if pct <= 15 { Color32::from_rgb(255, 110, 100) } else { Color32::from_rgb(110, 210, 120) });
                 ui.add_space(4.0);
             }
-            None => status_line(ui, '\u{E83E}', t("No battery (plugged in)"), "", Color32::from_gray(170)),
+            None => status_line(ui, '\u{E83E}', t("No battery (plugged in)"), "", crate::ink::gray(170)),
         }
         match &info.wifi {
             Some(Some((name, q))) => {
@@ -1417,14 +1421,14 @@ impl DeskWidget for Laptop {
                 };
                 status_line(ui, '\u{E701}', name, &format!("{bars} {q} %"), Color32::from_rgb(110, 190, 255));
             }
-            Some(None) => status_line(ui, '\u{EB5E}', t("Wi-Fi: not connected"), "", Color32::from_gray(170)),
-            None => status_line(ui, '\u{EB5E}', t("No Wi-Fi"), "", Color32::from_gray(140)),
+            Some(None) => status_line(ui, '\u{EB5E}', t("Wi-Fi: not connected"), "", crate::ink::gray(170)),
+            None => status_line(ui, '\u{EB5E}', t("No Wi-Fi"), "", crate::ink::gray(140)),
         }
         match &info.bluetooth {
             Some((true, names)) if !names.is_empty() => status_line(ui, '\u{E702}', &names.join(", "), t("connected"), Color32::from_rgb(110, 190, 255)),
             Some((true, _)) => status_line(ui, '\u{E702}', t("Bluetooth on"), t("nothing connected"), Color32::from_rgb(110, 190, 255)),
-            Some((false, _)) => status_line(ui, '\u{E702}', t("Bluetooth off"), "", Color32::from_gray(150)),
-            None => status_line(ui, '\u{E702}', t("No Bluetooth"), "", Color32::from_gray(140)),
+            Some((false, _)) => status_line(ui, '\u{E702}', t("Bluetooth off"), "", crate::ink::gray(150)),
+            None => status_line(ui, '\u{E702}', t("No Bluetooth"), "", crate::ink::gray(140)),
         }
         WidgetOutput { changed: false, repaint_after: Some(Duration::from_secs(5)) }
     }
@@ -1636,7 +1640,7 @@ impl DeskWidget for Media {
                     ui.ctx().request_repaint();
                 }
                 let alpha = if i == idx { 235 } else if resp.hovered() { 160 } else { 90 };
-                ui.painter().circle_filled(c, if i == idx { 3.5 } else { 3.0 }, Color32::from_white_alpha(alpha));
+                ui.painter().circle_filled(c, if i == idx { 3.5 } else { 3.0 }, crate::ink::white_alpha(alpha));
             }
             full.max.y -= 12.0;
         }
@@ -1659,8 +1663,8 @@ impl DeskWidget for Media {
             }
             None => {
                 ui.ctx().data_mut(|d| d.remove::<(u64, egui::TextureHandle)>(tid));
-                ui.painter().rect_filled(art_rect, 8.0, Color32::from_white_alpha(18));
-                ui.painter().text(art_rect.center(), egui::Align2::CENTER_CENTER, "\u{E8D6}", egui::FontId::proportional(side * 0.4), Color32::from_gray(170));
+                ui.painter().rect_filled(art_rect, 8.0, crate::ink::white_alpha(18));
+                ui.painter().text(art_rect.center(), egui::Align2::CENTER_CENTER, "\u{E8D6}", egui::FontId::proportional(side * 0.4), crate::ink::gray(170));
             }
         }
         // Right side: app, title, artist, controls, progress; centred vertically.
@@ -1673,12 +1677,12 @@ impl DeskWidget for Media {
             let g = p.layout_no_wrap(text.to_string(), egui::FontId::proportional(size), color);
             p.galley(Pos2::new(x0, y), g, color);
         };
-        line(&p, y, &app_label(&m.app).to_uppercase(), 10.5, Color32::from_gray(150));
+        line(&p, y, &app_label(&m.app).to_uppercase(), 10.5, crate::ink::gray(150));
         y += 15.0;
-        line(&p, y, if m.title.is_empty() { t("(no title)") } else { &m.title }, 16.0, Color32::WHITE);
+        line(&p, y, if m.title.is_empty() { t("(no title)") } else { &m.title }, 16.0, crate::ink::strong());
         y += 22.0;
         if !m.artist.is_empty() {
-            line(&p, y, &m.artist, 13.0, Color32::from_gray(200));
+            line(&p, y, &m.artist, 13.0, crate::ink::gray(200));
             y += 19.0;
         }
         // Controls: previous, a round play/pause button, next.
@@ -1691,10 +1695,10 @@ impl DeskWidget for Media {
         let play = button(ui, mid, 19.0, "play").on_hover_text(if m.playing { t("Pause") } else { t("Play") });
         let next = button(ui, Pos2::new(mid.x + 44.0, cy), 15.0, "next").on_hover_text(t("Next"));
         let pa = ui.painter();
-        let dim = |r: &egui::Response| if r.hovered() { Color32::WHITE } else { Color32::from_gray(210) };
+        let dim = |r: &egui::Response| if r.hovered() { crate::ink::strong() } else { crate::ink::gray(210) };
         pa.text(Pos2::new(mid.x - 44.0, cy), egui::Align2::CENTER_CENTER, "\u{E892}", egui::FontId::proportional(17.0), dim(&prev));
         pa.text(Pos2::new(mid.x + 44.0, cy), egui::Align2::CENTER_CENTER, "\u{E893}", egui::FontId::proportional(17.0), dim(&next));
-        pa.circle_filled(mid, if play.hovered() { 19.0 } else { 18.0 }, Color32::WHITE);
+        pa.circle_filled(mid, if play.hovered() { 19.0 } else { 18.0 }, crate::ink::strong());
         pa.text(mid + egui::vec2(if m.playing { 0.0 } else { 1.5 }, 0.0), egui::Align2::CENTER_CENTER, if m.playing { "\u{E769}" } else { "\u{E768}" }, egui::FontId::proportional(16.0), Color32::from_rgb(20, 20, 24));
         if prev.clicked() {
             media_command(0, m.app.clone());
@@ -1712,12 +1716,12 @@ impl DeskWidget for Media {
             let now = if m.playing { pos + read_at.elapsed().as_secs_f64() } else { pos };
             let now = now.min(end);
             let bar = egui::Rect::from_min_size(Pos2::new(x0, y + 4.0), egui::vec2(w, 4.0));
-            pa.rect_filled(bar, 2.0, Color32::from_white_alpha(40));
+            pa.rect_filled(bar, 2.0, crate::ink::white_alpha(40));
             let mut done = bar;
             done.set_width(bar.width() * (now / end).clamp(0.0, 1.0) as f32);
-            pa.rect_filled(done, 2.0, Color32::from_gray(230));
-            pa.text(Pos2::new(x0, y + 10.0), egui::Align2::LEFT_TOP, mmss(now), egui::FontId::proportional(10.5), Color32::from_gray(160));
-            pa.text(Pos2::new(x0 + w, y + 10.0), egui::Align2::RIGHT_TOP, mmss(end), egui::FontId::proportional(10.5), Color32::from_gray(160));
+            pa.rect_filled(done, 2.0, crate::ink::gray(230));
+            pa.text(Pos2::new(x0, y + 10.0), egui::Align2::LEFT_TOP, mmss(now), egui::FontId::proportional(10.5), crate::ink::gray(160));
+            pa.text(Pos2::new(x0 + w, y + 10.0), egui::Align2::RIGHT_TOP, mmss(end), egui::FontId::proportional(10.5), crate::ink::gray(160));
             if m.playing {
                 repaint = Duration::from_secs(1); // the seconds move on
             }
