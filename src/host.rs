@@ -54,6 +54,8 @@ struct Shared {
     dropped: Vec<std::path::PathBuf>,
     cursor: egui::CursorIcon,
     no_activate: bool,
+    /// A box window (not a menu or settings panel): it must stay behind other programs' windows.
+    is_box: bool,
     /// Something happened to the window (input, move, resize, DPI): draw it on the next pass.
     dirty: bool,
     /// Panels only: the close button (or Alt+F4) was used; boxes never close.
@@ -340,6 +342,26 @@ unsafe extern "system" fn wndproc(h: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LR
         }
         // No visible frame: the whole window is the box (kept harmless for old frame tricks).
         WM_NCCALCSIZE if wp.0 != 0 => LRESULT(0),
+        WM_WINDOWPOSCHANGING if lp.0 != 0 => {
+            // A widget box takes the keyboard when clicked, and Windows lifts a window that becomes
+            // active to the top. Boxes stay behind other windows: drop the z-order part of any move
+            // that isn't our own restacking (which always passes SWP_NOACTIVATE).
+            if shared.lock().map(|s| s.is_box).unwrap_or(false) {
+                let pos = &mut *(lp.0 as *mut WINDOWPOS);
+                if (pos.flags & SWP_NOZORDER).0 == 0 && (pos.flags & SWP_NOACTIVATE).0 == 0 {
+                    pos.flags |= SWP_NOZORDER;
+                }
+            }
+            DefWindowProcW(h, m, wp, lp)
+        }
+        WM_ACTIVATE => {
+            // Safety net: a box that became active is sent back just above the desktop (it keeps
+            // the keyboard; the move is asynchronous and never activates anything).
+            if (wp.0 & 0xFFFF) != 0 && shared.lock().map(|s| s.is_box).unwrap_or(false) {
+                crate::desktop::send_to_bottom(h.0 as isize);
+            }
+            DefWindowProcW(h, m, wp, lp)
+        }
         WM_MOUSEACTIVATE => {
             // Part of the desktop: clicking a box does not bring it in front of apps.
             if shared.lock().map(|s| s.no_activate).unwrap_or(true) {
@@ -685,7 +707,7 @@ impl HostSystem {
                 inst,
                 None,
             )?;
-            let shared = Arc::new(Mutex::new(Shared { no_activate: true, ..Default::default() }));
+            let shared = Arc::new(Mutex::new(Shared { no_activate: true, is_box: true, ..Default::default() }));
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, Arc::into_raw(shared.clone()) as isize);
             DragAcceptFiles(hwnd, true);
             let made = match &self.compositor {
