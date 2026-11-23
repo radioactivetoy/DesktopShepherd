@@ -3,3 +3,4 @@ shots/
 *.log
 layout.json.tmp
 /dist
+.cargo/config.toml

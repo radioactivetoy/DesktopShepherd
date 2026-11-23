@@ -5,9 +5,10 @@
 - Rust stable, **GNU** target (`stable-x86_64-pc-windows-gnu`), tested with rustc 1.100.
 - This machine's GNU toolchain has no binutils `as` and no full set of Windows import
   libraries. Three workarounds are in the repo:
-  1. `.cargo/config.toml` points rustc at the toolchain's bundled `dlltool.exe`
-     (absolute path – adjust it on another computer, or delete the file when using the
-     MSVC toolchain).
+  1. `.cargo/config.toml` points rustc at the toolchain's bundled `dlltool.exe`. It holds a
+     personal absolute path, so it is not in the repository: copy
+     `.cargo/config.example.toml` to `.cargo/config.toml` and put your user folder in the
+     path (not needed with the MSVC toolchain).
   2. `lib/libshlwapi.a` is a stand-in import library (a copy of the `windows_x86_64_gnu`
      0.52.6 `libwindows.0.52.0.a`); `build.rs` adds `lib/` to the link search path.
   3. Crates that use `raw-dylib` (which needs dlltool/`as` combos that fail here) are
