@@ -48,6 +48,7 @@ jobs:
           Copy-Item target\dist\desktopshepherd.exe portable\DesktopShepherd.exe
           "DesktopShepherd portable: settings are kept in the 'data' folder next to the program. Delete this file to use your user profile instead." | Set-Content portable\portable.txt
           Copy-Item README.md portable\README.md
+          Copy-Item LICENSE portable\LICENSE.txt
           Compress-Archive -Path portable\* -DestinationPath "out\DesktopShepherd-Portable-$ver.zip"
           Get-ChildItem out | Format-Table Name, Length
 
