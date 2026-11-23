@@ -1,139 +1,227 @@
 # DesktopShepherd
 
-A lightweight Windows 11 desktop icon organizer: translucent, frosted "boxes" (fences) that sit
-on the desktop, behind every window, and hold your desktop files, folders and shortcuts. It is
-an original Rust program; its behaviour was modelled on an existing desktop organizer the owner uses
-(defaults and formulas are listed in `MECHANICS.md` / `mechanics.json`).
+**Tidy, frosted-glass boxes for your Windows 11 desktop icons. Light on resources, safe by design.**
 
-> The executable and data folder are still called **DesktopShepherd** (`desktopshepherd.exe`,
-> `%APPDATA%\DesktopShepherd`). Renaming is a listed todo in `docs/STATUS.md`.
+[Download the latest release](https://github.com/radioactivetoy/DesktopShepherd/releases/latest)
+(Setup or Portable) - current version: 0.2.0-beta.2
 
-## Priorities (do not break these)
+<img src="docs/screenshots/overview.png" alt="DesktopShepherd boxes on a Windows 11 desktop" width="100%">
 
-1. **Stability** – never freeze Explorer, never lose the desktop icons, never lose the layout.
-2. **Performance** – ~0 % CPU when idle, low memory, nothing injected into other processes.
-3. **Extensibility** – widgets (clock, note, sketch) live in `src/widgets.rs`; new kinds need no
-   file-format change.
+*Translucent boxes hold your icons and widgets, and sit right on the desktop.*
+
+Wallpaper in the screenshots: artwork by Simon Stålenhag (https://www.simonstalenhag.se/).
+
+## What it is
+
+DesktopShepherd puts translucent, frosted-glass boxes on your Windows 11 desktop. Boxes hold your
+desktop files, folders and shortcuts, or small widgets such as a clock, weather or a calendar.
+The boxes sit behind your windows, like the desktop itself, and the program uses very little
+memory and almost no processor time while you work. Its behaviour follows the idea of the
+commercial desktop organizers, but it is an original program written in Rust.
+
+## Principles
+
+These rules decide what goes in and what stays out.
+
+- **Stability first.** DesktopShepherd never hooks into or injects code into Explorer, so it
+  cannot freeze it. Windows' own desktop icons are hidden while it runs, and a tiny supervisor
+  process always gives them back, even after a crash. If the app crashes it is restarted
+  (waiting a bit longer after each failure in a row). Your layout is saved atomically, with
+  dated backups.
+- **Performance.** About 0 % CPU when idle, and no continuous redrawing: a box is redrawn only
+  when something changes. Measured on a Windows 11 PC: the main process uses about 98 MB of
+  memory (about 78 MB private) and about 0.02 % CPU at idle; the supervisor uses about 2 MB.
+- **Privacy.** No telemetry, ever. Online features only work when you turn them on or add them:
+  weather (from Open-Meteo), agenda calendar links, and an optional once-a-day check for new
+  versions. They use Windows' own WinHTTP, run in the background, and send nothing about you.
+- **Native look.** Real Windows glass (the same effect as the taskbar and Start menu), Segoe UI
+  and Fluent icons, your Windows accent colour, light and dark menus.
+- **No web engine, no Electron.** It is Rust with its own small DirectX 11 renderer and egui for
+  the interface. If your graphics card is weak (or over Remote Desktop) it falls back to
+  software DirectX (WARP), and if glass cannot start at all, to plain windows with a solid dark
+  background.
 
 ## Features
 
-- Boxes with title, tabs, roll-up (expand on hover), lock, rename, delete, auto-sort box with
-  user-editable category rules (name + extensions).
-- Real frosted glass via Windows composition (DirectX): per-box tint colour, opacity,
-  blur amount, rounded corners; boxes move smoothly with no flicker. On weak GPUs or Remote
-  Desktop it uses Windows' software DirectX (WARP) instead.
-- Select one/many icons (click, Ctrl/Shift, rubber band), drag them between boxes with a
-  flying icon under the cursor; open, show in folder, sort (manual, name, size, type, date,
-  times opened).
-- Hides Windows' own desktop icons while running; a supervisor process gives them back after
-  any exit or crash and restarts the app after a crash or failed start, waiting longer after
-  each failure in a row (2 s up to 5 min).
-- Snapping: while you move or resize a box, its edges jump onto other boxes (side by side, or
-  lined up) and onto the screen edges, with an adjustable gap (default 8 pt). Hold Alt to place a
-  box freely; both options are in Settings > Desktop.
-  Optionally also snap to a grid (Settings > Desktop, off by default, 20 pt).
-- Quick search: a global shortcut (default Ctrl+Shift+Space, changeable or off in Settings >
-  Desktop) opens a search box at the top of the main monitor. It finds any desktop item by name
-  (also by file type, or by letters in order, e.g. "vsc" finds Visual Studio Code) and shows the
-  box each item is in. Enter opens it, Ctrl+Enter opens its folder, Esc closes. Also in the tray
-  menu and the box menu ("Search desktop").
-- "More options..." in the icon right-click menu opens Windows' own context menu for the item
-  (7-Zip, Defender, OneDrive, Send to, Open with...). With several icons selected, the others in
-  the same folder are included. It runs inside DesktopShepherd, never inside Explorer.
-- Type to jump: when the desktop itself is in front, typing a letter or digit jumps to the next
-  icon that starts with it (same letter again = next one), Enter opens the selected icon. Settings >
-  Desktop "Typing on the desktop": does nothing / jumps to the icon (default) / starts a quick search.
-- Look options per box (box menu > Personalize…, its own window; font from a list): any colour with opacity, border thickness and
-  colour, text colour, text shadow, title and text size, font, names under icons on/off, icon
-  size and spacing, and "Apply this look to all boxes".
-- Windows' own right-click menu for icons (Win 11 style, all shell extensions), shown by a
-  short-lived helper process (`--shell-menu`), so no shell extension ever loads into the app.
-- Keyboard inside boxes: arrows move the selection, Enter opens, Delete sends to the Recycle Bin,
-  F2 renames, Ctrl+A selects all, Ctrl+C / Ctrl+X / Ctrl+V copy, cut and paste files (pasting into
-  a box copies the files to the desktop and puts them in that box).
-- Folder boxes (box menu > New > Folder box…): show a folder's contents live, e.g. Downloads.
-- Category rules for the auto-sort box: by file type, by name pattern (`*invoice*`) and by age
-  ("changed in the last N days").
-- Hide / show all boxes with a shortcut (default Ctrl+Alt+D, changeable) or the tray menu.
-- Pages of boxes: each box belongs to a page; Ctrl+Alt+PageDown / PageUp or the tray switch
-  pages; box menu > "Move to page".
-- When icons don't fit a box: scroll (default) or "pages with dots" (box menu > View); the wheel
-  or the dots flip pages.
-- Remember box positions per monitor setup (laptop alone / docked), Settings > Monitors.
-- Create a box or widget anywhere: **Ctrl+Alt+B** (or tray / box menu "Draw a new box…") dims the
-  screen, drag a rectangle, then pick Box, Folder box or a widget; it fills that rectangle. "New ▸"
-  in a box menu creates it where you right-clicked. The desktop's own right-click menu gets
-  "DesktopShepherd ▸" (draw, new box / folder box / widget here; on Windows 11 under "Show more
-  options"; Settings > Desktop to turn off). These are plain registry menu entries that start the
-  program: nothing runs inside Explorer.
-- Settings > Layout: all monitors together or one at a time (dots), labelled by role or display.
-- Undo: a deleted box can be brought back ("Undo" note for 8 s, tray, Settings > Boxes). Settings >
-  Layout: export / import the whole layout as a file.
-- Optional: boxes fade while the mouse is away (level and delay in Settings > Desktop).
-- Optional: each Windows virtual desktop shows its own page of boxes; boxes always come along to
-  the desktop shown.
-- Box title off, on the left, at the top or at the bottom (Personalize).
-- Quick search also finds Start menu programs (optional).
-- English, Spanish and Catalan; "Automatic" follows Windows' display language (Settings).
-- Keyboard shortcut per box (box menu > Keyboard shortcut: Ctrl+Alt+F2..F10) brings the box into
-  view (switching page or showing hidden boxes), pressed again rolls it up or down.
-- New, renamed and removed desktop files show up within about a second (Windows change
-  notifications, no polling).
-- Widgets: clock, sticky note, drawing pad, picture frame (PNG/JPEG, fit or fill), system monitor
-  (CPU, RAM, drives), laptop status (battery, Wi-Fi, Bluetooth), now playing (Spotify, Apple Music,
-  browsers… with cover, controls and progress), calendar, to-do
-  list, search box, agenda (online calendars: iCal / .ics links from Google, Outlook…; repeating
-  events supported). Three views (month, week, agenda list) switched with the dots at the
-  bottom; a click on an event or a day shows its details (time, calendar, place, description). Widget options: box menu > "Widget settings…". Each redraws only when needed (clock: each minute, monitor: every 2 s,
-  calendar: at midnight, the others only on input).
-- Multi-monitor: boxes follow a monitor **role** (main/second…) or stay on a **fixed** monitor.
-- Tray icon, Windows 11 style menus and settings page, start with Windows, low CPU priority,
-  layout backups.
-- No telemetry, no web engine, no Explorer hooks. Online features only when you turn them on (e.g.
-  the agenda downloads only the calendar links you add).
+### Boxes
 
-## Build and run
+- Title on the left, top, bottom, or off; tabs inside a box; lock; rename; delete.
+- Roll up a box to its title bar, and open it again just by hovering.
+- Pages of boxes (dots show the page; Ctrl+Alt+PageDown / PageUp or the tray icon switch pages).
+- When icons do not fit: scroll, or "pages with dots".
+- **Folder boxes** show the live contents of a folder, for example Downloads.
+- **Auto-sort box** with your own category rules: by file type, name pattern (`*invoice*`) or age.
+- **Snapping** to other boxes and screen edges, with an adjustable gap, and an optional grid.
+  Hold Alt to place a box freely.
+- **Draw a box anywhere:** press Ctrl+Alt+B, drag a rectangle, choose Box, Folder box or a widget.
+  Or use "New" in the desktop right-click menu: the box appears where you clicked.
+- A keyboard shortcut per box (Ctrl+Alt+F2 to F10) brings it into view; press again to roll it
+  up or down.
+- Hide or show all boxes with one shortcut (default Ctrl+Alt+D) or from the tray menu.
+- Multi-monitor: a box follows a monitor's role (main, second...) or stays on one fixed
+  monitor. Positions are remembered separately for each monitor setup (for example laptop alone
+  or docked).
+- Optional: boxes fade while the mouse is away.
+- Optional: each Windows virtual desktop shows its own page of boxes.
 
-See `docs/BUILDING.md` for the toolchain quirks (read it first – **never run `cargo update`**).
+### Icons
 
-```powershell
-cargo build                      # debug profile is already optimised (opt-level 3)
-.\target\debug\desktopshepherd.exe      # starts the supervisor, which starts the --worker
-cargo build --release            # smaller/faster binary in target\release
-```
+- Select with a click, Ctrl/Shift or a rubber band; drag icons between boxes.
+- Explorer-style Ctrl+C / Ctrl+X / Ctrl+V. Files copied anywhere (also from Explorer) paste into
+  the box under the mouse.
+- F2 renames in place, Delete sends to the Recycle Bin, Enter opens, arrow keys move the selection.
+- Windows' own right-click menu ("More options" shows the full one with 7-Zip, Send to, Open
+  with...). It runs in a short-lived helper process, never inside Explorer.
+- Type to jump: with the desktop in front, type a letter to jump to the next icon starting with
+  it. Alternatively typing starts a quick search, or does nothing (Settings).
+- Icon names wrap at word boundaries.
 
-Installer (one file, per user, no admin rights): `.\scripts\make-setup.ps1` builds a slim copy
-(profile `dist`, no debugging information, ~11 MB) as `dist\DesktopShepherd-Setup.exe`. Any copy
-of the program whose file name contains "setup" acts as the installer: it asks, copies itself to
-`%LOCALAPPDATA%\Programs\DesktopShepherd\DesktopShepherd.exe`, adds a Start menu shortcut and an
-entry in Settings > Apps > Installed apps, turns on start with Windows and starts it. Running it
-again updates. Uninstalling (from Installed apps, i.e. `DesktopShepherd.exe --uninstall`) stops
-the program, removes everything and asks whether to keep the saved boxes (default: keep).
+### Quick search
 
-Releases: `.github/workflows/release.yml` builds on GitHub (MSVC). Push a tag `vX.Y.Z` to publish a
-Release with `DesktopShepherd-Setup-X.Y.Z.exe` and `DesktopShepherd-Portable-X.Y.Z.zip`; "Run
-workflow" on the Actions page builds the same files as artifacts only. Portable: a `portable.txt`
-next to the exe keeps all settings in a `data` folder beside it.
+Press **Ctrl+Shift+Space** (changeable, or off). A search box appears at the top of the main
+monitor and finds desktop items by name, file type, or letters in order ("vsc" finds Visual
+Studio Code). Optionally it also lists Start menu programs. Each result shows which box the item is
+in. **Enter** opens it, **Ctrl+Enter** opens its folder, **Esc** closes.
 
-Stop it safely (worker first, then supervisor, so icons are restored):
+### Widgets
 
-```powershell
-.\scripts\stop.ps1
-```
+Create a widget from a box's "New" menu, or draw one anywhere.
 
-Command-line options: `--screenshot out.png` (draws the settings view off-screen, no
-window, saves a PNG, exits; ~4 s), `--worker` (internal), `--boot` (started with Windows: waits longer
-for Explorer), `--composition-trial` (diagnostic), `--uninstall` (remove the installed copy).
-
-## Documentation
-
-| File | What |
+| Widget | What it does |
 |---|---|
-| `docs/ARCHITECTURE.md` | Processes, threads, the render path, every source file |
-| `docs/BUILDING.md` | Toolchain, pinned crates, linker stand-ins |
-| `docs/STATUS.md` | Measurements, final review results, known issues, ideas/todo |
-| `MECHANICS.md`, `mechanics.json` | Values recovered from the original (with addresses) |
-| `CLAUDE.md` | Instructions for Claude Code |
-| `GEMINI.md` | Instructions for Gemini CLI |
+| Clock | Time and date (24-hour option) |
+| Sticky note | Free text, copy and paste work |
+| Drawing pad | Quick sketches |
+| System monitor | CPU, memory and drive space |
+| Laptop status | Battery, Wi-Fi and Bluetooth |
+| Now playing | Current track with cover, play/pause/next/previous and progress; several players switch with dots |
+| Weather | Several places (dots to switch), Meteocons icons, feels-like, humidity, wind, chance of rain, sunrise/sunset, UV, hourly strip and 7 days. Looks: Compact, Standard, Detailed or adapts to the box size |
+| Timer | Countdown / Pomodoro timer |
+| Calendar | Month view, week start option |
+| To-do list | Simple checklist |
+| Agenda | Online calendars from iCal (.ics) links such as Google or Outlook, including repeating events. Month, week and list views, with event details |
+| Picture frame | PNG or JPEG, fit or fill |
+| Search box | A quick search of your desktop, right in a box |
 
-`shots/` holds development screenshots used while tuning the look (safe to delete).
+Widgets stay clean: no buttons or menus on them. Their options are in the box's right-click
+menu under **"Widget settings..."**.
+
+<p>
+<img src="docs/screenshots/widgets.png" alt="Widgets" width="700">
+</p>
+<p>
+<img src="docs/screenshots/weather-settings.png" alt="Weather widget settings" width="700">
+</p>
+
+### Look and personalization
+
+- Per box: colour with opacity, blur, rounded corners, border thickness and colour, text colour
+  and shadow, fonts, title and text size, icon size and spacing, names under icons on or off.
+- "Apply this look to all boxes" in one click.
+- Follows the Windows accent colour for highlights.
+- Menus and settings: Light, Dark, or like Windows.
+- Adaptive text (optional, on by default): text turns dark by itself over bright parts of the
+  wallpaper. It also works with wallpaper slideshows.
+
+<p>
+<img src="docs/screenshots/personalize.png" alt="Personalize window" width="700">
+</p>
+<p>
+<img src="docs/screenshots/menu-dark.png" alt="Dark menu" width="300">
+<img src="docs/screenshots/menu-light.png" alt="Light menu" width="300">
+</p>
+
+### Settings and safety net
+
+- A Layout page shows every monitor with its boxes, and can export or import your layout, or
+  bring boxes back onto the screen.
+- Deleted a box by mistake? Undo it (a note appears for a few seconds; also in the tray and in
+  Settings).
+- Automatic layout backups you can restore from Settings.
+- Optional: keep your layout in sync between PCs through OneDrive.
+- Optional: check for new versions (once a day).
+- Start with Windows.
+- Languages: English, Spanish and Catalan (follows Windows by default).
+
+<p>
+<img src="docs/screenshots/settings.png" alt="Settings window" width="700">
+</p>
+<p>
+<img src="docs/screenshots/layout.png" alt="Layout page" width="700">
+</p>
+
+## Install
+
+Get the latest files from the
+[Releases page](https://github.com/radioactivetoy/DesktopShepherd/releases/latest).
+
+- **Setup (.exe):** installs for your user only, no administrator rights needed. It adds a
+  Start menu shortcut and an entry in Windows' Installed apps, where you can uninstall it
+  (you are asked whether to keep your saved boxes). Running a newer Setup updates it.
+- **Portable (.zip):** unzip anywhere and run `DesktopShepherd.exe`. Because of the
+  `portable.txt` file next to it, all settings live in a `data` folder beside the program.
+  Delete `portable.txt` to use your user profile instead.
+
+Requires **Windows 11**. Other versions have not been tested.
+
+The program is not code-signed yet, so Windows SmartScreen may say "unknown publisher". Choose
+"More info", then "Run anyway".
+
+## Quick start
+
+1. Run it. On the first start your Windows desktop icons are hidden and appear inside boxes.
+2. **Right-click a box** for its menu: Personalize, Widget settings, New, rename, delete...
+3. To add a box: right-click an empty spot of the desktop, choose "Show more options", then
+   **DesktopShepherd > New...**, or press **Ctrl+Alt+B** and draw one.
+4. Settings are in the **tray icon** menu (and in the box menu).
+5. To quit, use the tray menu: the icons come back right away.
+
+## Where your data lives
+
+`%APPDATA%\DesktopShepherd` holds `layout.json` (your boxes), `backups\` (older copies of the
+layout) and `log.txt`. The portable version keeps the same files in its `data` folder.
+
+## Building from source
+
+Short version:
+
+```powershell
+cargo build
+.\target\debug\desktopshepherd.exe
+```
+
+Read [docs/BUILDING.md](docs/BUILDING.md) first. In particular, never run `cargo update`: some
+crates are pinned. Releases are built by GitHub Actions on MSVC (`.github/workflows/release.yml`).
+Pushing a tag like `v0.2.0` publishes a Release with the Setup and Portable files; tags
+containing `beta` or `rc` are marked as pre-releases.
+
+`desktopshepherd.exe --screenshot out.png` draws the settings view off-screen and saves a PNG.
+
+## Project layout (for developers)
+
+| File | Contents |
+|---|---|
+| `src/main.rs` | start-up, supervisor, panic hook |
+| `src/runloop.rs` | the program's own Win32 message loop and hotkeys |
+| `src/app.rs` | application state, boxes UI, menus, settings, drag and drop |
+| `src/host.rs`, `src/d3d.rs` | DirectX / Windows composition box windows and the renderer |
+| `src/desktop.rs` | Win32 helpers: desktop scan, hide/show icons, monitors, z-order |
+| `src/widgets.rs` | widget registry (add new widgets here) |
+| `src/search.rs`, `src/snap.rs` | quick-search ranking and snapping |
+| `src/shellmenu.rs` | Windows' own context menu in a helper process |
+| `src/model.rs`, `src/storage.rs` | saved layout and settings, backups |
+| `src/install.rs` | built-in installer and uninstaller |
+| `src/i18n.rs` | English, Spanish and Catalan texts |
+
+More in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) (processes, threads, rendering, every
+source file) and [docs/STATUS.md](docs/STATUS.md) (measurements, known issues, ideas).
+
+## Credits and licences
+
+- Weather icons: [Meteocons](https://meteocons.com/) by Bas Milius, MIT licence
+  (`assets/meteocons/LICENSE`).
+- Weather data: [Open-Meteo.com](https://open-meteo.com/).
+- User interface: [egui](https://github.com/emilk/egui).
+- Wallpaper in the screenshots: artwork by Simon Stålenhag (https://www.simonstalenhag.se/).
+
+License of DesktopShepherd itself: not specified yet.
