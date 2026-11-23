@@ -5,7 +5,7 @@
 **Tidy, frosted-glass boxes for your Windows 11 desktop icons. Light on resources, safe by design.**
 
 [Download the latest release](https://github.com/radioactivetoy/DesktopShepherd/releases/latest)
-(Setup or Portable) - current version: 0.2.0-beta.2
+(Setup or Portable) - current version: 1.0.0-rc.1
 
 <img src="docs/screenshots/overview.png" alt="DesktopShepherd boxes on a Windows 11 desktop" width="100%">
 
@@ -31,8 +31,9 @@ These rules decide what goes in and what stays out.
   (waiting a bit longer after each failure in a row). Your layout is saved atomically, with
   dated backups.
 - **Performance.** About 0 % CPU when idle, and no continuous redrawing: a box is redrawn only
-  when something changes. Measured on a Windows 11 PC: the main process uses about 98 MB of
-  memory (about 78 MB private) and about 0.02 % CPU at idle; the supervisor uses about 2 MB.
+  when something changes. Measured on a Windows 11 PC: the main process uses about 99 MB of
+  memory (113 MB with drop shadow and raised look on all boxes) and about 0.02 % CPU at idle; the
+  supervisor uses about 2 MB.
 - **Privacy.** No telemetry, ever. Online features only work when you turn them on or add them:
   weather (from Open-Meteo), agenda calendar links, and an optional once-a-day check for new
   versions. They use Windows' own WinHTTP, run in the background, and send nothing about you.

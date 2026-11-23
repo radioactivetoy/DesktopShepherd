@@ -1,19 +1,29 @@
-# Status (2026-11-22)
+# Status (1.0.0-rc.1, 2026-11-23)
+
+Current version: **1.0.0-rc.1**, the first release candidate for 1.0. Releases so far: tags
+v0.2.0-beta.1 to beta.5 published. The release workflow marks beta and rc tags as pre-releases;
+they were switched to "Latest" by hand (`gh release edit <tag> --prerelease=false --latest`) so
+they show on the repo main page. 1.0.0-rc.1 is next.
 
 ## Measurements (this PC, Windows 11 Pro 26340, debug profile = opt-level 3)
+
+Measured 2026-11-23 with 9 boxes on 2 monitors.
 
 | Process | Working set | Private | Threads | CPU idle (10 s, all cores) |
 |---|---|---|---|---|
 | supervisor `desktopshepherd.exe` | ~2 MB | 2 MB | – | 0.00 % |
-| worker `desktopshepherd.exe --worker` | ~89 MB | ~75 MB | 34 | ~0.005 % (was ~0.01–0.02 % before the folder watcher) |
+| worker `desktopshepherd.exe --worker`, drop shadow and raised look off | ~99 MB | ~80 MB | – | ~0.02 % |
+| worker, drop shadow and raised look on for all 9 boxes | ~113 MB | ~78 MB | – | ~0.03 % |
+
+Shadow memory only exists for boxes that have the shadow on.
 
 History: classic GL glass path 194–240 MB → DirectX composition path ~156 MB (155 MB private,
 30 threads) → after phase C (no eframe/GL) ~110 MB (100 MB private) → after the memory round
 (icons loaded at real pixel size, unused icon sizes dropped, no fonts in the root egui context)
-~89 MB (75 MB private) (2026-11-22). A release build measured 107 MB / 99 MB private against
-110 / 100 for debug before that round: no real difference, so the debug build (opt-level 3)
-stays fine for daily use. (The "113 MB with settings open" figure is from before the memory
-round and has not been re-measured.)
+~89 MB (75 MB private) (2026-11-22). The later features (to-do redesign, weather, shadow, raised
+look and more) brought it to the 2026-11-23 numbers above. A release build measured 107 MB / 99 MB
+private against 110 / 100 for debug before the memory round: no real difference, so the debug
+build (opt-level 3) stays fine for daily use.
 
 Mouse moving over a box (`tools\measure_hover_cpu.ps1`, 10 s, desktop shown so the boxes are
 really under the mouse): 7.3 s CPU before phase A → 2.6–2.8 s after phase A and B
@@ -132,8 +142,21 @@ egui font atlases, and the icon textures.
 - New (2026-11-23): optional drop shadow per box (Personalize: "Drop shadow", `Fence.shadow`): a separate
   click-through layered window below the box (`src/shadow.rs`), drawn once per size/corner/scale change
   (contact + ambient layers, transparent under the box), moved with the box, hidden with it. No window
-  exists while the option is off. Not yet checked by eye on the live desktop; the shadow hides while a
-  box fades below 50 %.- New (2026-11-22, evening): internet allowed (CLAUDE.md rule 3). Widgets "Laptop status"
+  box fades below 50 %.
+- New (2026-11-23): raised look per box (Personalize, `Fence.raised`): a bevel all round the inner
+  edge (top brightest, sides soft, bottom dark) plus a sheen, drawn in `fence_view::paint_raised`;
+  also on glass boxes.
+- Fixed (2026-11-23): widget boxes stay behind other windows when clicked. `host.rs`
+  WM_WINDOWPOSCHANGING refuses z-order changes without SWP_NOACTIVATE for box windows, and
+  WM_ACTIVATE sends them to the bottom again.
+- New (2026-11-23): to-do widget redesign: round check circles in the accent colour, a × on hover,
+  "N left" count, and the add field hidden behind a "+" in the footer.
+- Fixed (2026-11-23): quick search shows the right box for items inside folder boxes.
+- New (2026-11-23): app icon and logo (`assets/icon`). The exe carries the icon for MSVC release
+  builds (`build.rs`, rc.exe); tray and settings windows use it at run time (`src/appicon.rs`).
+- New (2026-11-23): README screenshots now include quick search. Licence: GPL-3.0-or-later
+  (LICENSE, also in the portable zip).
+- New (2026-11-22, evening): internet allowed (CLAUDE.md rule 3). Widgets "Laptop status"
   (GetSystemPowerStatus, WLAN API, Bluetooth API; helper thread every 5 s while shown) and "Now
   playing" (Windows media session API: title, artist, cover, play/pause/next/previous, progress;
   helper thread every 2 s while shown; blank when nothing plays). Quick search also lists Start
@@ -230,6 +253,13 @@ egui font atlases, and the icon textures.
 - Fixed in phase C: app-driven box moves (monitor relayout, bring back on screen, restore
   backup/import, roll-up from settings) now really move the DirectX windows; the Settings page
   scrolls (its bottom – backups list and Quit button – used to be cut off).
+
+## Open items (2026-11-23)
+
+- Laptop: per-setup positions still need a test on a real laptop.
+- Code signing: the installer and program are not signed yet (SmartScreen warning).
+- Library updates are blocked on the GNU toolchain (`docs/BUILDING.md`); MSVC Build Tools would lift it.
+- Dependabot glib alert: glib is not used on Windows.
 
 ## Improvement ideas (ordered by value)
 

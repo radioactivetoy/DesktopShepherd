@@ -169,6 +169,7 @@ a second) or a wake-up posted by another thread.
 | `fence_view.rs` | sorting/grid layout of items inside a box; the font list (`FONTS`, `family`, `set_loaded_fonts`): only installed fonts are offered, only fonts in use are loaded (`setup_style(ctx, extra_fonts)` in `app.rs`), each falling back to the default fonts |
 | `ghost.rs` | only the flying icon picture while dragging icons between boxes (`begin_icon_drag` returns a `DragImage`; `DragImage::destroy`) and `primary_button_down()` |
 | `icons.rs` | icon cache (`get(path, px)`, `keep_only_sizes`); loader watchdog: a load over 5 s is marked failed (placeholder) and a fresh loader thread takes the other pending icons (at most one restart per 5 s) |
+| `appicon.rs` | app icon as runtime HICONs (big and small) from the PNGs in `assets/icon`, used for the box windows' class icon and the tray/settings windows; the ico in the exe comes from `build.rs` (MSVC) |
 | `shadow.rs` | optional drop shadow: one click-through layered window (`DesktopShepherdShadow`) directly below each box with `Fence.shadow` on, picture via UpdateLayeredWindow (freed right after), `sync` (UI pass), `follow` (move thread), `restack`, `set_visible`, `set_faded`, `destroy` (Host drop) |
 | `snap.rs` | box snapping arithmetic (pure, 7 unit tests: `cargo test snap`) |
 | `search.rs` | quick-search ranking (pure, 4 unit tests): name starts with text, then a word starts with it, then contains it (or file type), then letters in order; 12 results |

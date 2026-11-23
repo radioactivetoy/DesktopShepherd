@@ -32,15 +32,48 @@ static STATE: Mutex<Option<State>> = Mutex::new(None);
 
 /// "1.2.10" > "1.2.9"; non-numbers count as 0.
 pub fn newer_than(a: &str, b: &str) -> bool {
-    let parse = |s: &str| -> Vec<u64> { s.trim_start_matches(['v', 'V']).split(['.', '-', '+']).map(|p| p.parse().unwrap_or(0)).collect() };
-    let (x, y) = (parse(a), parse(b));
-    for i in 0..x.len().max(y.len()) {
-        let (p, q) = (x.get(i).copied().unwrap_or(0), y.get(i).copied().unwrap_or(0));
-        if p != q {
-            return p > q;
+    version_key(a) > version_key(b)
+}
+
+/// A sortable form of a version like "1.2.3", "1.0.0-rc.2" or "v0.2.0-beta.5": the numbers, then
+/// the pre-release stage (alpha < beta < rc < final) and its number. So 1.0.0-beta.9 < 1.0.0-rc.1
+/// < 1.0.0 < 1.0.1-beta.1.
+fn version_key(s: &str) -> (Vec<u64>, u8, u64) {
+    let s = s.trim().trim_start_matches(['v', 'V']);
+    let s = s.split('+').next().unwrap_or("");
+    let (core, pre) = match s.split_once('-') {
+        Some((c, p)) => (c, Some(p.to_ascii_lowercase())),
+        None => (s, None),
+    };
+    let mut nums: Vec<u64> = core.split('.').map(|p| p.parse().unwrap_or(0)).collect();
+    while nums.len() < 3 {
+        nums.push(0);
+    }
+    match pre {
+        None => (nums, 3, 0),
+        Some(p) => {
+            let stage = if p.starts_with("rc") { 2 } else if p.starts_with("beta") { 1 } else { 0 };
+            let n = p.split(|c: char| !c.is_ascii_digit()).filter(|x| !x.is_empty()).last().and_then(|x| x.parse().ok()).unwrap_or(0);
+            (nums, stage, n)
         }
     }
-    false
+}
+
+#[cfg(test)]
+mod version_tests {
+    use super::newer_than;
+
+    #[test]
+    fn versions_compare_like_releases() {
+        assert!(newer_than("1.0.0-rc.1", "0.2.0-beta.5"));
+        assert!(newer_than("1.0.0", "1.0.0-rc.1"));
+        assert!(!newer_than("1.0.0-rc.1", "1.0.0"));
+        assert!(newer_than("1.0.0-rc.1", "1.0.0-beta.9"));
+        assert!(newer_than("0.2.0-beta.10", "0.2.0-beta.9"));
+        assert!(newer_than("v1.0.1", "1.0.0"));
+        assert!(!newer_than("1.0.0", "1.0.0"));
+        assert!(newer_than("1.1.0-beta.1", "1.0.9"));
+    }
 }
 
 fn fetch_latest() -> Result<Release, String> {

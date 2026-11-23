@@ -60,8 +60,10 @@ Get-CimInstance Win32_Process -Filter "Name='desktopshepherd.exe'" | % {
   "{0} ws={1:N0}MB cpu={2:N2}%" -f $_.CommandLine, ($p.WorkingSet64/1MB), (($b-$a)/10000/[Environment]::ProcessorCount*100) }
 ```
 
-Current baseline: worker ~89 MB working set (~75 MB private), ~0.005 % CPU idle; supervisor
-~2 MB private. (A release build is no smaller, so the debug build, which is opt-level 3, is fine
+Current baseline (2026-11-23, 9 boxes, 2 monitors): worker ~99 MB working set (~80 MB private),
+~0.02 % CPU idle with drop shadow and raised look off; ~113 MB working set (~78 MB private),
+~0.03 % CPU idle with drop shadow and raised look on for all 9 boxes (shadow memory only exists
+for boxes that have it on); supervisor ~2 MB private. (A release build is no smaller, so the debug build, which is opt-level 3, is fine
 for daily use.)
 
 ## Gotchas learned the hard way
@@ -98,6 +100,9 @@ for daily use.)
   typing keys.
 - PowerShell: `FindWindow(class, $null)` passes an empty title, not NULL, so it finds nothing –
   use `[NullString]::Value` or enumerate the windows instead.
+- Boxes must never come in front of other programs' windows: box windows refuse z-order changes
+  that don't carry SWP_NOACTIVATE (host.rs WM_WINDOWPOSCHANGING); our own restacking
+  (desktop::send_to_bottom, shadow::restack) always passes SWP_NOACTIVATE.
 
 ## Where to start for common tasks
 
@@ -119,6 +124,7 @@ for daily use.)
 - Quick search → `src/search.rs` (ranking, unit tests) + `show_search` in `app.rs`; the shortcut
   is in `runloop.rs` (`SEARCH_HOTKEYS`, `take_search_request`).
 - Drop shadow -> `src/shadow.rs`: separate click-through layered window under each box, only exists when `Fence.shadow` is on (synced from the box pass in `app.rs`, restacked in `desktop::send_to_bottom`).
+- Raised look (bevel round the inner edge plus sheen, `Fence.raised`) → `fence_view.rs` `paint_raised`, switch in the Personalize window (`show_personalize`); also drawn on glass boxes.
 - Windows' right-click menu → `src/shellmenu.rs`.
 - Typing on the desktop → `runloop.rs` `set_typing_keys` + `app.rs` `type_ahead`.
 - Icon selection/drag/drop → `app.rs` `fence_window`, `ghost::begin_icon_drag`.
