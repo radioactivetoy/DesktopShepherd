@@ -85,6 +85,10 @@ monitor and finds desktop items by name, file type, or letters in order ("vsc" f
 Studio Code). Optionally it also lists Start menu programs. Each result shows which box the item is
 in. **Enter** opens it, **Ctrl+Enter** opens its folder, **Esc** closes.
 
+<p>
+<img src="docs/screenshots/search.png" alt="Quick search finding two Word documents by file type" width="600">
+</p>
+
 ### Widgets
 
 Create a widget from a box's "New" menu, or draw one anywhere.
