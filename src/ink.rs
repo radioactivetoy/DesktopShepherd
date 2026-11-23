@@ -105,10 +105,10 @@ pub fn halo_label(ui: &mut egui::Ui, text: String, size: f32, color: Color32) {
 
 /// Background of an entry field on a box: darkens behind light text, lightens behind dark text.
 pub fn field() -> Color32 {
-    pick(Color32::from_black_alpha(70), Color32::from_white_alpha(110))
+    pick(Color32::from_black_alpha(60), Color32::from_white_alpha(55))
 }
 
 /// A hovered row on a box: a quieter version of `field`.
 pub fn row_hover() -> Color32 {
-    pick(Color32::from_black_alpha(40), Color32::from_white_alpha(70))
+    pick(Color32::from_black_alpha(35), Color32::from_white_alpha(40))
 }

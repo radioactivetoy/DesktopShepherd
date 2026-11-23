@@ -528,36 +528,49 @@ impl DeskWidget for Todo {
         // The task being typed (not saved until it is added).
         let nid = ui.make_persistent_id("todo-new");
         let mut new: String = ui.ctx().data(|d| d.get_temp(nid)).unwrap_or_default();
-        let hint = egui::RichText::new(t("Add a task, then Enter")).color(crate::ink::soft());
-        let r = egui::Frame::new()
-            .fill(crate::ink::field())
-            .corner_radius(8)
-            .inner_margin(egui::Margin::symmetric(8, 5))
-            .show(ui, |ui| {
-                ui.set_width(ui.available_width());
-                ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("+").size(15.0).color(crate::ink::soft()));
+        // The add field is hidden until the "+" in the footer is clicked (always shown while the
+        // list is empty), so it takes no room most of the time.
+        let aid = ui.make_persistent_id("todo-adding");
+        let empty = data["items"].as_array().map(|a| a.is_empty()).unwrap_or(true);
+        let mut adding: bool = ui.ctx().data(|d| d.get_temp(aid)).unwrap_or(false);
+        let mut focus_now = false;
+        if adding || empty {
+            let hint = egui::RichText::new(t("Add a task, then Enter")).color(crate::ink::soft());
+            let r = egui::Frame::new()
+                .fill(crate::ink::field())
+                .corner_radius(6)
+                .inner_margin(egui::Margin::symmetric(6, 1))
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
                     ui.add(
                         egui::TextEdit::singleline(&mut new)
                             .frame(false)
+                            .font(egui::FontId::proportional(13.0))
                             .text_color(crate::ink::text())
                             .hint_text(hint)
                             .desired_width(f32::INFINITY),
                     )
                 })
-                .inner
-            })
-            .inner;
-        if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) && !new.trim().is_empty() {
-            if let Some(a) = data["items"].as_array_mut() {
-                a.push(json!({ "t": new.trim(), "d": false }));
+                .inner;
+            let (enter, esc) = ui.input(|i| (i.key_pressed(egui::Key::Enter), i.key_pressed(egui::Key::Escape)));
+            if ui.ctx().data(|d| d.get_temp::<bool>(aid.with("focus"))).unwrap_or(false) {
+                r.request_focus();
+                ui.ctx().data_mut(|d| d.remove::<bool>(aid.with("focus")));
             }
-            new.clear();
-            out.changed = true;
-            r.request_focus();
+            if r.lost_focus() && enter && !new.trim().is_empty() {
+                if let Some(a) = data["items"].as_array_mut() {
+                    a.push(json!({ "t": new.trim(), "d": false }));
+                }
+                new.clear();
+                out.changed = true;
+                r.request_focus();
+            } else if esc || (r.lost_focus() && new.trim().is_empty()) {
+                new.clear();
+                adding = false;
+            }
+            ui.add_space(4.0);
         }
         ui.ctx().data_mut(|d| d.insert_temp(nid, new));
-        ui.add_space(4.0);
 
         // Display order: open tasks first, then finished ones (stored order is kept).
         let (order, left, done_count): (Vec<usize>, usize, usize) = {
@@ -574,7 +587,7 @@ impl DeskWidget for Todo {
         let accent = crate::app::accent();
         let lum = 0.2126 * accent.r() as f32 + 0.7152 * accent.g() as f32 + 0.0722 * accent.b() as f32;
         let check_col = if lum > 150.0 { Color32::from_gray(20) } else { Color32::WHITE };
-        let list_h = (ui.available_height() - 22.0).max(20.0);
+        let list_h = (ui.available_height() - 30.0).max(20.0);
         egui::ScrollArea::vertical().max_height(list_h).auto_shrink([false, false]).show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 2.0;
             let items = data["items"].as_array().map(|a| a.as_slice()).unwrap_or(&[]);
@@ -656,6 +669,20 @@ impl DeskWidget for Todo {
 
         // Footer.
         ui.horizontal(|ui| {
+            // "+": shows the add field.
+            let (pr, presp) = ui.allocate_exact_size(egui::vec2(18.0, 18.0), egui::Sense::click());
+            let pc = if presp.hovered() { crate::ink::strong() } else { crate::ink::soft() };
+            if presp.hovered() {
+                ui.painter().circle_filled(pr.center(), 9.0, crate::ink::row_hover());
+                ui.output_mut(|o| o.cursor_icon = egui::CursorIcon::PointingHand);
+            }
+            let ps = egui::Stroke::new(1.6_f32, pc);
+            ui.painter().line_segment([pr.center() - egui::vec2(5.0, 0.0), pr.center() + egui::vec2(5.0, 0.0)], ps);
+            ui.painter().line_segment([pr.center() - egui::vec2(0.0, 5.0), pr.center() + egui::vec2(0.0, 5.0)], ps);
+            if presp.clicked() {
+                adding = !adding;
+                focus_now = adding;
+            }
             ui.label(egui::RichText::new(crate::i18n::tf("{} left", &[&left])).size(12.0).color(crate::ink::faint()));
             if done_count > 0 {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -674,6 +701,15 @@ impl DeskWidget for Todo {
                 });
             }
         });
+        ui.ctx().data_mut(|d| {
+            d.insert_temp(aid, adding);
+            if focus_now {
+                d.insert_temp(aid.with("focus"), true);
+            }
+        });
+        if focus_now {
+            ui.ctx().request_repaint();
+        }
         out
     }
 }
