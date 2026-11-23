@@ -10,6 +10,8 @@ mod update;
 mod weather;
 mod app;
 #[cfg(windows)]
+mod appicon;
+#[cfg(windows)]
 mod backdrop;
 mod ink;
 mod comp_trial;

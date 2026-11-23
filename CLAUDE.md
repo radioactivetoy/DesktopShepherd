@@ -132,4 +132,6 @@ for daily use.)
   swaps in `theme::panel_visuals`).
 - Weather looks and icons → `src/weather.rs` (looks via the widget settings, which may set
   `resize_to` in the widget data) and `assets/meteocons/` (PNG icons, embedded with `include_bytes!`).
+- App icon → `assets/icon` (ico built from the icon-1024 cut-out + `icon-small.svg` for ≤24 px), embedded by
+  `build.rs` on MSVC (rc.exe); runtime HICONs from the PNGs (`src/appicon.rs`), tray icon from icon-32.png.
 - Next suggested work: see "Improvement ideas" in `docs/STATUS.md`.

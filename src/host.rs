@@ -649,8 +649,17 @@ impl HostSystem {
                     root.request_repaint_after(info.delay.max(MIN_PASS_GAP));
                 });
             }
-            let pc = WNDCLASSW { lpfnWndProc: Some(wndproc), hInstance: inst.into(), lpszClassName: w!("DesktopShepherdPanel"), hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(), ..Default::default() };
-            RegisterClassW(&pc);
+            let pc = WNDCLASSEXW {
+                cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
+                lpfnWndProc: Some(wndproc),
+                hInstance: inst.into(),
+                lpszClassName: w!("DesktopShepherdPanel"),
+                hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(),
+                hIcon: crate::appicon::big(),
+                hIconSm: crate::appicon::small(),
+                ..Default::default()
+            };
+            RegisterClassExW(&pc);
             Ok(Self { _controller: controller, compositor, renderer, ctx, hosts: HashMap::new(), panels: HashMap::new(), start: std::time::Instant::now(), lost: false, logged_error: false })
         }
     }

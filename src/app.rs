@@ -4047,7 +4047,11 @@ fn make_tray(ctx: &egui::Context, cmds: Arc<Mutex<Vec<TrayCmd>>>) -> Option<tray
     use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
     use tray_icon::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 
-    // A small drawn icon: four rounded tiles.
+    // The app icon; if it can't be decoded, a small drawn one (four rounded tiles).
+    let embedded = image::load_from_memory(include_bytes!("../assets/icon/icon-32.png")).ok().map(|i| i.to_rgba8()).and_then(|b| {
+        let (w, h) = (b.width(), b.height());
+        tray_icon::Icon::from_rgba(b.into_raw(), w, h).ok()
+    });
     let n = 32usize;
     let mut rgba = vec![0u8; n * n * 4];
     for y in 0..n {
@@ -4061,7 +4065,10 @@ fn make_tray(ctx: &egui::Context, cmds: Arc<Mutex<Vec<TrayCmd>>>) -> Option<tray
             }
         }
     }
-    let icon = tray_icon::Icon::from_rgba(rgba, n as u32, n as u32).ok()?;
+    let icon = match embedded {
+        Some(i) => i,
+        None => tray_icon::Icon::from_rgba(rgba, n as u32, n as u32).ok()?,
+    };
     let menu = Menu::new();
     let open = MenuItem::new(t("Open DesktopShepherd"), true, None);
     let new_box = MenuItem::new(t("New box"), true, None);

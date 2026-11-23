@@ -152,7 +152,7 @@ pub fn run_setup() {
             let _ = key.set_value("DisplayName", &APP);
             let _ = key.set_value("DisplayVersion", &env!("CARGO_PKG_VERSION"));
             let _ = key.set_value("Publisher", &APP);
-            let _ = key.set_value("DisplayIcon", &exe.display().to_string());
+            let _ = key.set_value("DisplayIcon", &format!("{},0", exe.display()));
             let _ = key.set_value("InstallLocation", &dir.display().to_string());
             let _ = key.set_value("UninstallString", &format!("{} --uninstall", q(&exe)));
             let _ = key.set_value("NoModify", &1u32);

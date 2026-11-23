@@ -1,3 +1,5 @@
+<p align="center"><img src="assets/icon/logo-512.png" width="128" alt="DesktopShepherd logo"></p>
+
 # DesktopShepherd
 
 **Tidy, frosted-glass boxes for your Windows 11 desktop icons. Light on resources, safe by design.**
@@ -223,6 +225,7 @@ source file) and [docs/STATUS.md](docs/STATUS.md) (measurements, known issues, i
 - Weather data: [Open-Meteo.com](https://open-meteo.com/).
 - User interface: [egui](https://github.com/emilk/egui).
 - Wallpaper in the screenshots: artwork by Simon Stålenhag (https://www.simonstalenhag.se/).
+- App icon: based on an image generated with Google Gemini, adapted for DesktopShepherd.
 
 ## License
 
