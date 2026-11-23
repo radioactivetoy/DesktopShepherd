@@ -1094,6 +1094,7 @@ impl DeskApp {
                     let first = self.vdesk_seen.is_none();
                     self.vdesk_seen = Some(vd);
                     let hw: Vec<isize> = self.ui.hwnds.values().copied().collect();
+                    let hw: Vec<isize> = hw.iter().flat_map(|h| [Some(*h), crate::shadow::window_of(*h)]).flatten().collect();
                     crate::vdesk::bring_windows_here(&hw);
                     if self.layout.settings.link_vdesks && !first && self.layout.current_page != vd as u32 {
                         self.layout.current_page = vd as u32;
@@ -1573,14 +1574,11 @@ impl DeskApp {
                             self.ui.hwnds.insert(id, hw);
                         }
                     }
-                    // (the shadow setting is part of what was applied)
-                    let want = fence.corner.round() as i32 * 2 + fence.shadow as i32;
-                    if self.ui.rounded.get(&id) != Some(&want) {
-                        let ok = if fence.shadow { desktop::set_shadow(hw, true) } else { desktop::set_shadow(hw, false) && desktop::round_window(hw, 0.0) };
-                        if ok {
-                            self.ui.rounded.insert(id, want);
-                        }
+                    if self.ui.rounded.get(&id) != Some(&0) && desktop::round_window(hw, 0.0) {
+                        self.ui.rounded.insert(id, 0);
                     }
+                    // Optional drop shadow: its own window below the box (only exists while on).
+                    crate::shadow::sync(hw, fence.shadow, fence.corner);
                 }
                 if drew {
                     DRAW_STATS.1.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -2497,7 +2495,6 @@ fn look_left(ui: &mut egui::Ui, fence: &mut Fence) -> bool {
                 dirty |= slider_row(ui, t("Thickness"), bw, &mut |ui| ui.add(egui::Slider::new(&mut fence.border_width, 0.0..=6.0).step_by(0.5).show_value(false)).changed());
                 let [r, g, b, a] = fence.border_color;
                 let mut border = Color32::from_rgba_unmultiplied(r, g, b, a);
-                // (Windows' shadow option: hidden until it shows reliably; see docs/STATUS.md.)
                 if color_row(ui, "border-colour", t("Border colour…"), &mut border, true) {
                     fence.border_color = border.to_srgba_unmultiplied();
                     dirty = true;
@@ -2519,6 +2516,11 @@ fn look_right(ui: &mut egui::Ui, fence: &mut Fence, actions: &mut Vec<Act>) -> b
                 ui.horizontal(|ui| {
                     ui.add_space(14.0);
                     dirty |= ui.checkbox(&mut fence.text_shadow, t("Shadow behind the text")).changed();
+                });
+                ui.horizontal(|ui| {
+                    ui.add_space(14.0);
+                    dirty |= ui.checkbox(&mut fence.shadow, t("Drop shadow")).changed();
+                    dirty |= ui.checkbox(&mut fence.raised, t("Raised look")).changed();
                 });
                 let ts = format!("{}", fence.title_size.round());
                 dirty |= slider_row(ui, t("Title size"), ts, &mut |ui| ui.add(egui::Slider::new(&mut fence.title_size, 8.0..=32.0).step_by(1.0).show_value(false)).changed());

@@ -378,6 +378,17 @@ pub fn prepare_box(handle: isize, no_activate: bool) -> Option<isize> {
             if msg == WM_MOUSEACTIVATE && data == 1 {
                 return LRESULT(MA_NOACTIVATE as isize);
             }
+            // A widget box takes the keyboard when clicked (to type in a note or a to-do list),
+            // and Windows lifts a window that becomes active to the top. Keep the box where it is
+            // (behind the apps): drop the z-order part of such a move. Our own restacking always
+            // passes SWP_NOACTIVATE and is left alone.
+            if msg == windows::Win32::UI::WindowsAndMessaging::WM_WINDOWPOSCHANGING && data == 0 && lp.0 != 0 {
+                use windows::Win32::UI::WindowsAndMessaging::{HWND_TOP, SWP_NOACTIVATE, SWP_NOZORDER, WINDOWPOS};
+                let wp_ = &mut *(lp.0 as *mut WINDOWPOS);
+                if (wp_.flags & SWP_NOZORDER).0 == 0 && (wp_.flags & SWP_NOACTIVATE).0 == 0 && wp_.hwndInsertAfter == HWND_TOP {
+                    wp_.flags |= SWP_NOZORDER;
+                }
+            }
             DefSubclassProc(hwnd, msg, wp, lp)
         }
 
@@ -561,6 +572,7 @@ pub fn send_to_bottom(hwnd: isize) {
             0,
             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS,
         );
+        crate::shadow::restack(hwnd);
     }
     #[cfg(not(windows))]
     {
@@ -1019,6 +1031,7 @@ pub fn pick_folder() -> Option<String> {
 
 /// Shows (just above the desktop, without taking the focus) or hides a box window.
 pub fn show_box_window(hwnd: isize, show: bool) {
+    crate::shadow::set_visible(hwnd, show);
     #[cfg(windows)]
     unsafe {
         use windows::Win32::Foundation::HWND;
@@ -1351,46 +1364,3 @@ pub fn take_restack_request() -> bool {
     RESTACK_ASKED.swap(false, std::sync::atomic::Ordering::SeqCst)
 }
 
-/// Windows' own soft shadow around a box (it comes with Windows 11's rounded corners), or none.
-/// Drawn by Windows itself: costs nothing.
-pub fn set_shadow(handle: isize, on: bool) -> bool {
-    #[cfg(windows)]
-    unsafe {
-        use windows::Win32::Foundation::HWND;
-        use windows::Win32::Graphics::Dwm::{
-            DwmExtendFrameIntoClientArea, DwmSetWindowAttribute, DWMNCRP_DISABLED, DWMNCRP_ENABLED, DWMWA_BORDER_COLOR, DWMWA_NCRENDERING_POLICY,
-            DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND, DWMWCP_ROUND,
-        };
-        use windows::Win32::UI::Controls::MARGINS;
-        let hwnd = HWND(handle as *mut _);
-        if hwnd.0.is_null() {
-            return false;
-        }
-        // Windows draws its shadow only for windows with a resizable frame; the box hides that
-        // frame (WM_NCCALCSIZE in host.rs), so only the shadow shows.
-        {
-            use windows::Win32::UI::WindowsAndMessaging::{GetWindowLongW, SetWindowLongW, SetWindowPos, GWL_STYLE, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE, SWP_NOZORDER, WS_THICKFRAME};
-            let style = GetWindowLongW(hwnd, GWL_STYLE) as u32;
-            let want = if on { style | WS_THICKFRAME.0 } else { style & !WS_THICKFRAME.0 };
-            if want != style {
-                SetWindowLongW(hwnd, GWL_STYLE, want as i32);
-                let _ = SetWindowPos(hwnd, None, 0, 0, 0, 0, SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
-            }
-        }
-        let policy = if on { DWMNCRP_ENABLED } else { DWMNCRP_DISABLED };
-        let _ = DwmSetWindowAttribute(hwnd, DWMWA_NCRENDERING_POLICY, &policy as *const _ as *const _, std::mem::size_of_val(&policy) as u32);
-        let pref = if on { DWMWCP_ROUND } else { DWMWCP_DONOTROUND };
-        let _ = DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &pref as *const _ as *const _, std::mem::size_of_val(&pref) as u32);
-        // A frame of 1 pixel lets Windows draw its shadow around a window without a border.
-        let m = if on { MARGINS { cxLeftWidth: 1, cxRightWidth: 1, cyTopHeight: 1, cyBottomHeight: 1 } } else { MARGINS::default() };
-        let _ = DwmExtendFrameIntoClientArea(hwnd, &m);
-        let none: u32 = 0xFFFF_FFFE; // DWMWA_COLOR_NONE: no Windows border line (the box draws its own)
-        let _ = DwmSetWindowAttribute(hwnd, DWMWA_BORDER_COLOR, &none as *const _ as *const _, 4);
-        true
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = (handle, on);
-        false
-    }
-}

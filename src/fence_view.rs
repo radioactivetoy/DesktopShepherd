@@ -205,6 +205,59 @@ pub fn paint_background(painter: &egui::Painter, fence: &Fence, rect: Rect, scal
     let fill = Color32::from_rgba_unmultiplied(r, g, b, fence.alpha);
     let radius = CornerRadius::same((fence.corner * scale).round().clamp(0.0, 40.0) as u8);
     painter.rect(rect, radius, fill, border_stroke(fence, scale), egui::StrokeKind::Inside);
+    if fence.raised {
+        paint_raised(painter, rect.shrink(0.5 * scale), (fence.corner * scale).clamp(0.0, 40.0), scale);
+    }
+}
+
+/// The points of a rounded rectangle, clockwise from the start of the top-left corner; `n`
+/// points per corner.
+fn rounded_points(r: Rect, rad: f32, n: usize) -> Vec<Pos2> {
+    let rad = rad.min(r.width() / 2.0).min(r.height() / 2.0).max(0.0);
+    let corners = [
+        (Pos2::new(r.min.x + rad, r.min.y + rad), std::f32::consts::PI),
+        (Pos2::new(r.max.x - rad, r.min.y + rad), 1.5 * std::f32::consts::PI),
+        (Pos2::new(r.max.x - rad, r.max.y - rad), 0.0),
+        (Pos2::new(r.min.x + rad, r.max.y - rad), 0.5 * std::f32::consts::PI),
+    ];
+    let mut pts = Vec::with_capacity(4 * n);
+    for (c, start) in corners {
+        for i in 0..n {
+            let a = start + (i as f32 / (n - 1).max(1) as f32) * std::f32::consts::FRAC_PI_2;
+            pts.push(Pos2::new(c.x + rad * a.cos(), c.y + rad * a.sin()));
+        }
+    }
+    pts
+}
+
+/// "Raised look": light from above. A soft sheen on the upper part of the glass, a thin bright
+/// line along the top edge and a darker one along the bottom, so the box reads as a raised
+/// panel. Drawn with the box (no extra windows, nothing kept in memory).
+fn paint_raised(painter: &egui::Painter, rect: Rect, rad: f32, scale: f32) {
+    let pts = rounded_points(rect, rad, 8);
+    // Sheen: a fan from the centre; each point's brightness fades from the top to 60 % height.
+    let shade = |p: Pos2| {
+        let t = ((p.y - rect.min.y) / (rect.height() * 0.6)).clamp(0.0, 1.0);
+        Color32::from_white_alpha(((1.0 - t) * (1.0 - t) * 26.0) as u8)
+    };
+    let mut mesh = egui::Mesh::default();
+    let c = rect.center();
+    mesh.colored_vertex(c, shade(c));
+    for p in &pts {
+        mesh.colored_vertex(*p, shade(*p));
+    }
+    let n = pts.len() as u32;
+    for i in 0..n {
+        mesh.add_triangle(0, 1 + i, 1 + (i + 1) % n);
+    }
+    painter.add(egui::Shape::mesh(mesh));
+    // Edge light: the top edge (both top corners and the line between) bright, the bottom dark.
+    let w = (1.0 * scale).max(1.0);
+    let q = pts.len() / 4;
+    let top: Vec<Pos2> = pts[q / 2..q + q / 2 + 1].to_vec();
+    let bottom: Vec<Pos2> = pts[2 * q + q / 2..3 * q + q / 2 + 1].to_vec();
+    painter.add(egui::Shape::line(top, Stroke::new(w, Color32::from_white_alpha(90))));
+    painter.add(egui::Shape::line(bottom, Stroke::new(w, Color32::from_black_alpha(70))));
 }
 
 /// The box's border (its colour and thickness; none at thickness 0).

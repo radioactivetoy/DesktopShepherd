@@ -118,6 +118,7 @@ for daily use.)
   `model.rs`, drawing in `fence_view.rs`, Personalize window in `app.rs` (`show_personalize`, columns `look_left` / `look_right`).
 - Quick search → `src/search.rs` (ranking, unit tests) + `show_search` in `app.rs`; the shortcut
   is in `runloop.rs` (`SEARCH_HOTKEYS`, `take_search_request`).
+- Drop shadow -> `src/shadow.rs`: separate click-through layered window under each box, only exists when `Fence.shadow` is on (synced from the box pass in `app.rs`, restacked in `desktop::send_to_bottom`).
 - Windows' right-click menu → `src/shellmenu.rs`.
 - Typing on the desktop → `runloop.rs` `set_typing_keys` + `app.rs` `type_ahead`.
 - Icon selection/drag/drop → `app.rs` `fence_window`, `ghost::begin_icon_drag`.

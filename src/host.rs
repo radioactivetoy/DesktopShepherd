@@ -338,8 +338,7 @@ unsafe extern "system" fn wndproc(h: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LR
             push(egui::Event::WindowFocused(f));
             LRESULT(0)
         }
-        // No visible frame, even when the window has a resizable frame for Windows' shadow
-        // (`desktop::set_shadow`): the whole window is the box.
+        // No visible frame: the whole window is the box (kept harmless for old frame tricks).
         WM_NCCALCSIZE if wp.0 != 0 => LRESULT(0),
         WM_MOUSEACTIVATE => {
             // Part of the desktop: clicking a box does not bring it in front of apps.
@@ -464,6 +463,7 @@ impl Drop for Host {
             let p = GetWindowLongPtrW(self.hwnd, GWLP_USERDATA) as *const Mutex<Shared>;
             SetWindowLongPtrW(self.hwnd, GWLP_USERDATA, 0);
             crate::desktop::unregister_box(self.hwnd.0 as isize);
+            crate::shadow::destroy(self.hwnd.0 as isize);
             let _ = DestroyWindow(self.hwnd);
             if !p.is_null() {
                 drop(Arc::from_raw(p));
@@ -810,6 +810,7 @@ impl HostSystem {
             return;
         }
         h.opacity = a;
+        crate::shadow::set_faded(h.hwnd.0 as isize, a < 0.5);
         let Some(g) = &h.glass else { return };
         let anim = (|| -> windows::core::Result<()> {
             let an = comp.CreateScalarKeyFrameAnimation()?;
@@ -1149,6 +1150,7 @@ pub fn move_with_mouse(hwnd: isize, grab: (i32, i32), snap: Option<crate::snap::
                 if (x, y) != last {
                     let _ = SetWindowPos(h, None, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS);
                     last = (x, y);
+                    crate::shadow::follow(hwnd, x, y);
                 }
             }
             if !crate::ghost::primary_button_down() {

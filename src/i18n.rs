@@ -231,6 +231,7 @@ pub static ES: &[(&str, &str)] = &[
     ("Text", "Texto"),
     ("Text colour…", "Color del texto…"),
     ("Shadow behind the text", "Sombra detrás del texto"),
+    ("Drop shadow", "Sombra"),
     ("Title size", "Tamaño del título"),
     ("Text size", "Tamaño del texto"),
     ("Font", "Fuente"),
@@ -554,6 +555,7 @@ pub static ES: &[(&str, &str)] = &[
     ("Like Windows", "Como Windows"),
     ("Dark", "Oscuro"),
     ("Light", "Claro"),
+    ("Raised look", "Aspecto elevado"),
 ];
 
 pub static CA: &[(&str, &str)] = &[
@@ -596,6 +598,7 @@ pub static CA: &[(&str, &str)] = &[
     ("Text", "Text"),
     ("Text colour…", "Color del text…"),
     ("Shadow behind the text", "Ombra darrere del text"),
+    ("Drop shadow", "Ombra"),
     ("Title size", "Mida del títol"),
     ("Text size", "Mida del text"),
     ("Font", "Tipus de lletra"),
@@ -919,6 +922,7 @@ pub static CA: &[(&str, &str)] = &[
     ("Like Windows", "Com Windows"),
     ("Dark", "Fosc"),
     ("Light", "Clar"),
+    ("Raised look", "Aspecte elevat"),
 ];
 
 #[cfg(test)]

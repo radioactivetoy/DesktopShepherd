@@ -129,9 +129,11 @@ egui font atlases, and the icon textures.
 - New (2026-11-23): icons: Ctrl+C / Ctrl+X / Ctrl+V on icons also work with files copied from other
   apps (Explorer), and paste goes to the box under the mouse. F2 renames the icon in place. Copy and
   cut survive the Windows menu helper closing. A click on an icon always gives the keyboard to the desktop.
-- To do: Windows drop shadow on boxes (`desktop::set_shadow`, field `Fence.shadow`) is wired but
-  showed no shadow in testing (box windows are composition windows with WS_EX_NOREDIRECTIONBITMAP);
-  the Personalize checkbox is hidden until it works.- New (2026-11-22, evening): internet allowed (CLAUDE.md rule 3). Widgets "Laptop status"
+- New (2026-11-23): optional drop shadow per box (Personalize: "Drop shadow", `Fence.shadow`): a separate
+  click-through layered window below the box (`src/shadow.rs`), drawn once per size/corner/scale change
+  (contact + ambient layers, transparent under the box), moved with the box, hidden with it. No window
+  exists while the option is off. Not yet checked by eye on the live desktop; the shadow hides while a
+  box fades below 50 %.- New (2026-11-22, evening): internet allowed (CLAUDE.md rule 3). Widgets "Laptop status"
   (GetSystemPowerStatus, WLAN API, Bluetooth API; helper thread every 5 s while shown) and "Now
   playing" (Windows media session API: title, artist, cover, play/pause/next/previous, progress;
   helper thread every 2 s while shown; blank when nothing plays). Quick search also lists Start

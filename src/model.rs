@@ -109,8 +109,11 @@ pub struct Fence {
     /// Keyboard shortcut of this box: 0 = none, 1..9 = Ctrl+Alt+F2..F10 (brings it into view, then
     /// rolls it up or down).
     pub hotkey: u8,
-    /// Windows' soft shadow around the box.
+    /// A soft shadow under the box (a click-through window below it, see shadow.rs).
     pub shadow: bool,
+    /// "Raised look": edge lighting and a sheen on the glass.
+    #[serde(default)]
+    pub raised: bool,
 }
 
 impl Default for Fence {
@@ -154,6 +157,7 @@ impl Default for Fence {
             overflow: 0,
             hotkey: 0,
             shadow: false,
+            raised: false,
         }
     }
 }
@@ -180,6 +184,7 @@ impl Fence {
         self.tab_pos = o.tab_pos;
         self.overflow = o.overflow;
         self.shadow = o.shadow;
+        self.raised = o.raised;
     }
 
     pub fn remove_item(&mut self, path: &str) {

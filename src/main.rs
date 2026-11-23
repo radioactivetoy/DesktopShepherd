@@ -37,6 +37,7 @@ mod vdesk;
 #[cfg(windows)]
 mod shellmenu;
 mod snap;
+mod shadow;
 #[cfg(windows)]
 mod runloop;
 mod storage;
