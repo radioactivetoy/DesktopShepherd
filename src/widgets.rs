@@ -519,7 +519,6 @@ impl DeskWidget for Calendar {
 // ---- To-do list ---------------------------------------------------------------------------
 
 struct Todo;
-
 impl DeskWidget for Todo {
     fn ui(&self, ui: &mut Ui, data: &mut Value) -> WidgetOutput {
         let mut out = WidgetOutput::default();
@@ -529,7 +528,26 @@ impl DeskWidget for Todo {
         // The task being typed (not saved until it is added).
         let nid = ui.make_persistent_id("todo-new");
         let mut new: String = ui.ctx().data(|d| d.get_temp(nid)).unwrap_or_default();
-        let r = ui.add(egui::TextEdit::singleline(&mut new).hint_text(t("Add a task, then Enter")).desired_width(f32::INFINITY));
+        let hint = egui::RichText::new(t("Add a task, then Enter")).color(crate::ink::faint());
+        let r = egui::Frame::new()
+            .fill(crate::ink::line())
+            .corner_radius(8)
+            .inner_margin(egui::Margin::symmetric(8, 5))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("+").size(15.0).color(crate::ink::soft()));
+                    ui.add(
+                        egui::TextEdit::singleline(&mut new)
+                            .frame(false)
+                            .text_color(crate::ink::text())
+                            .hint_text(hint)
+                            .desired_width(f32::INFINITY),
+                    )
+                })
+                .inner
+            })
+            .inner;
         if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) && !new.trim().is_empty() {
             if let Some(a) = data["items"].as_array_mut() {
                 a.push(json!({ "t": new.trim(), "d": false }));
@@ -540,36 +558,91 @@ impl DeskWidget for Todo {
         }
         ui.ctx().data_mut(|d| d.insert_temp(nid, new));
         ui.add_space(4.0);
+
+        // Display order: open tasks first, then finished ones (stored order is kept).
+        let (order, left, done_count): (Vec<usize>, usize, usize) = {
+            let items = data["items"].as_array().map(|a| a.as_slice()).unwrap_or(&[]);
+            let is_done = |i: usize| items[i]["d"].as_bool().unwrap_or(false);
+            let mut o: Vec<usize> = (0..items.len()).filter(|&i| !is_done(i)).collect();
+            let left = o.len();
+            o.extend((0..items.len()).filter(|&i| is_done(i)));
+            (o, left, items.len() - left)
+        };
+
         let mut remove: Option<usize> = None;
         let mut toggle: Option<usize> = None;
-        let any_done = data["items"].as_array().map(|a| a.iter().any(|it| it["d"].as_bool().unwrap_or(false))).unwrap_or(false);
-        let list_h = (ui.available_height() - if any_done { 26.0 } else { 0.0 }).max(20.0);
-        egui::ScrollArea::vertical().max_height(list_h).auto_shrink([false, true]).show(ui, |ui| {
-            if let Some(items) = data["items"].as_array() {
-                for (i, it) in items.iter().enumerate() {
-                    let done = it["d"].as_bool().unwrap_or(false);
-                    let text = it["t"].as_str().unwrap_or("");
-                    ui.horizontal(|ui| {
-                        let mut d = done;
-                        if ui.checkbox(&mut d, "").changed() {
-                            toggle = Some(i);
-                        }
-                        let mut t = egui::RichText::new(text).size(13.5);
-                        t = if done { t.strikethrough().color(crate::ink::gray(130)) } else { t.color(crate::ink::gray(235)) };
-                        let w = (ui.available_width() - 22.0).max(20.0);
-                        ui.allocate_ui_with_layout(egui::vec2(w, 18.0), egui::Layout::left_to_right(egui::Align::Center), |ui| ui.add(egui::Label::new(t).truncate()));
-                        if ui.add(egui::Button::new(egui::RichText::new("✕").size(11.0).color(crate::ink::gray(150))).frame(false)).on_hover_text(crate::i18n::t("Delete")).clicked() {
-                            remove = Some(i);
-                        }
-                    });
+        let accent = crate::app::accent();
+        let lum = 0.2126 * accent.r() as f32 + 0.7152 * accent.g() as f32 + 0.0722 * accent.b() as f32;
+        let check_col = if lum > 150.0 { Color32::from_gray(20) } else { Color32::WHITE };
+        let list_h = (ui.available_height() - 22.0).max(20.0);
+        egui::ScrollArea::vertical().max_height(list_h).auto_shrink([false, false]).show(ui, |ui| {
+            ui.spacing_mut().item_spacing.y = 2.0;
+            let items = data["items"].as_array().map(|a| a.as_slice()).unwrap_or(&[]);
+            for &i in &order {
+                let done = items[i]["d"].as_bool().unwrap_or(false);
+                let text = items[i]["t"].as_str().unwrap_or("");
+                let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 28.0), egui::Sense::click());
+                let x_rect = egui::Rect::from_center_size(egui::pos2(rect.right() - 14.0, rect.center().y), egui::vec2(22.0, 22.0));
+                let x_resp = ui.interact(x_rect, resp.id.with("x"), egui::Sense::click());
+                let hovered = ui.rect_contains_pointer(rect);
+                let p = ui.painter();
+                if hovered {
+                    p.rect_filled(rect, 7, crate::ink::line());
+                }
+                // Round check box.
+                let c = egui::pos2(rect.left() + 16.0, rect.center().y);
+                if done {
+                    p.circle_filled(c, 8.0, accent);
+                    let st = egui::Stroke::new(1.8_f32, check_col);
+                    p.line_segment([c + egui::vec2(-3.6, 0.2), c + egui::vec2(-1.0, 2.9)], st);
+                    p.line_segment([c + egui::vec2(-1.0, 2.9), c + egui::vec2(3.8, -2.8)], st);
+                } else {
+                    p.circle_stroke(c, 7.5, egui::Stroke::new(1.5_f32, if hovered { crate::ink::text() } else { crate::ink::soft() }));
+                }
+                // Text.
+                let col = if done { crate::ink::faint() } else { crate::ink::text() };
+                let tw = (rect.width() - 34.0 - 28.0).max(20.0);
+                let mut job = egui::text::LayoutJob::simple_singleline(text.to_string(), egui::FontId::proportional(14.0), col);
+                job.wrap.max_width = tw;
+                job.wrap.max_rows = 1;
+                job.wrap.break_anywhere = true;
+                let galley = ui.fonts(|f| f.layout_job(job));
+                let tp = egui::pos2(rect.left() + 34.0, rect.center().y - galley.size().y / 2.0);
+                let gw = galley.size().x;
+                let gh = galley.size().y;
+                let p = ui.painter();
+                p.galley(tp, galley, col);
+                if done {
+                    let y = tp.y + gh * 0.55;
+                    p.line_segment([egui::pos2(tp.x, y), egui::pos2(tp.x + gw, y)], egui::Stroke::new(1.0_f32, col));
+                }
+                // Remove "x" while hovered.
+                if hovered {
+                    let xc = if x_resp.hovered() { crate::ink::strong() } else { crate::ink::faint() };
+                    let xs = egui::Stroke::new(1.5_f32, xc);
+                    let xcp = x_rect.center();
+                    p.line_segment([xcp + egui::vec2(-4.0, -4.0), xcp + egui::vec2(4.0, 4.0)], xs);
+                    p.line_segment([xcp + egui::vec2(-4.0, 4.0), xcp + egui::vec2(4.0, -4.0)], xs);
+                }
+                if x_resp.clicked() {
+                    remove = Some(i);
+                } else if resp.clicked() {
+                    toggle = Some(i);
                 }
             }
         });
         if let Some(a) = data["items"].as_array_mut() {
             if let Some(i) = toggle {
-                if let Some(it) = a.get_mut(i) {
+                if let Some(mut it) = (i < a.len()).then(|| a.remove(i)) {
                     let d = it["d"].as_bool().unwrap_or(false);
                     it["d"] = json!(!d);
+                    if d {
+                        // Re-opened: back to the end of the open tasks.
+                        let pos = a.iter().rposition(|x| !x["d"].as_bool().unwrap_or(false)).map(|p| p + 1).unwrap_or(0);
+                        a.insert(pos, it);
+                    } else {
+                        a.push(it);
+                    }
                     out.changed = true;
                 }
             }
@@ -580,15 +653,31 @@ impl DeskWidget for Todo {
                 }
             }
         }
-        if any_done && ui.small_button(t("Remove finished tasks")).clicked() {
-            if let Some(a) = data["items"].as_array_mut() {
-                a.retain(|it| !it["d"].as_bool().unwrap_or(false));
-                out.changed = true;
+
+        // Footer.
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new(crate::i18n::tf("{} left", &[&left])).size(12.0).color(crate::ink::faint()));
+            if done_count > 0 {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let r = ui.add(egui::Label::new(egui::RichText::new(t("Remove finished tasks")).size(12.0).color(crate::ink::soft())).sense(egui::Sense::click()));
+                    if r.hovered() {
+                        ui.output_mut(|o| o.cursor_icon = egui::CursorIcon::PointingHand);
+                        let y = r.rect.bottom();
+                        ui.painter().line_segment([egui::pos2(r.rect.left(), y), egui::pos2(r.rect.right(), y)], egui::Stroke::new(1.0_f32, crate::ink::soft()));
+                    }
+                    if r.clicked() {
+                        if let Some(a) = data["items"].as_array_mut() {
+                            a.retain(|it| !it["d"].as_bool().unwrap_or(false));
+                            out.changed = true;
+                        }
+                    }
+                });
             }
-        }
+        });
         out
     }
 }
+
 
 // ---- Agenda (online calendars) --------------------------------------------------------------
 

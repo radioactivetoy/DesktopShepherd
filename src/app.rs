@@ -4163,6 +4163,21 @@ impl DeskApp {
                 }
             }
         }
+        // Folder boxes: the items of their folder.
+        let folders: Vec<(String, String)> = self
+            .layout
+            .fences
+            .iter()
+            .filter_map(|f| f.folder.as_ref().map(|d| (d.trim_end_matches(['\\', '/']).to_lowercase(), f.name.clone())))
+            .collect();
+        if !folders.is_empty() {
+            for key in self.items.keys() {
+                let parent = std::path::Path::new(key).parent().map(|p| p.to_string_lossy().to_lowercase()).unwrap_or_default();
+                if let Some((_, name)) = folders.iter().find(|(d, _)| *d == parent) {
+                    m.entry(key.clone()).or_insert_with(|| name.clone());
+                }
+            }
+        }
         m
     }
 
