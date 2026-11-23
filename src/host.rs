@@ -70,6 +70,8 @@ struct Shared {
     /// Where the input method's windows were last placed (client pixels), to move them only
     /// when the text cursor moves.
     ime_at: Option<(i32, i32)>,
+    /// The primary button went down in this window and no release has been passed on yet.
+    primary_down: bool,
 }
 
 /// Places the input method's composition and candidate windows at the text cursor of the
@@ -260,13 +262,45 @@ unsafe extern "system" fn wndproc(h: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LR
                 crate::desktop::focus_desktop();
             }
             SetCapture(h);
+            if let Ok(mut s) = shared.lock() {
+                s.primary_down = true;
+            }
             button(egui::PointerButton::Primary, true);
             LRESULT(0)
         }
         WM_LBUTTONUP => {
+            // Cleared first: ReleaseCapture sends WM_CAPTURECHANGED right away (see below).
+            if let Ok(mut s) = shared.lock() {
+                s.primary_down = false;
+            }
             let _ = ReleaseCapture();
             button(egui::PointerButton::Primary, false);
             LRESULT(0)
+        }
+        // The mouse was taken from us (another window grabbed it, a menu or dialog opened, Alt+Tab, a
+        // modal loop): the button-up will never arrive here. Tell egui the button was released and
+        // the pointer left, or it keeps a drag / press stuck.
+        WM_CAPTURECHANGED | WM_CANCELMODE => {
+            let was_down = shared.lock().map(|mut s| std::mem::replace(&mut s.primary_down, false)).unwrap_or(false);
+            if was_down {
+                // Where the pointer is now (lp holds a window handle in WM_CAPTURECHANGED).
+                let mut p = POINT::default();
+                let at = if GetCursorPos(&mut p).is_ok() && ScreenToClient(h, &mut p).as_bool() {
+                    Pos2::new(p.x as f32 / ppp, p.y as f32 / ppp)
+                } else {
+                    Pos2::ZERO
+                };
+                push(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: false, modifiers: modifiers() });
+                push(egui::Event::PointerGone);
+                if m == WM_CANCELMODE {
+                    let _ = ReleaseCapture();
+                }
+            }
+            if m == WM_CAPTURECHANGED {
+                LRESULT(0)
+            } else {
+                DefWindowProcW(h, m, wp, lp)
+            }
         }
         WM_RBUTTONDOWN => {
             button(egui::PointerButton::Secondary, true);

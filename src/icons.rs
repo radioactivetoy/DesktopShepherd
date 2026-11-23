@@ -15,13 +15,20 @@ type Working = Arc<Mutex<Option<(Key, Instant)>>>;
 /// A load that takes longer than this is treated as hung (e.g. a shortcut to an offline drive).
 const STUCK_AFTER: Duration = Duration::from_secs(5);
 
+/// One icon at one size: the texture once loaded (None = could not be loaded), and when it was
+/// last asked for (icons not shown for a while are dropped).
+struct Slot {
+    tex: Option<TextureHandle>,
+    loaded: bool,
+    last_used: Instant,
+}
+
 pub struct IconCache {
     tx: Sender<Key>,
     rx: Receiver<Answer>,
     working: Working,
-    textures: HashMap<Key, Option<TextureHandle>>,
-    /// When each icon was last asked for (icons not shown for a while are dropped).
-    last_used: HashMap<Key, Instant>,
+    /// path -> size -> slot, so a lookup by `&str` needs no allocation (it runs per icon per frame).
+    slots: HashMap<String, HashMap<u32, Slot>>,
     pending: HashSet<Key>,
     /// When the loader was last replaced, so a broken shell can't make us spawn threads in a loop.
     last_restart: Option<Instant>,
@@ -53,7 +60,8 @@ fn spawn_loader(ctx: &egui::Context) -> (Sender<Key>, Receiver<Answer>, Working)
                 if res_tx.send((key, img)).is_err() {
                     break;
                 }
-                ctx.request_repaint();
+                // A short delay lets icons that arrive together be drawn in one pass.
+                ctx.request_repaint_after(Duration::from_millis(40));
             }
         })
         .ok();
@@ -63,7 +71,7 @@ fn spawn_loader(ctx: &egui::Context) -> (Sender<Key>, Receiver<Answer>, Working)
 impl IconCache {
     pub fn new(ctx: &egui::Context) -> Self {
         let (tx, rx, working) = spawn_loader(ctx);
-        Self { tx, rx, working, textures: HashMap::new(), last_used: HashMap::new(), pending: HashSet::new(), last_restart: None }
+        Self { tx, rx, working, slots: HashMap::new(), pending: HashSet::new(), last_restart: None }
     }
 
     /// Moves finished icons into textures. Call once per frame. Returns true when any arrived
@@ -74,7 +82,10 @@ impl IconCache {
         while let Ok((key, img)) = self.rx.try_recv() {
             self.pending.remove(&key);
             let tex = img.map(|i| ctx.load_texture(format!("icon:{}:{}", key.0, key.1), i, TextureOptions::LINEAR));
-            self.textures.insert(key, tex);
+            let now = Instant::now();
+            let m = self.slots.entry(key.0).or_default();
+            let last_used = m.get(&key.1).map(|s| s.last_used).unwrap_or(now);
+            m.insert(key.1, Slot { tex, loaded: true, last_used });
             any = true;
         }
         if self.pending.is_empty() {
@@ -90,7 +101,7 @@ impl IconCache {
                 crate::storage::log_line(&format!("icon loading stuck on {}; starting a new loader", key.0));
                 // Never ask for this one again; a placeholder shows instead.
                 self.pending.remove(&key);
-                self.textures.insert(key, None);
+                self.slots.entry(key.0).or_default().insert(key.1, Slot { tex: None, loaded: true, last_used: Instant::now() });
                 // Replacing rx/tx drops the old receiver and sender, so the old thread ends
                 // as soon as its hung call (if ever) returns.
                 let (tx, rx, working) = spawn_loader(ctx);
@@ -115,13 +126,16 @@ impl IconCache {
     /// (it used to be twice the size, four times the memory).
     pub fn get(&mut self, path: &str, px: u32) -> Option<egui::TextureId> {
         let size = px.clamp(16, 256);
-        let key = (path.to_string(), size);
-        if let Some(t) = self.textures.get(&key) {
-            let id = t.as_ref().map(|t| t.id());
-            self.last_used.insert(key, Instant::now());
-            return id;
+        let now = Instant::now();
+        if let Some(s) = self.slots.get_mut(path).and_then(|m| m.get_mut(&size)) {
+            s.last_used = now;
+            if s.loaded {
+                return s.tex.as_ref().map(|t| t.id());
+            }
+        } else {
+            self.slots.entry(path.to_string()).or_default().insert(size, Slot { tex: None, loaded: false, last_used: now });
         }
-        self.last_used.insert(key.clone(), Instant::now());
+        let key = (path.to_string(), size);
         if self.pending.insert(key.clone()) {
             let _ = self.tx.send(key);
         }
@@ -134,19 +148,25 @@ impl IconCache {
     /// redrawn for a while must keep it).
     pub fn drop_unused(&mut self, age: Duration, may_drop: impl Fn(&str) -> bool) -> usize {
         let now = Instant::now();
-        let before = self.textures.len();
-        let used = &self.last_used;
-        self.textures.retain(|k, _| used.get(k).map(|t| now.duration_since(*t) < age).unwrap_or(false) || !may_drop(&k.0));
-        let textures = &self.textures;
+        let count = |s: &HashMap<String, HashMap<u32, Slot>>| s.values().flat_map(|m| m.values()).filter(|x| x.loaded).count();
+        let before = count(&self.slots);
         let pending = &self.pending;
-        self.last_used.retain(|k, _| textures.contains_key(k) || pending.contains(k));
-        before - self.textures.len()
+        self.slots.retain(|p, m| {
+            m.retain(|size, s| {
+                if s.loaded {
+                    now.duration_since(s.last_used) < age || !may_drop(p)
+                } else {
+                    pending.contains(&(p.clone(), *size))
+                }
+            });
+            !m.is_empty()
+        });
+        before - count(&self.slots)
     }
 
     /// Drops every texture (after a graphics reset they are made again on demand).
     pub fn clear(&mut self) {
-        self.textures.clear();
-        self.last_used.clear();
+        self.slots.clear();
         self.pending.clear();
     }
 
@@ -158,13 +178,22 @@ impl IconCache {
     /// the set of sizes in use changes, so icons of boxes that just weren't redrawn stay.
     pub fn keep_only_sizes(&mut self, sizes: &HashSet<u32>) {
         let keep = |s: &u32| sizes.contains(&(*s).clamp(16, 256));
-        self.textures.retain(|(_, s), _| keep(s));
+        self.slots.retain(|_, m| {
+            m.retain(|s, _| keep(s));
+            !m.is_empty()
+        });
         self.pending.retain(|(_, s)| keep(s));
     }
 
     /// Forget an icon so it is fetched again (e.g. after a file changed).
     pub fn forget_missing(&mut self, keep: &HashSet<String>) {
-        self.textures.retain(|(p, _), _| keep.contains(&p.to_lowercase()));
+        self.slots.retain(|p, m| {
+            if keep.contains(&p.to_lowercase()) {
+                return true;
+            }
+            m.retain(|_, s| !s.loaded);
+            !m.is_empty()
+        });
     }
 }
 

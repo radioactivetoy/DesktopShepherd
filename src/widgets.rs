@@ -135,6 +135,9 @@ impl DeskWidget for Note {
 
 struct Sketch;
 
+/// Cached parsed strokes: ((stroke count, total points), [(pen colour, points as 0..1 fractions)]).
+type SketchCache = ((usize, usize), std::sync::Arc<Vec<(usize, Vec<[f32; 2]>)>>);
+
 impl DeskWidget for Sketch {
     fn ui(&self, ui: &mut Ui, data: &mut Value) -> WidgetOutput {
         let mut out = WidgetOutput::default();
@@ -165,13 +168,6 @@ impl DeskWidget for Sketch {
         });
         let (rect, resp) = ui.allocate_exact_size(ui.available_size(), Sense::drag());
         let painter = ui.painter_at(rect);
-        let to_screen = |p: &Value| -> Option<Pos2> {
-            let a = p.as_array()?;
-            Some(Pos2::new(
-                rect.min.x + a.first()?.as_f64()? as f32 * rect.width(),
-                rect.min.y + a.get(1)?.as_f64()? as f32 * rect.height(),
-            ))
-        };
         if resp.drag_started() {
             if let Some(arr) = data["strokes"].as_array_mut() {
                 arr.push(json!({ "c": sel, "p": [] }));
@@ -206,9 +202,39 @@ impl DeskWidget for Sketch {
             out.changed = true;
         }
         if let Some(strokes) = data["strokes"].as_array() {
-            for s in strokes {
-                let c = colors[s["c"].as_u64().unwrap_or(0) as usize % colors.len()];
-                let pts: Vec<Pos2> = s["p"].as_array().map(|a| a.iter().filter_map(to_screen).collect()).unwrap_or_default();
+            // The parsed points are cached (per box) and rebuilt only when the strokes change.
+            let total: usize = strokes.iter().map(|s| s["p"].as_array().map(|a| a.len()).unwrap_or(0)).sum();
+            let key = (strokes.len(), total);
+            let cache_id = ui.make_persistent_id("sketch-points");
+            let cached: Option<SketchCache> = ui.ctx().data(|d| d.get_temp(cache_id));
+            let parsed = match cached.filter(|c| c.0 == key) {
+                Some(c) => c.1,
+                None => {
+                    let v: Vec<(usize, Vec<[f32; 2]>)> = strokes
+                        .iter()
+                        .map(|s| {
+                            let pts = s["p"]
+                                .as_array()
+                                .map(|a| {
+                                    a.iter()
+                                        .filter_map(|p| {
+                                            let a = p.as_array()?;
+                                            Some([a.first()?.as_f64()? as f32, a.get(1)?.as_f64()? as f32])
+                                        })
+                                        .collect()
+                                })
+                                .unwrap_or_default();
+                            (s["c"].as_u64().unwrap_or(0) as usize, pts)
+                        })
+                        .collect();
+                    let v = std::sync::Arc::new(v);
+                    ui.ctx().data_mut(|d| d.insert_temp(cache_id, (key, v.clone())));
+                    v
+                }
+            };
+            for (ci, raw) in parsed.iter() {
+                let c = colors[*ci % colors.len()];
+                let pts: Vec<Pos2> = raw.iter().map(|p| Pos2::new(rect.min.x + p[0] * rect.width(), rect.min.y + p[1] * rect.height())).collect();
                 if pts.len() == 1 {
                     painter.circle_filled(pts[0], 1.5, c);
                 } else if pts.len() > 1 {
@@ -244,7 +270,7 @@ struct Readings {
     mem_used_gb: f32,
     mem_total_gb: f32,
     disks_at: Option<std::time::Instant>,
-    disks: Vec<(String, f32, f32)>, // drive, used fraction, free GB
+    disks: std::sync::Arc<Vec<(String, f32, f32)>>, // drive, used fraction, free GB
 }
 
 static READINGS: std::sync::Mutex<Option<Readings>> = std::sync::Mutex::new(None);
@@ -308,11 +334,11 @@ fn disks() -> Vec<(String, f32, f32)> {
     Vec::new()
 }
 
-type Snapshot = (f32, Vec<f32>, f32, f32, f32, Vec<(String, f32, f32)>);
+type Snapshot = (f32, Vec<f32>, f32, f32, f32, std::sync::Arc<Vec<(String, f32, f32)>>);
 
 /// Takes new readings if the last ones are 2 s old (disks every 60 s), and returns a copy.
 fn read_now() -> Snapshot {
-    let Ok(mut g) = READINGS.lock() else { return (0.0, Vec::new(), 0.0, 0.0, 0.0, Vec::new()) };
+    let Ok(mut g) = READINGS.lock() else { return (0.0, Vec::new(), 0.0, 0.0, 0.0, Default::default()) };
     let now = std::time::Instant::now();
     let r = g.get_or_insert_with(|| {
         let (idle, total) = cpu_times().unwrap_or((0, 0));
@@ -326,7 +352,7 @@ fn read_now() -> Snapshot {
             mem_used_gb: 0.0,
             mem_total_gb: 0.0,
             disks_at: None,
-            disks: Vec::new(),
+            disks: Default::default(),
         }
     });
     if now.duration_since(r.at) >= SAMPLE_EVERY - Duration::from_millis(150) {
@@ -357,7 +383,7 @@ fn read_now() -> Snapshot {
             let found = disks();
             if let Ok(mut g) = READINGS.lock() {
                 if let Some(r) = g.as_mut() {
-                    r.disks = found;
+                    r.disks = std::sync::Arc::new(found);
                 }
             }
         });
@@ -415,7 +441,7 @@ impl DeskWidget for SysMon {
         meter(ui, "RAM", load, &format!("{used:.1}/{total:.0} GB"));
         // Many drives: the list scrolls.
         egui::ScrollArea::vertical().id_salt("disks").auto_shrink([false, true]).show(ui, |ui| {
-            for (name, frac, free) in &disks {
+            for (name, frac, free) in disks.iter() {
                 meter(ui, name, *frac, &tf("{} GB free", &[&format!("{free:.0}")]));
             }
         });
@@ -916,7 +942,7 @@ fn agenda_edit(ui: &mut Ui, data: &mut Value, urls: &[String], cals: &[crate::ag
 // ---- Picture frame --------------------------------------------------------------------------
 
 /// Pictures being read or ready, by file: decoded on a helper thread (a big photo would freeze
-/// the boxes), made at most 1600 px wide or tall, then turned into a texture once and dropped.
+/// the boxes), made at most 1280 px wide or tall, then turned into a texture once and dropped.
 static PICTURES: std::sync::Mutex<Option<std::collections::HashMap<String, Result<Option<egui::ColorImage>, String>>>> = std::sync::Mutex::new(None);
 /// A picture chosen in Windows' file picker (opened from the settings window), not yet used.
 static PICKED_PICTURE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
@@ -927,17 +953,28 @@ fn start_picture_load(path: String) {
     let spawned = std::thread::Builder::new().name("picture".into()).spawn(move || {
         let result = std::panic::catch_unwind(|| -> Result<egui::ColorImage, String> {
             let img = image::open(&p).map_err(|e| tf("can't open the picture ({})", &[&e]))?;
-            let img = if img.width().max(img.height()) > 1600 { img.thumbnail(1600, 1600) } else { img };
-            let rgba = img.to_rgba8();
+            // Only the small copy is kept: the full photo is dropped before the texture data is built.
+            let small = if img.width().max(img.height()) > 1280 { img.thumbnail(1280, 1280) } else { img };
+            let rgba = small.to_rgba8();
+            drop(small);
             let size = [rgba.width() as usize, rgba.height() as usize];
-            Ok(egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_raw()))
+            let color = egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_raw());
+            drop(rgba);
+            Ok(color)
         })
         .unwrap_or_else(|_| Err(t("can't read that picture").to_string()));
         if let Ok(mut g) = PICTURES.lock() {
             // Only if still wanted (the picture wasn't changed meanwhile): else it is dropped here.
             let map = g.get_or_insert_with(Default::default);
             if matches!(map.get(&p), Some(Ok(None))) {
-                map.insert(p, result.map(Some));
+                map.insert(p.clone(), result.map(Some));
+                // Pictures of widgets that are not shown stay unclaimed: keep only 2 ready ones.
+                let ready: Vec<String> = map.iter().filter(|(k, v)| **k != p && matches!(v, Ok(Some(_)))).map(|(k, _)| k.clone()).collect();
+                if ready.len() > 1 {
+                    for k in ready.iter().skip(1) {
+                        map.remove(k);
+                    }
+                }
             }
         }
         #[cfg(windows)]
@@ -959,6 +996,9 @@ impl DeskWidget for Picture {
         let fill = data_bool(data, "fill", false);
         let rect = ui.max_rect();
         if path.is_empty() {
+            // Picture cleared: free the old texture.
+            let tid = ui.make_persistent_id("picture-tex");
+            ui.ctx().data_mut(|d| d.remove::<(String, egui::TextureHandle)>(tid));
             ui.add_space(6.0);
             ui.label(egui::RichText::new(t("Right-click here and choose \"Widget settings…\" to pick a picture.")).size(13.0).color(crate::ink::gray(220)));
             return out;
@@ -970,6 +1010,8 @@ impl DeskWidget for Picture {
         let tex = match held.filter(|(p, _)| *p == path).map(|(_, t)| t) {
             Some(t) => Some(t),
             None => {
+                // The picture changed: free the old texture now.
+                ui.ctx().data_mut(|d| d.remove::<(String, egui::TextureHandle)>(tid));
                 let mut error = None;
                 let mut made = None;
                 if let Ok(mut g) = PICTURES.lock() {
@@ -1395,22 +1437,34 @@ struct LaptopInfo {
     bluetooth: Option<(bool, Vec<String>)>,
 }
 
-/// Last reading (and when), read on a helper thread at most every 5 s while a laptop widget shows.
+/// Last reading (and when), Wi-Fi/Bluetooth read on a helper thread at most every 30 s while a laptop widget shows
+/// (the battery is a cheap call, read directly).
 static LAPTOP: std::sync::Mutex<Option<(std::time::Instant, LaptopInfo)>> = std::sync::Mutex::new(None);
 static LAPTOP_BUSY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 #[cfg(windows)]
-fn read_laptop() -> LaptopInfo {
-    let mut info = LaptopInfo::default();
+fn read_battery() -> Option<(u8, bool, Option<u32>)> {
+    let mut battery = None;
     unsafe {
         use windows::Win32::System::Power::{GetSystemPowerStatus, SYSTEM_POWER_STATUS};
         let mut s = SYSTEM_POWER_STATUS::default();
         // BatteryFlag 128 = no battery, 255 = unknown.
         if GetSystemPowerStatus(&mut s).is_ok() && s.BatteryFlag != 128 && s.BatteryFlag != 255 && s.BatteryLifePercent <= 100 {
             let left = (s.BatteryLifeTime != u32::MAX).then(|| s.BatteryLifeTime / 60);
-            info.battery = Some((s.BatteryLifePercent, s.ACLineStatus == 1, left));
+            battery = Some((s.BatteryLifePercent, s.ACLineStatus == 1, left));
         }
     }
+    battery
+}
+#[cfg(not(windows))]
+fn read_battery() -> Option<(u8, bool, Option<u32>)> {
+    None
+}
+
+/// Wi-Fi and Bluetooth: slower calls that can wake radios, so only every 30 s on a helper thread.
+#[cfg(windows)]
+fn read_laptop() -> LaptopInfo {
+    let mut info = LaptopInfo::default();
     unsafe {
         use windows::Win32::Foundation::HANDLE;
         use windows::Win32::NetworkManagement::WiFi::*;
@@ -1495,7 +1549,7 @@ fn read_laptop() -> LaptopInfo {
 
 fn laptop_now() -> LaptopInfo {
     let current = LAPTOP.lock().ok().and_then(|g| g.clone());
-    let stale = current.as_ref().map(|(t, _)| t.elapsed() >= Duration::from_secs(5)).unwrap_or(true);
+    let stale = current.as_ref().map(|(t, _)| t.elapsed() >= Duration::from_secs(30)).unwrap_or(true);
     if stale && !LAPTOP_BUSY.swap(true, std::sync::atomic::Ordering::SeqCst) {
         let spawned = std::thread::Builder::new().name("laptop-status".into()).spawn(|| {
             let info = std::panic::catch_unwind(read_laptop).unwrap_or_default();
@@ -1510,7 +1564,9 @@ fn laptop_now() -> LaptopInfo {
             LAPTOP_BUSY.store(false, std::sync::atomic::Ordering::SeqCst);
         }
     }
-    current.map(|(_, i)| i).unwrap_or_default()
+    let mut info = current.map(|(_, i)| i).unwrap_or_default();
+    info.battery = read_battery();
+    info
 }
 
 /// One status line: icon, text, and a small detail on the right.

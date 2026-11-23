@@ -145,6 +145,26 @@ struct UiState {
     box_cmds: Vec<(u64, ViewportCommand)>,
     /// Boxes whose next position update comes from a move or resize by the person.
     moved_by_person: HashSet<u64>,
+    /// Each box's `visible_tabs` result with the fingerprint it was made for (see `fv::tabs_key`).
+    tabs_cache: HashMap<u64, (u64, Arc<TabsData>)>,
+    /// A widget changed its data (typing in a note): save soon, but only that box redraws.
+    save_soon: bool,
+    /// Each search box widget's last answer (see `search_widget`).
+    search_cache: HashMap<u64, (u64, Arc<Vec<DeskItem>>)>,
+}
+
+/// A quick-search answer kept between frames (see `DeskApp::search_cache`).
+struct SearchCache {
+    key: u64,
+    results: Arc<Vec<DeskItem>>,
+    homes: Arc<HashMap<String, String>>,
+    app_paths: Arc<HashSet<String>>,
+}
+
+/// A box's tabs as drawn: names and items, plus each item's lower-case path (made once, not per frame).
+struct TabsData {
+    tabs: Vec<(String, Vec<DeskItem>)>,
+    keys: Vec<Vec<String>>,
 }
 
 pub enum TrayCmd {
@@ -161,6 +181,14 @@ pub enum TrayCmd {
 pub struct DeskApp {
     layout: Layout,
     items: HashMap<String, DeskItem>,
+    /// Counts scan results, so caches built from `items` know when they are out of date.
+    items_rev: u64,
+    /// The quick search's last result list, with what it was made for (query, desktop items,
+    /// boxes, program list): searching again only when one of those changed.
+    search_cache: Option<SearchCache>,
+    /// What the boxes hold (fingerprint), the paths of boxes that are not auto-sort (lower-case)
+    /// and the box list for menus: rebuilt only when that fingerprint changes.
+    claimed_cache: Option<(u64, Arc<HashSet<String>>, Arc<Vec<(u64, String, Vec<String>)>>)>,
     scan_rx: Receiver<HashMap<String, DeskItem>>,
     scan_wake: Sender<()>,
     extra_paths: Arc<Mutex<Vec<String>>>,
@@ -200,6 +228,8 @@ pub struct DeskApp {
     redraw_all: bool,
     /// Icon sizes (pixels) the boxes showed last pass (see `IconCache::keep_only_sizes`).
     icon_sizes: Vec<u32>,
+    /// Fingerprint of the box settings that hotkeys, icon sizes and fonts are worked out from.
+    cfg_fp: Option<u64>,
     /// The quick search or the settings window was open last pass (they use extra icon sizes).
     extra_icons_open: bool,
     /// When unused icons were last dropped.
@@ -267,6 +297,16 @@ pub struct DeskApp {
     ta_last: Option<Instant>,
 }
 
+/// Debug switches from the environment, read once (0 repaint, 1 ink, 2 draws, 3 drag).
+fn debug_flag(i: usize) -> bool {
+    static FLAGS: std::sync::OnceLock<[bool; 4]> = std::sync::OnceLock::new();
+    let f = FLAGS.get_or_init(|| {
+        let on = |n: &str| std::env::var_os(n).is_some();
+        [on("DESKTOPSHEPHERD_DEBUG_REPAINT"), on("DESKTOPSHEPHERD_DEBUG_INK"), on("DESKTOPSHEPHERD_DEBUG_DRAWS"), on("DESKTOPSHEPHERD_DEBUG_DRAG")]
+    });
+    f.get(i).copied().unwrap_or(false)
+}
+
 /// Passes and box frames drawn (for DESKTOPSHEPHERD_DEBUG_DRAWS).
 static DRAW_STATS: (std::sync::atomic::AtomicU64, std::sync::atomic::AtomicU64) =
     (std::sync::atomic::AtomicU64::new(0), std::sync::atomic::AtomicU64::new(0));
@@ -286,6 +326,31 @@ fn shared_ui_fingerprint(st: &UiState) -> u64 {
         sel = sel.wrapping_add(ph.finish());
     }
     (sel, st.selection.len(), &st.selected, st.renaming.as_ref().map(|r| (r.0, r.1)), st.item_drag.is_some()).hash(&mut h);
+    h.finish()
+}
+
+/// A cheap fingerprint of what the boxes hold (ids, kinds, names, tabs and their items), and
+/// whether an auto-sort rule depends on file age. No allocation: just hashing.
+fn layout_fingerprint(layout: &Layout) -> (u64, bool) {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for f in &layout.fences {
+        (f.id, f.auto_sort, f.widget.is_some(), &f.name, &f.folder).hash(&mut h);
+        for t in &f.tabs {
+            (&t.name, &t.items).hash(&mut h);
+        }
+    }
+    (h.finish(), layout.settings.categories.iter().any(|r| r.days > 0))
+}
+
+/// A fingerprint of the box settings that shortcuts, icon sizes and fonts come from.
+fn boxes_config_fingerprint(layout: &Layout, scale: f32) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    scale.to_bits().hash(&mut h);
+    for f in &layout.fences {
+        (f.hotkey, f.icon_size, &f.font, f.widget.as_ref().map(|w| w.kind == "search").unwrap_or(false)).hash(&mut h);
+    }
     h.finish()
 }
 
@@ -427,6 +492,9 @@ impl DeskApp {
             icons: IconCache::new(&ctx),
             spacing: desktop::icon_spacing(),
             ui: UiState::default(),
+            items_rev: 0,
+            search_cache: None,
+            claimed_cache: None,
             actions: Vec::new(),
             dirty_at: None,
             persist,
@@ -450,6 +518,7 @@ impl DeskApp {
             personalize_tab: 0,
             redraw_all: true,
             icon_sizes: Vec::new(),
+            cfg_fp: None,
             extra_icons_open: false,
             icon_sweep_at: Instant::now(),
             font_names: Vec::new(),
@@ -893,13 +962,14 @@ impl DeskApp {
     }
 
     fn update_inner(&mut self, ctx: &egui::Context) {
-        if std::env::var_os("DESKTOPSHEPHERD_DEBUG_REPAINT").is_some() && ctx.cumulative_pass_nr() % 120 == 0 {
+        if debug_flag(0) && ctx.cumulative_pass_nr() % 120 == 0 {
             storage::log_line(&format!("repaint causes: {:?}", ctx.repaint_causes()));
         }
         // ---- inputs from background threads and the tray icon
         let mut changed_files = false;
         while let Ok(found) = self.scan_rx.try_recv() {
             self.items = found;
+            self.items_rev = self.items_rev.wrapping_add(1);
             changed_files = true;
         }
         if changed_files {
@@ -1060,15 +1130,22 @@ impl DeskApp {
                 }
             }
         }
+        // The box settings the shortcut, icon size and font lists come from: those lists are only
+        // worked out again when this fingerprint changes.
+        let cfg_fp = boxes_config_fingerprint(&self.layout, desktop::system_scale());
+        let cfg_changed = self.cfg_fp != Some(cfg_fp);
+        self.cfg_fp = Some(cfg_fp);
         // Box shortcuts (Ctrl+Alt+F2..F10): bring the box into view, or roll it up / down.
         #[cfg(windows)]
         if self.persist {
-            let mut nums: Vec<u8> = self.layout.fences.iter().map(|f| f.hotkey).filter(|n| (1..=9).contains(n)).collect();
-            nums.sort_unstable();
-            nums.dedup();
-            if self.box_hotkeys_applied.as_ref() != Some(&nums) {
-                crate::runloop::set_box_hotkeys(&nums);
-                self.box_hotkeys_applied = Some(nums);
+            if cfg_changed {
+                let mut nums: Vec<u8> = self.layout.fences.iter().map(|f| f.hotkey).filter(|n| (1..=9).contains(n)).collect();
+                nums.sort_unstable();
+                nums.dedup();
+                if self.box_hotkeys_applied.as_ref() != Some(&nums) {
+                    crate::runloop::set_box_hotkeys(&nums);
+                    self.box_hotkeys_applied = Some(nums);
+                }
             }
             for n in crate::runloop::take_box_keys() {
                 let Some(i) = self.layout.fences.iter().position(|f| f.hotkey == n) else { continue };
@@ -1184,11 +1261,13 @@ impl DeskApp {
         // Icon sizes in use (pixels): when they change (View > Small/Medium/Large), drop the
         // icons of sizes no box shows any more.
         let s = desktop::system_scale();
-        let sizes: Vec<u32> = {
+        let sizes: Vec<u32> = if cfg_changed {
             let mut v: Vec<u32> = self.layout.fences.iter().map(|f| ((f.icon_size as f32 * s).round() as u32).clamp(16, 256)).collect();
             v.sort_unstable();
             v.dedup();
             v
+        } else {
+            self.icon_sizes.clone() // nothing it depends on changed
         };
         // The quick-search list (22 pt) and the settings window's layout preview fetch icons in
         // other sizes: drop those when the window closes (search boxes keep their 20 pt ones).
@@ -1236,10 +1315,14 @@ impl DeskApp {
             self.panel_force = true;
         }
         // Fonts chosen in boxes: load the ones in use (before any box draws this pass).
-        let mut wanted: Vec<String> = self.layout.fences.iter().filter(|f| !f.font.is_empty()).map(|f| f.font.clone()).collect();
-        wanted.sort();
-        wanted.dedup();
-        if wanted != self.font_names {
+        let restyle_forced = self.font_names.first().map(|n| n.starts_with('\u{0}')).unwrap_or(false);
+        let mut wanted: Vec<String> = Vec::new();
+        if cfg_changed || restyle_forced {
+            wanted = self.layout.fences.iter().filter(|f| !f.font.is_empty()).map(|f| f.font.clone()).collect();
+            wanted.sort();
+            wanted.dedup();
+        }
+        if (cfg_changed || restyle_forced) && wanted != self.font_names {
             #[cfg(windows)]
             let draw = self.hosts.as_ref().map(|h| h.ctx.clone()).unwrap_or_else(|| ctx.clone());
             #[cfg(not(windows))]
@@ -1459,24 +1542,47 @@ impl DeskApp {
 
 impl DeskApp {
     fn show_fences(&mut self, ctx: &egui::Context) {
-        let claimed: HashSet<String> = self
-            .layout
-            .fences
-            .iter()
-            .filter(|f| !f.auto_sort && f.widget.is_none())
-            .flat_map(|f| f.tabs.iter().flat_map(|t| t.items.iter().map(|p| p.to_lowercase())))
-            .collect();
-        let targets: Vec<(u64, String, Vec<String>)> = self
-            .layout
-            .fences
-            .iter()
-            .filter(|f| !f.auto_sort && f.widget.is_none())
-            .map(|f| (f.id, f.name.clone(), f.tabs.iter().map(|t| t.name.clone()).collect()))
-            .collect();
+        // What the boxes hold: a cheap fingerprint tells whether the lists below are still right.
+        let (layout_fp, has_age_rule) = layout_fingerprint(&self.layout);
+        let (claimed, targets) = match &self.claimed_cache {
+            Some((fp, c, t)) if *fp == layout_fp => (c.clone(), t.clone()),
+            _ => {
+                let claimed: HashSet<String> = self
+                    .layout
+                    .fences
+                    .iter()
+                    .filter(|f| !f.auto_sort && f.widget.is_none())
+                    .flat_map(|f| f.tabs.iter().flat_map(|t| t.items.iter().map(|p| p.to_lowercase())))
+                    .collect();
+                let targets: Vec<(u64, String, Vec<String>)> = self
+                    .layout
+                    .fences
+                    .iter()
+                    .filter(|f| !f.auto_sort && f.widget.is_none())
+                    .map(|f| (f.id, f.name.clone(), f.tabs.iter().map(|t| t.name.clone()).collect()))
+                    .collect();
+                let (c, t) = (Arc::new(claimed), Arc::new(targets));
+                self.claimed_cache = Some((layout_fp, c.clone(), t.clone()));
+                (c, t)
+            }
+        };
         let expand_on_hover = self.layout.settings.expand_on_hover;
         let mut dirty = false;
         let mut wake_scan = false;
-        let desk = DeskState { items: &self.items, claimed: &claimed, spacing: self.spacing, rules: &self.layout.settings.categories, open_counts: &self.layout.open_counts };
+        let desk_rev = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            (self.items_rev, layout_fp).hash(&mut h);
+            for r in &self.layout.settings.categories {
+                (&r.name, &r.exts, &r.pattern, r.days).hash(&mut h);
+            }
+            if has_age_rule {
+                // Rules about how recently a file changed: look again once a minute.
+                (std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() / 60).unwrap_or(0)).hash(&mut h);
+            }
+            h.finish()
+        };
+        let desk = DeskState { items: &self.items, claimed: &claimed, spacing: self.spacing, rules: &self.layout.settings.categories, open_counts: &self.layout.open_counts, rev: desk_rev };
         // DirectX boxes: Windows draws the glass, egui draws the contents with the GPU.
         #[cfg(windows)]
         if self.hosts.as_ref().map(|h| h.lost).unwrap_or(false) {
@@ -1544,7 +1650,7 @@ impl DeskApp {
                             }
                             None => false,
                         };
-                        if std::env::var_os("DESKTOPSHEPHERD_DEBUG_INK").is_some() {
+                        if debug_flag(1) {
                             storage::log_line(&format!("ink: box {id} {px:?} brightness {:?} dark {now}", crate::backdrop::brightness(px)));
                         }
                         self.ink_rects.insert(id, px);
@@ -1609,7 +1715,7 @@ impl DeskApp {
         }
         // DESKTOPSHEPHERD_DEBUG_DRAWS: log how many box frames each pass draws (measuring only).
         let passes = DRAW_STATS.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-        if passes % 300 == 0 && std::env::var_os("DESKTOPSHEPHERD_DEBUG_DRAWS").is_some() {
+        if passes % 300 == 0 && debug_flag(2) {
             let draws = DRAW_STATS.1.swap(0, std::sync::atomic::Ordering::Relaxed);
             let us = DRAW_US.swap(0, std::sync::atomic::Ordering::Relaxed);
             let upd = UPDATE_US.swap(0, std::sync::atomic::Ordering::Relaxed);
@@ -1683,6 +1789,9 @@ impl DeskApp {
         if dirty {
             self.mark_dirty();
         }
+        if std::mem::take(&mut self.ui.save_soon) && self.dirty_at.is_none() {
+            self.dirty_at = Some(Instant::now());
+        }
         if wake_scan {
             if let Ok(mut e) = self.extra_paths.lock() {
                 *e = clean_paths(&self.layout);
@@ -1706,7 +1815,7 @@ fn fence_window(
     let mut dirty = false;
     let mut wake = false;
 
-    if std::env::var_os("DESKTOPSHEPHERD_DEBUG_REPAINT").is_some() && ctx.cumulative_pass_nr() % 120 == 0 {
+    if debug_flag(0) && ctx.cumulative_pass_nr() % 120 == 0 {
         storage::log_line(&format!(
             "box {} causes: {:?} burst={:?} rect={:?}",
             fence.id,
@@ -1715,7 +1824,7 @@ fn fence_window(
             ctx.input(|i| i.viewport().inner_rect)
         ));
     }
-    if std::env::var_os("DESKTOPSHEPHERD_DEBUG_DRAG").is_some() && ctx.input(|i| i.pointer.any_pressed() || i.pointer.any_released()) {
+    if debug_flag(3) && ctx.input(|i| i.pointer.any_pressed() || i.pointer.any_released()) {
         storage::log_line(&format!("box {} pointer pressed={} released={} at {:?} hovered_any={} dragged={:?}", fence.id, ctx.input(|i| i.pointer.any_pressed()), ctx.input(|i| i.pointer.any_released()), ctx.input(|i| i.pointer.interact_pos()), ctx.is_pointer_over_area(), ctx.dragged_id()));
     }
     // Hover-to-open for rolled-up boxes.
@@ -1804,9 +1913,6 @@ fn fence_window(
     }
     let hovering_files = ctx.input(|i| !i.raw.hovered_files.is_empty());
 
-    let mut view = fence.clone();
-    view.expanded = showing_full;
-
     egui::CentralPanel::default().frame(egui::Frame::NONE).show(ctx, |ui| {
         let rect = ui.max_rect();
         let painter = ui.painter().clone();
@@ -1834,7 +1940,7 @@ fn fence_window(
         } else {
             // No glass available: a solid dark background with the box's tint and border.
             painter.rect_filled(rect, 0.0, Color32::from_rgb(30, 30, 34));
-            fv::paint_background(&painter, &view, rect, 1.0);
+            fv::paint_background(&painter, fence, rect, 1.0);
         }
         if hovering_files && !fence.auto_sort {
             painter.rect_stroke(
@@ -1888,9 +1994,25 @@ fn fence_window(
             st.selected = None;
         }
 
-        let tabs = if view.widget.is_some() { vec![(fence.name.clone(), vec![])] } else { fv::visible_tabs(&view, desk) };
-        let tab_count = if view.widget.is_some() { 1 } else { tabs.len() };
-        let a = fv::areas(&view, rect, tab_count, 1.0);
+        // The tabs are rebuilt only when something they depend on changed (see `fv::tabs_key`).
+        let tabs_data: Arc<TabsData> = if fence.widget.is_some() {
+            Arc::new(TabsData { tabs: vec![(fence.name.clone(), vec![])], keys: vec![vec![]] })
+        } else {
+            let tk = fv::tabs_key(fence, desk);
+            match st.tabs_cache.get(&fence.id) {
+                Some((k, d)) if *k == tk => d.clone(),
+                _ => {
+                    let tabs = fv::visible_tabs(fence, desk);
+                    let keys = tabs.iter().map(|(_, v)| v.iter().map(|i| i.path.to_lowercase()).collect()).collect();
+                    let d = Arc::new(TabsData { tabs, keys });
+                    st.tabs_cache.insert(fence.id, (tk, d.clone()));
+                    d
+                }
+            }
+        };
+        let tabs = &tabs_data.tabs;
+        let tab_count = if fence.widget.is_some() { 1 } else { tabs.len() };
+        let a = fv::areas_x(fence, showing_full, rect, tab_count, 1.0);
 
         // Title: drag to move, double-click to roll up / open.
         let title = ui.interact(a.title, ui.id().with("title"), Sense::click_and_drag());
@@ -1928,7 +2050,7 @@ fn fence_window(
         if title.secondary_clicked() {
             open_menu(ctx, st, MenuTarget::Fence(fence.id));
         }
-        fv::paint_title(&painter, &view, a.title, 1.0, title.hovered());
+        fv::paint_title_x(&painter, fence, showing_full, a.title, 1.0, title.hovered());
 
         // Renaming box or tab.
         if let Some((rid, tab, mut text)) = st.renaming.take() {
@@ -1969,7 +2091,7 @@ fn fence_window(
         let sel = fence.sel_tab.min(tabs.len().saturating_sub(1));
         if let Some(strip) = a.tabs {
             let names: Vec<String> = tabs.iter().map(|t| t.0.clone()).collect();
-            let rects = fv::paint_tabs(&painter, &view, strip, &names, sel, 1.0);
+            let rects = fv::paint_tabs(&painter, fence, strip, &names, sel, 1.0);
             for (i, r) in rects.iter().enumerate() {
                 let resp = ui.interact(*r, ui.id().with(("tab", i)), Sense::click());
                 if resp.clicked() && fence.sel_tab != i {
@@ -1998,10 +2120,13 @@ fn fence_window(
                 v.widgets.active.weak_bg_fill = Color32::from_white_alpha(190);
             }
             match widgets::find(&wc.kind) {
-                Some(_) if wc.kind == "search" => search_widget(&mut child, fence.id, desk, icons, actions),
+                Some(_) if wc.kind == "search" => search_widget(&mut child, fence.id, desk, icons, actions, &mut st.search_cache),
                 Some(kind) => {
                     let out = (kind.make)().ui(&mut child, &mut wc.data);
-                    dirty |= out.changed;
+                    if out.changed {
+                        // Typing in a note and the like: save, but only this box needs drawing again.
+                        st.save_soon = true;
+                    }
                     if let Some(d) = out.repaint_after {
                         ctx.request_repaint_after(d);
                     }
@@ -2011,6 +2136,7 @@ fn fence_window(
                 }
             }
         } else if let Some((_, items)) = tabs.get(sel) {
+            let item_keys: &[String] = tabs_data.keys.get(sel).map(|k| k.as_slice()).unwrap_or(&[]);
             // Icon grid.
             let cell = fv::cell_size(fence, desk.spacing);
             let style = fv::text_style(fence);
@@ -2114,7 +2240,11 @@ fn fence_window(
                         st.band = None;
                     }
                     let pad = ((width - cols as f32 * cell.x) / 2.0).max(0.0).min(cell.x * 0.5);
-                    st.grid_order.insert(fence.id, (items.iter().map(|i| i.path.clone()).collect(), cols));
+                    // Only rebuilt when the order or the column count changed.
+                    let same = st.grid_order.get(&fence.id).map(|(old, c)| *c == cols && old.len() == items.len() && old.iter().zip(items.iter()).all(|(a, b)| *a == b.path)).unwrap_or(false);
+                    if !same {
+                        st.grid_order.insert(fence.id, (items.iter().map(|i| i.path.clone()).collect(), cols));
+                    }
                     let mut reorder: Option<(String, String)> = None;
                     // (icon rectangles were only needed by the old see-through drag copy)
                     let clip = ui.clip_rect();
@@ -2129,13 +2259,20 @@ fn fence_window(
                             continue; // off-screen: skip work
                         }
                         let resp = ui.interact(cr, ui.id().with(("item", &it.path)), Sense::click_and_drag());
-                        let key = it.path.to_lowercase();
+                        let fallback_key;
+                        let key: &String = match item_keys.get(i) {
+                            Some(k) => k,
+                            None => {
+                                fallback_key = it.path.to_lowercase();
+                                &fallback_key
+                            }
+                        };
                         if let Some(b) = band_rect {
                             if b.intersects(cr.shrink(8.0)) {
                                 st.selection.insert(key.clone());
                             }
                         }
-                        let selected = st.selection.contains(&key);
+                        let selected = st.selection.contains(key);
                         let hl = if selected { 50 } else if resp.hovered() { 22 } else { 0 };
                         let renaming_this = st.icon_rename.as_ref().map(|r| r.box_id == fence.id && r.path.eq_ignore_ascii_case(&it.path)).unwrap_or(false);
                         if renaming_this {
@@ -2148,7 +2285,7 @@ fn fence_window(
                         if resp.clicked() {
                             // Click: just this icon; Ctrl+click: add or remove it.
                             if ui.input(|i| i.modifiers.ctrl) {
-                                if !st.selection.remove(&key) {
+                                if !st.selection.remove(key) {
                                     st.selection.insert(key.clone());
                                 }
                             } else {
@@ -2159,12 +2296,12 @@ fn fence_window(
                         }
                         // Drag icons into another box (or onto the desktop to take them out).
                         if resp.drag_started() {
-                            if !st.selection.contains(&key) {
+                            if !st.selection.contains(key) {
                                 st.selection.clear();
                                 st.selection.insert(key.clone());
                             }
                             let paths: Vec<String> = items.iter().filter(|x| st.selection.contains(&x.path.to_lowercase())).map(|x| x.path.clone()).collect();
-                            if std::env::var_os("DESKTOPSHEPHERD_DEBUG_DRAG").is_some() {
+                            if debug_flag(3) {
                                 storage::log_line(&format!("icon drag start from box {}: {:?}", fence.id, paths));
                             }
                             st.item_drag = Some((fence.id, paths));
@@ -2196,7 +2333,7 @@ fn fence_window(
                             }
                             if let Some((from, paths)) = st.item_drag.take() {
                                 if let Some(at) = desktop::cursor_points(desktop::system_scale()) {
-                                    if std::env::var_os("DESKTOPSHEPHERD_DEBUG_DRAG").is_some() {
+                                    if debug_flag(3) {
                                         storage::log_line(&format!("icon drop from box {from} at {at:?}"));
                                     }
                                     actions.push(Act::DropItems { from, paths, at });
@@ -2216,7 +2353,7 @@ fn fence_window(
                         }
                         if resp.secondary_clicked() {
                             st.selected = Some(it.path.clone());
-                            if !st.selection.contains(&key) {
+                            if !st.selection.contains(key) {
                                 st.selection.clear();
                                 st.selection.insert(key.clone());
                             }
@@ -2635,7 +2772,8 @@ fn look_right(ui: &mut egui::Ui, fence: &mut Fence, actions: &mut Vec<Act>) -> b
                 if row(ui, icon::COLOR, t("Apply this look to all boxes"), None, true).clicked() {
                     actions.push(Act::ApplyLookToAll(fence.id));
                 }
-                ui.add_space(4.0);    dirty
+    ui.add_space(4.0);
+    dirty
 }
 
 /// The name field under an icon being renamed (F2): Enter or a click elsewhere keeps the new name,
@@ -3362,7 +3500,7 @@ impl DeskApp {
             .filter(|f| !f.auto_sort && f.widget.is_none())
             .flat_map(|f| f.tabs.iter().flat_map(|t| t.items.iter().map(|p| p.to_lowercase())))
             .collect();
-        let desk = DeskState { items: &self.items, claimed: &claimed, spacing: self.spacing, rules: &self.layout.settings.categories, open_counts: &self.layout.open_counts };
+        let desk = DeskState { items: &self.items, claimed: &claimed, spacing: self.spacing, rules: &self.layout.settings.categories, open_counts: &self.layout.open_counts, rev: 0 };
         for f in &self.layout.fences {
             let h = if f.expanded { f.rect[3] } else { ROLLED_HEIGHT };
             let br = Rect::from_min_size(Pos2::new(f.rect[0], f.rect[1]), Vec2::new(f.rect[2], h));
@@ -4238,10 +4376,23 @@ impl DeskApp {
         let rect_px = [(x * scale) as i32, (y * scale) as i32, (w * scale) as i32, (s.height * scale) as i32];
         // Desktop items, and (if turned on) the Start menu's programs.
         let apps = crate::apps::list();
-        let pool = crate::apps::search_pool(self.items.values(), &apps, self.layout.settings.search_apps);
-        let results: Vec<DeskItem> = crate::search::rank(pool, &s.query, 12).into_iter().cloned().collect();
-        let homes = self.item_homes();
-        let app_paths: HashSet<String> = apps.iter().map(|a| a.path.to_lowercase()).collect();
+        let key = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            (&s.query, self.items_rev, layout_fingerprint(&self.layout).0, Arc::as_ptr(&apps) as usize, apps.len(), self.layout.settings.search_apps).hash(&mut h);
+            h.finish()
+        };
+        if self.search_cache.as_ref().map(|c| c.key) != Some(key) {
+            let pool = crate::apps::search_pool(self.items.values(), &apps, self.layout.settings.search_apps);
+            let results: Vec<DeskItem> = crate::search::rank(pool, &s.query, 12).into_iter().cloned().collect();
+            let app_paths: HashSet<String> = apps.iter().map(|a| a.path.to_lowercase()).collect();
+            self.search_cache = Some(SearchCache { key, results: Arc::new(results), homes: Arc::new(self.item_homes()), app_paths: Arc::new(app_paths) });
+        }
+        let (results_arc, homes, app_paths) = match &self.search_cache {
+            Some(c) => (c.results.clone(), c.homes.clone(), c.app_paths.clone()),
+            None => (Arc::new(Vec::new()), Arc::new(HashMap::new()), Arc::new(HashSet::new())),
+        };
+        let results: &Vec<DeskItem> = &results_arc;
         let other = self.layout.fences.iter().find(|f| f.auto_sort).map(|f| f.name.clone()).unwrap_or_else(|| t("Desktop").into());
         if s.sel >= results.len() {
             s.sel = results.len().saturating_sub(1);
@@ -4390,7 +4541,7 @@ impl DeskApp {
             .filter(|f| !f.auto_sort && f.widget.is_none())
             .flat_map(|f| f.tabs.iter().flat_map(|t| t.items.iter().map(|p| p.to_lowercase())))
             .collect();
-        let desk = DeskState { items: &self.items, claimed: &claimed, spacing: self.spacing, rules: &self.layout.settings.categories, open_counts: &self.layout.open_counts };
+        let desk = DeskState { items: &self.items, claimed: &claimed, spacing: self.spacing, rules: &self.layout.settings.categories, open_counts: &self.layout.open_counts, rev: 0 };
         // Only boxes you can see: open, on the page shown, not all hidden.
         let (page, hidden) = (self.layout.current_page, self.boxes_hidden);
         let mut boxes: Vec<&Fence> = self.layout.fences.iter().filter(|f| !hidden && f.page == page && f.expanded && f.widget.is_none()).collect();
@@ -4743,7 +4894,7 @@ impl DeskApp {
 
 /// The search box widget: type, and the matching desktop items show underneath; click one or
 /// press Enter to open it (arrow keys pick, Esc clears). Uses the same ranking as quick search.
-fn search_widget(ui: &mut egui::Ui, id: u64, desk: &DeskState, icons: &mut IconCache, actions: &mut Vec<Act>) {
+fn search_widget(ui: &mut egui::Ui, id: u64, desk: &DeskState, icons: &mut IconCache, actions: &mut Vec<Act>, cache: &mut HashMap<u64, (u64, Arc<Vec<DeskItem>>)>) {
     let qid = egui::Id::new(("search-widget", id));
     let mut q: String = ui.ctx().data(|d| d.get_temp(qid)).unwrap_or_default();
     let mut sel: usize = ui.ctx().data(|d| d.get_temp(qid.with("sel"))).unwrap_or(0);
@@ -4759,7 +4910,25 @@ fn search_widget(ui: &mut egui::Ui, id: u64, desk: &DeskState, icons: &mut IconC
     let row_h = 28.0;
     let fits = ((ui.available_height() - 6.0) / row_h).floor().max(1.0) as usize;
     let apps = crate::apps::list();
-    let results: Vec<&DeskItem> = if q.trim().is_empty() { Vec::new() } else { crate::search::rank(crate::apps::search_pool(desk.items.values(), &apps, crate::apps::enabled()), &q, fits) };
+    // Searched again only when the text, the items or the program list changed.
+    let results_arc: Arc<Vec<DeskItem>> = if q.trim().is_empty() {
+        cache.remove(&id);
+        Arc::new(Vec::new())
+    } else {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        (&q, fits, desk.rev, Arc::as_ptr(&apps) as usize, apps.len(), crate::apps::enabled()).hash(&mut h);
+        let key = h.finish();
+        match cache.get(&id) {
+            Some((k, r)) if *k == key => r.clone(),
+            _ => {
+                let r: Arc<Vec<DeskItem>> = Arc::new(crate::search::rank(crate::apps::search_pool(desk.items.values(), &apps, crate::apps::enabled()), &q, fits).into_iter().cloned().collect());
+                cache.insert(id, (key, r.clone()));
+                r
+            }
+        }
+    };
+    let results: Vec<&DeskItem> = results_arc.iter().collect();
     let (up, down, enter, esc) = ui.input(|i| (i.key_pressed(egui::Key::ArrowUp), i.key_pressed(egui::Key::ArrowDown), i.key_pressed(egui::Key::Enter), i.key_pressed(egui::Key::Escape)));
     let mut open: Option<String> = None;
     if r.has_focus() || r.lost_focus() {

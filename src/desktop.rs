@@ -122,6 +122,8 @@ pub fn open_item(path: &str) {
             use windows::Win32::UI::Shell::ShellExecuteW;
             use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
             // The program being started may come to the front (it would otherwise open behind).
+            // ASFW_ANY on purpose: ShellExecute starts a program we cannot know the process id of
+            // in advance (it may hand the file to an already-running one).
             let _ = windows::Win32::UI::WindowsAndMessaging::AllowSetForegroundWindow(windows::Win32::UI::WindowsAndMessaging::ASFW_ANY);
             let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
             let file = HSTRING::from(path.as_str());
@@ -372,28 +374,12 @@ pub fn work_area_at(p: egui::Pos2, ppp: f32) -> egui::Rect {
 /// clash with Explorer keeping its own desktop at the bottom). Returns the window handle.
 pub fn prepare_box(handle: isize, no_activate: bool) -> Option<isize> {
     #[cfg(windows)]
-    unsafe {
-        use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
-        use windows::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
-        use windows::Win32::UI::WindowsAndMessaging::{MA_NOACTIVATE, WM_MOUSEACTIVATE};
+    {
+        use windows::Win32::Foundation::HWND;
 
-        unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM, _id: usize, data: usize) -> LRESULT {
-            if msg == WM_MOUSEACTIVATE && data == 1 {
-                return LRESULT(MA_NOACTIVATE as isize);
-            }
-            // A widget box takes the keyboard when clicked (to type in a note or a to-do list),
-            // and Windows lifts a window that becomes active to the top. Keep the box where it is
-            // (behind the apps): drop the z-order part of such a move. Our own restacking always
-            // passes SWP_NOACTIVATE and is left alone.
-            if msg == windows::Win32::UI::WindowsAndMessaging::WM_WINDOWPOSCHANGING && data == 0 && lp.0 != 0 {
-                use windows::Win32::UI::WindowsAndMessaging::{HWND_TOP, SWP_NOACTIVATE, SWP_NOZORDER, WINDOWPOS};
-                let wp_ = &mut *(lp.0 as *mut WINDOWPOS);
-                if (wp_.flags & SWP_NOZORDER).0 == 0 && (wp_.flags & SWP_NOACTIVATE).0 == 0 && wp_.hwndInsertAfter == HWND_TOP {
-                    wp_.flags |= SWP_NOZORDER;
-                }
-            }
-            DefSubclassProc(hwnd, msg, wp, lp)
-        }
+        // Window activation and z-order rules live in host.rs (WM_MOUSEACTIVATE, WM_WINDOWPOSCHANGING,
+        // WM_ACTIVATE); the host's `no_activate` look option carries what `no_activate` says here.
+        let _ = no_activate;
 
         // The handle the box host created (never looked up by title: another program's window
         // could carry the same title).
@@ -401,7 +387,6 @@ pub fn prepare_box(handle: isize, no_activate: bool) -> Option<isize> {
         if hwnd.0.is_null() {
             return None;
         }
-        let _ = SetWindowSubclass(hwnd, Some(proc), 0xDE5B, if no_activate { 1 } else { 0 });
         register_box(hwnd.0 as isize);
         send_to_bottom(hwnd.0 as isize);
         Some(hwnd.0 as isize)
@@ -537,6 +522,17 @@ fn desktop_window() -> Option<windows::Win32::Foundation::HWND> {
 /// of this program above the desktop are skipped when choosing the spot.
 pub fn send_to_bottom(hwnd: isize) {
     #[cfg(windows)]
+    send_to_bottom_with(desktop_window(), hwnd);
+    #[cfg(not(windows))]
+    {
+        let _ = hwnd;
+    }
+}
+
+/// Like `send_to_bottom`, with the desktop window already known (the show-desktop guard looks
+/// it up once per round instead of once per box).
+#[cfg(windows)]
+fn send_to_bottom_with(desk: Option<windows::Win32::Foundation::HWND>, hwnd: isize) {
     unsafe {
         use windows::Win32::Foundation::HWND;
         use windows::Win32::System::Threading::GetCurrentProcessId;
@@ -545,7 +541,7 @@ pub fn send_to_bottom(hwnd: isize) {
             SWP_ASYNCWINDOWPOS, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
         };
         let me = GetCurrentProcessId();
-        let after = match desktop_window() {
+        let after = match desk {
             None => HWND_BOTTOM,
             Some(desk) => {
                 // The nearest window above the desktop that isn't ours: the box goes just below it.
@@ -576,10 +572,6 @@ pub fn send_to_bottom(hwnd: isize) {
             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS,
         );
         crate::shadow::restack(hwnd);
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = hwnd;
     }
 }
 
@@ -666,6 +658,7 @@ pub fn watch_show_desktop() {
                     let mut until = start + Duration::from_millis(GUARD_WINDOW_MS);
                     // Since when the boxes have been seen above the desktop without help.
                     let mut fine_since: Option<Instant> = None;
+                    let mut desk = desktop_window();
                     while Instant::now() < until {
                         // Another desktop click meanwhile: keep watching a little longer.
                         while rx.try_recv().is_ok() {
@@ -673,10 +666,18 @@ pub fn watch_show_desktop() {
                             until = start + Duration::from_millis(GUARD_WINDOW_MS);
                             fine_since = None;
                         }
+                        // The desktop window is looked up once per round (again only if it vanished).
+                        if desk.map(|d| !IsWindow(d).as_bool()).unwrap_or(true) {
+                            desk = desktop_window();
+                        }
                         let boxes: Vec<isize> = BOX_HWNDS.lock().map(|v| v.clone()).unwrap_or_default();
-                        if boxes.first().map(|h| box_below_desktop(*h)).unwrap_or(false) {
+                        let covered = match (desk, boxes.first()) {
+                            (Some(d), Some(h)) => box_below_desktop(d, *h),
+                            _ => false,
+                        };
+                        if covered {
                             for h in &boxes {
-                                send_to_bottom(*h);
+                                send_to_bottom_with(desk, *h);
                             }
                             fine_since = None;
                         } else {
@@ -688,7 +689,7 @@ pub fn watch_show_desktop() {
                                 break;
                             }
                         }
-                        std::thread::sleep(Duration::from_millis(2));
+                        std::thread::sleep(Duration::from_millis(8));
                     }
                 }
             });
@@ -751,10 +752,9 @@ const GUARD_WINDOW_MS: u64 = 1000;
 /// True when the box window sits below the desktop window in the stack (so it is covered).
 /// Only reads the window list; never sends anything to Explorer.
 #[cfg(windows)]
-fn box_below_desktop(hwnd: isize) -> bool {
+fn box_below_desktop(desk: windows::Win32::Foundation::HWND, hwnd: isize) -> bool {
     use windows::Win32::Foundation::HWND;
     use windows::Win32::UI::WindowsAndMessaging::{GetWindow, GW_HWNDPREV};
-    let Some(desk) = desktop_window() else { return false };
     unsafe {
         let mut w = GetWindow(HWND(hwnd as *mut _), GW_HWNDPREV).unwrap_or_default();
         let mut guard = 0;
@@ -1100,12 +1100,12 @@ pub fn watch_folders(dirs: impl Fn() -> Vec<PathBuf> + Send + 'static, changed: 
             use windows::Win32::Foundation::{BOOL, HANDLE, WAIT_TIMEOUT};
             use windows::Win32::Storage::FileSystem::{
                 FindCloseChangeNotification, FindFirstChangeNotificationW, FindNextChangeNotification, FILE_NOTIFY_CHANGE,
-                FILE_NOTIFY_CHANGE_DIR_NAME, FILE_NOTIFY_CHANGE_FILE_NAME, FILE_NOTIFY_CHANGE_LAST_WRITE, FILE_NOTIFY_CHANGE_SIZE,
+                FILE_NOTIFY_CHANGE_DIR_NAME, FILE_NOTIFY_CHANGE_FILE_NAME,
             };
             use windows::Win32::System::Threading::WaitForMultipleObjects;
-            let filter = FILE_NOTIFY_CHANGE(
-                FILE_NOTIFY_CHANGE_FILE_NAME.0 | FILE_NOTIFY_CHANGE_DIR_NAME.0 | FILE_NOTIFY_CHANGE_LAST_WRITE.0 | FILE_NOTIFY_CHANGE_SIZE.0,
-            );
+            // Names only: the reader compares just path and name (app.rs), so a write to a file that
+            // is downloading or being edited (size / date changes) would wake it for nothing.
+            let filter = FILE_NOTIFY_CHANGE(FILE_NOTIFY_CHANGE_FILE_NAME.0 | FILE_NOTIFY_CHANGE_DIR_NAME.0);
             let mut watched: Vec<PathBuf> = Vec::new();
             let mut handles: Vec<HANDLE> = Vec::new();
             let close_all = |hs: &mut Vec<HANDLE>| {
@@ -1237,7 +1237,8 @@ pub fn forward_new_request(what: &str) -> bool {
         use windows::Win32::Foundation::{LPARAM, POINT, WPARAM};
         use windows::Win32::UI::HiDpi::{SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2};
         use windows::Win32::UI::WindowsAndMessaging::{
-            AllowSetForegroundWindow, FindWindowW, GetCursorPos, SendMessageTimeoutW, ASFW_ANY, SMTO_ABORTIFHUNG, WM_COPYDATA,
+            AllowSetForegroundWindow, FindWindowW, GetCursorPos, GetWindowThreadProcessId, SendMessageTimeoutW, SMTO_ABORTIFHUNG,
+            WM_COPYDATA,
         };
         use windows::Win32::System::DataExchange::COPYDATASTRUCT;
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
@@ -1248,7 +1249,11 @@ pub fn forward_new_request(what: &str) -> bool {
         if let Ok(main) = FindWindowW(w!("DesktopShepherdMain"), PCWSTR::null()) {
             if !main.0.is_null() {
                 // Let it bring its menu or drawing layer to the front.
-                let _ = AllowSetForegroundWindow(ASFW_ANY);
+                let mut pid = 0u32;
+                GetWindowThreadProcessId(main, Some(&mut pid));
+                if pid != 0 {
+                    let _ = AllowSetForegroundWindow(pid);
+                }
                 let cds = COPYDATASTRUCT { dwData: 0xD5, cbData: msg.len() as u32, lpData: msg.as_ptr() as *mut _ };
                 let mut res = 0usize;
                 let ok = SendMessageTimeoutW(main, WM_COPYDATA, WPARAM(0), LPARAM(&cds as *const _ as isize), SMTO_ABORTIFHUNG, 3000, Some(&mut res));
@@ -1373,3 +1378,33 @@ pub fn take_restack_request() -> bool {
     RESTACK_ASKED.swap(false, std::sync::atomic::Ordering::SeqCst)
 }
 
+
+/// Supervisor's liveness check of the worker (process `pid`): asks the worker's own hidden main
+/// window (class "DesktopShepherdMain", ours, never Explorer's) to answer a harmless message
+/// within 5 s. `Some(true)` = answered, `Some(false)` = frozen (no answer / marked as hung),
+/// `None` = that process has no such window (yet).
+#[cfg(windows)]
+pub fn ping_worker(pid: u32) -> Option<bool> {
+    use windows::core::w;
+    use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        FindWindowExW, GetWindowThreadProcessId, SendMessageTimeoutW, SMTO_ABORTIFHUNG, SMTO_BLOCK, WM_NULL,
+    };
+    unsafe {
+        let mut prev = HWND::default();
+        for _ in 0..64 {
+            let Ok(h) = FindWindowExW(None, prev, w!("DesktopShepherdMain"), None) else { return None };
+            if h.0.is_null() {
+                return None;
+            }
+            prev = h;
+            let mut owner = 0u32;
+            GetWindowThreadProcessId(h, Some(&mut owner));
+            if owner == pid {
+                let r = SendMessageTimeoutW(h, WM_NULL, WPARAM(0), LPARAM(0), SMTO_ABORTIFHUNG | SMTO_BLOCK, 5000, None);
+                return Some(r.0 != 0);
+            }
+        }
+        None
+    }
+}

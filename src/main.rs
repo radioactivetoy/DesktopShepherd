@@ -50,6 +50,51 @@ use std::path::PathBuf;
 /// tries again later.
 pub const EXIT_START_FAILED: i32 = 2;
 
+/// How often the supervisor checks that the worker still answers, how long one check may take,
+/// how many failed checks in a row mean "frozen", and the time after a start in which no check is
+/// made (the worker is still starting).
+const WATCHDOG_EVERY_MS: u32 = 10_000;
+/// Runs the worker until it ends. A worker that is alive but frozen (its hidden main window no
+/// longer answers for about 30 s) is stopped, so the usual restart (and the icons coming back)
+/// follows. The supervisor sleeps inside Windows between checks: no CPU.
+fn run_worker(cmd: &mut std::process::Command, started: std::time::Instant) -> std::io::Result<std::process::ExitStatus> {
+    let mut child = cmd.spawn()?;
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawHandle;
+        use windows::Win32::Foundation::{HANDLE, WAIT_TIMEOUT};
+        use windows::Win32::System::Threading::WaitForSingleObject;
+        const GRACE_SECS: u64 = 60;
+        const FAILS_TO_KILL: u32 = 3;
+        let handle = HANDLE(child.as_raw_handle() as *mut _);
+        let pid = child.id();
+        let mut fails = 0u32;
+        loop {
+            if unsafe { WaitForSingleObject(handle, WATCHDOG_EVERY_MS) } != WAIT_TIMEOUT {
+                break; // ended (or the wait itself failed: fall back to waiting below)
+            }
+            if started.elapsed().as_secs() < GRACE_SECS {
+                continue;
+            }
+            match desktop::ping_worker(pid) {
+                Some(false) => {
+                    fails += 1;
+                    if fails >= FAILS_TO_KILL {
+                        storage::log_line(&format!("the app stopped answering ({fails} checks in a row); stopping it to restart"));
+                        let _ = child.kill();
+                        break;
+                    }
+                }
+                // Answered, or no window yet (e.g. restarting its own window): not frozen.
+                _ => fails = 0,
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = started;
+    child.wait()
+}
+
 /// The safety net, like the original's launcher (0x140012300 in the original launcher, which checks
 /// every 2000 ms and restarts the organizer): runs the real app as a child process and starts
 /// it again if it ever stops without the person quitting. Only a clean quit (exit code 0) ends
@@ -69,7 +114,7 @@ fn supervise(boot: bool) {
         }
         first = false;
         let started = Instant::now();
-        let status = cmd.status();
+        let status = run_worker(&mut cmd, started);
         // However the app stopped (quit, crash, or force-closed), give the desktop icons back
         // right away; a restarted app hides them again itself.
         if storage::load().map(|l| l.settings.hide_desktop_icons).unwrap_or(false) {

@@ -102,13 +102,14 @@ pub fn brightness(rect_px: [i32; 4]) -> Option<f32> {
 fn worker() {
     #[cfg(windows)]
     unsafe {
-        use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
-        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
+        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
     }
     let mut last_sig = String::new();
+    let mut cache = ThumbCache::default();
     loop {
         if ENABLED.load(Ordering::Relaxed) {
-            check(&mut last_sig);
+            check(&mut last_sig, &mut cache);
         }
         let (m, c) = &POKE;
         let g = m.lock().unwrap_or_else(|e| e.into_inner());
@@ -118,11 +119,11 @@ fn worker() {
         if poked {
             // Windows announces a new wallpaper before the files are final: look again shortly.
             if ENABLED.load(Ordering::Relaxed) {
-                check(&mut last_sig);
+                check(&mut last_sig, &mut cache);
             }
             std::thread::sleep(Duration::from_secs(2));
             if ENABLED.load(Ordering::Relaxed) {
-                check(&mut last_sig);
+                check(&mut last_sig, &mut cache);
             }
         }
     }
@@ -277,14 +278,40 @@ struct Thumb {
 fn load_thumb(path: &std::path::Path) -> Option<Thumb> {
     let bytes = std::fs::read(path).ok()?;
     let img = image::load_from_memory(&bytes).ok()?;
+    drop(bytes);
     let (iw, ih) = (img.width() as f32, img.height() as f32);
+    // Keep only the small thumbnail: the full picture is dropped at once.
     let t = img.thumbnail(320, 320).to_rgb8();
+    drop(img);
     let (w, h) = (t.width() as usize, t.height() as usize);
     if w == 0 || h == 0 {
         return None;
     }
     let lum_v = t.pixels().map(|p| lum(p.0[0] as f32, p.0[1] as f32, p.0[2] as f32) / 255.0).collect();
     Some(Thumb { w, h, iw, ih, lum: lum_v })
+}
+
+/// Thumbnails already made, by (file, modified time, size), so the same wallpaper on two monitors
+/// (or seen again after a change of layout) is decoded once. At most 4 are kept.
+#[derive(Default)]
+struct ThumbCache {
+    items: Vec<((std::path::PathBuf, Option<SystemTime>, u64), Option<std::sync::Arc<Thumb>>)>,
+}
+
+impl ThumbCache {
+    fn get(&mut self, path: &std::path::Path) -> Option<std::sync::Arc<Thumb>> {
+        let md = std::fs::metadata(path).ok();
+        let key = (path.to_path_buf(), md.as_ref().and_then(|m| m.modified().ok()), md.as_ref().map(|m| m.len()).unwrap_or(0));
+        if let Some((_, v)) = self.items.iter().find(|(k, _)| *k == key) {
+            return v.clone();
+        }
+        let v = load_thumb(path).map(std::sync::Arc::new);
+        if self.items.len() >= 4 {
+            self.items.remove(0);
+        }
+        self.items.push((key, v.clone()));
+        v
+    }
 }
 
 /// Brightness grid of `th` laid over `target` (screen pixels) as `pos` says, seen through `mon`.
@@ -350,7 +377,7 @@ fn make_grid(th: &Thumb, mon: [i32; 4], target: [i32; 4], pos: i32, bg: f32) -> 
     grid
 }
 
-fn check(last_sig: &mut String) {
+fn check(last_sig: &mut String, cache: &mut ThumbCache) {
     let sc = scan();
     if sc.sig == *last_sig {
         return;
@@ -359,18 +386,18 @@ fn check(last_sig: &mut String) {
     let vs = virtual_screen();
     let bg = sc.bg.unwrap_or(0.0);
     // Fallback picture (shared): the transcoded wallpaper, else the newest cached one.
-    let mut fallback: Option<Option<Thumb>> = None;
+    let mut fallback: Option<Option<std::sync::Arc<Thumb>>> = None;
     let mut out = Vec::new();
     for m in &sc.mons {
-        let own = if m.path.is_empty() { None } else { load_thumb(std::path::Path::new(&m.path)) };
+        let own = if m.path.is_empty() { None } else { cache.get(std::path::Path::new(&m.path)) };
         // No picture path, or a format we cannot read: the transcoded wallpaper / cached file.
         let thumb: Option<&Thumb> = match &own {
-            Some(t) => Some(t),
+            Some(t) => Some(&**t),
             None => {
                 if fallback.is_none() {
-                    fallback = Some(themes_dir().and_then(|d| load_thumb(&d.join("TranscodedWallpaper"))).or_else(|| newest_cached().and_then(|p| load_thumb(&p))));
+                    fallback = Some(themes_dir().and_then(|d| cache.get(&d.join("TranscodedWallpaper"))).or_else(|| newest_cached().and_then(|p| cache.get(&p))));
                 }
-                fallback.as_ref().and_then(|f| f.as_ref())
+                fallback.as_ref().and_then(|f| f.as_deref())
             }
         };
         let grid = match thumb {

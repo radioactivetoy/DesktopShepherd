@@ -77,17 +77,19 @@ pub fn spawn(paths: &[String], extras: &[Extra]) -> bool {
     if crate::theme::is_light() {
         cmd.arg("--light");
     }
+    cmd.arg("--move-label").arg(crate::i18n::t("Move to"));
     for p in paths {
         cmd.arg("--path").arg(p);
     }
     for e in extras {
         cmd.arg(if e.sub { "--sub" } else { "--item" }).arg(format!("{}|{}", e.id, e.label));
     }
-    // The person just clicked in DesktopShepherd: let the helper take the focus (its menu needs it).
-    unsafe {
-        let _ = AllowSetForegroundWindow(ASFW_ANY);
-    }
     let Ok(mut child) = cmd.spawn() else { return false };
+    // The person just clicked in DesktopShepherd: let the helper (and only it) take the focus; its
+    // menu needs it.
+    unsafe {
+        let _ = AllowSetForegroundWindow(child.id());
+    }
     let clicked = paths.first().cloned().unwrap_or_default();
     let _ = std::thread::Builder::new().name("menu-helper-wait".into()).spawn(move || {
         if let Ok(status) = child.wait() {
@@ -130,10 +132,16 @@ unsafe fn dark_menus() {
 pub fn run_helper(args: &[String]) -> i32 {
     let mut paths = Vec::new();
     let mut extras = Vec::new();
+    let mut move_label = String::from("Move to");
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
             "--path" => paths.extend(it.next().cloned()),
+            "--move-label" => {
+                if let Some(l) = it.next().filter(|l| !l.is_empty()) {
+                    move_label = l.clone();
+                }
+            }
             "--item" | "--sub" => {
                 if let Some((id, label)) = it.next().and_then(|v| v.split_once('|')) {
                     if let Ok(id) = id.parse::<u32>() {
@@ -158,7 +166,7 @@ pub fn run_helper(args: &[String]) -> i32 {
         let Ok(owner) = CreateWindowExW(WS_EX_TOOLWINDOW, w!("DesktopShepherdMenuOwner"), w!("DesktopShepherd menu"), WS_POPUP, 0, 0, 0, 0, None, None, inst, None) else {
             return 0;
         };
-        let chosen = match show_inner(owner, &paths, &extras) {
+        let chosen = match show_inner(owner, &paths, &extras, &move_label) {
             Ok(c) => c,
             Err(e) => {
                 crate::storage::log_line(&format!("Windows menu could not be shown: {e:?}"));
@@ -235,7 +243,7 @@ impl Drop for Pidl {
 /// Builds the menu (DesktopShepherd entries, then Windows' items for `paths` that share the first
 /// one's folder), shows it at the mouse and handles the choice. Returns the DesktopShepherd entry
 /// chosen, or 0.
-unsafe fn show_inner(owner: HWND, paths: &[String], extras: &[Extra]) -> windows::core::Result<u32> {
+unsafe fn show_inner(owner: HWND, paths: &[String], extras: &[Extra], move_label: &str) -> windows::core::Result<u32> {
     let mut items: Vec<(Pidl, String)> = Vec::new();
     for p in paths {
         let mut pidl: *mut ITEMIDLIST = std::ptr::null_mut();
@@ -270,7 +278,7 @@ unsafe fn show_inner(owner: HWND, paths: &[String], extras: &[Extra]) -> windows
             for e in &subs {
                 let _ = AppendMenuW(sub, MF_STRING, (OURS + e.id) as usize, &HSTRING::from(e.label.as_str()));
             }
-            let _ = AppendMenuW(menu, MF_POPUP, sub.0 as usize, w!("Move to"));
+            let _ = AppendMenuW(menu, MF_POPUP, sub.0 as usize, &HSTRING::from(move_label));
             count += 1;
         }
         for e in extras.iter().filter(|e| !e.sub) {

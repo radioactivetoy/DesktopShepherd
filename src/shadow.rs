@@ -17,8 +17,8 @@ mod imp {
     use windows::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows::Win32::UI::HiDpi::GetDpiForWindow;
     use windows::Win32::UI::WindowsAndMessaging::{
-        CreateWindowExW, DefWindowProcW, DestroyWindow, GetWindowRect, RegisterClassExW, SetWindowPos, ShowWindowAsync, UpdateLayeredWindow, SW_HIDE,
-        SW_SHOWNOACTIVATE, SWP_ASYNCWINDOWPOS, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE, SWP_NOZORDER, ULW_ALPHA, WNDCLASSEXW,
+        CreateWindowExW, DefWindowProcW, DestroyWindow, GetWindowRect, RegisterClassExW, SetWindowPos, UpdateLayeredWindow,
+        SWP_ASYNCWINDOWPOS, SWP_HIDEWINDOW, SWP_NOACTIVATE, SWP_SHOWWINDOW, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE, SWP_NOZORDER, ULW_ALPHA, WNDCLASSEXW,
         WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT, WS_POPUP,
     };
 
@@ -256,13 +256,16 @@ mod imp {
         unsafe {
             let h = HWND(e.hwnd as *mut _);
             if want {
-                // Directly below its box.
-                let _ = SetWindowPos(h, HWND(b as *mut _), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_ASYNCWINDOWPOS);
-                if !e.shown {
-                    let _ = ShowWindowAsync(h, SW_SHOWNOACTIVATE);
+                // Directly below its box. The shadow is our own window: showing it and placing it is one
+                // synchronous call (no second async step that could land in a different order).
+                let flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER;
+                if e.shown {
+                    let _ = SetWindowPos(h, HWND(b as *mut _), 0, 0, 0, 0, flags | SWP_ASYNCWINDOWPOS);
+                } else {
+                    let _ = SetWindowPos(h, HWND(b as *mut _), 0, 0, 0, 0, flags | SWP_SHOWWINDOW);
                 }
             } else if e.shown {
-                let _ = ShowWindowAsync(h, SW_HIDE);
+                let _ = SetWindowPos(h, None, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_HIDEWINDOW);
             }
         }
         e.shown = want;

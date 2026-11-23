@@ -29,6 +29,25 @@ fn multi_sz(paths: &[String]) -> Vec<u16> {
     v
 }
 
+/// COM for the current thread (the shell's file operation shows its dialogs and uses shell
+/// extensions, which expect it); undone on drop, and only if this call did the setup.
+struct ComGuard(bool);
+
+impl ComGuard {
+    fn new() -> Self {
+        use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE};
+        ComGuard(unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE) }.is_ok())
+    }
+}
+
+impl Drop for ComGuard {
+    fn drop(&mut self) {
+        if self.0 {
+            unsafe { windows::Win32::System::Com::CoUninitialize() };
+        }
+    }
+}
+
 fn file_op(func: u32, from: &[String], to: Option<&str>, flags: u16) -> bool {
     let from_w = multi_sz(from);
     let to_w = to.map(|t| multi_sz(&[t.to_string()]));
@@ -47,6 +66,7 @@ fn file_op(func: u32, from: &[String], to: Option<&str>, flags: u16) -> bool {
 /// then calls `done`.
 pub fn recycle(paths: Vec<String>, done: impl FnOnce() + Send + 'static) {
     let _ = std::thread::Builder::new().name("recycle".into()).spawn(move || {
+        let _com = ComGuard::new();
         let _ = file_op(FO_DELETE, &paths, None, FOF_ALLOWUNDO);
         done();
     });
@@ -82,7 +102,7 @@ pub fn set_clipboard_files(owner: isize, paths: &[String], cut: bool) -> bool {
         }
         // "Preferred DropEffect": 2 = move (cut), 1 = copy.
         let effect_fmt = RegisterClipboardFormatW(w!("Preferred DropEffect"));
-        if effect_fmt != 0 {
+        if ok && effect_fmt != 0 {
             if let Ok(mem) = GlobalAlloc(GMEM_MOVEABLE, 4) {
                 let p = GlobalLock(mem) as *mut u32;
                 if !p.is_null() {
@@ -98,6 +118,16 @@ pub fn set_clipboard_files(owner: isize, paths: &[String], cut: bool) -> bool {
         }
         let _ = CloseClipboard();
         ok
+    }
+}
+
+/// Empties the clipboard (best effort).
+fn clear_clipboard(owner: isize) {
+    unsafe {
+        if OpenClipboard(HWND(owner as *mut _)).is_ok() {
+            let _ = EmptyClipboard();
+            let _ = CloseClipboard();
+        }
     }
 }
 
@@ -142,6 +172,7 @@ pub fn paste_into(owner: isize, dest: String, done: impl FnOnce(Vec<String>) + S
         return;
     }
     let _ = std::thread::Builder::new().name("paste".into()).spawn(move || {
+        let _com = ComGuard::new();
         let flags = FOF_ALLOWUNDO | FOF_RENAMEONCOLLISION;
         // What is in the folder before, so the new files are known exactly afterwards (a copy of a
         // file that is already there gets a new name, e.g. "x - Copy").
@@ -159,8 +190,18 @@ pub fn paste_into(owner: isize, dest: String, done: impl FnOnce(Vec<String>) + S
             .cloned()
             .collect();
         let to_do: Vec<String> = files.iter().filter(|f| !in_place.contains(f)).cloned().collect();
+        let mut moved_ok = true;
         if !to_do.is_empty() {
-            let _ = file_op(if cut { FO_MOVE } else { FO_COPY }, &to_do, Some(&dest), flags);
+            moved_ok = file_op(if cut { FO_MOVE } else { FO_COPY }, &to_do, Some(&dest), flags);
+        }
+        // After a successful cut-paste the files are no longer where the clipboard says: empty it
+        // (as Explorer does), so a second paste does not try to move files that are gone. Only if the
+        // clipboard still holds this same cut (the person may have copied something else meanwhile).
+        if cut && moved_ok {
+            let (now, now_cut) = clipboard_files(owner);
+            if now_cut && now == files {
+                clear_clipboard(owner);
+            }
         }
         let mut landed: Vec<String> = std::fs::read_dir(&dest)
             .map(|rd| rd.flatten().map(|e| e.path().to_string_lossy().to_string()).filter(|p| !before.contains(&p.to_lowercase())).collect())

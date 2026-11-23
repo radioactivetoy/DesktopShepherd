@@ -41,7 +41,7 @@ pub struct Day {
 
 struct Slot {
     at: Option<Instant>,
-    data: Option<Forecast>,
+    data: Option<std::sync::Arc<Forecast>>,
     error: Option<String>,
     busy: bool,
 }
@@ -168,7 +168,7 @@ fn fetch(lat: f64, lon: f64, fahrenheit: bool) -> Result<Forecast, String> {
 }
 
 /// The forecast known now for a place; starts a download when there is none or it is 30 min old.
-fn forecast(lat: f64, lon: f64, fahrenheit: bool) -> (Option<Forecast>, Option<String>) {
+fn forecast(lat: f64, lon: f64, fahrenheit: bool) -> (Option<std::sync::Arc<Forecast>>, Option<String>) {
     let key = format!("{lat:.3},{lon:.3},{fahrenheit}");
     let Ok(mut g) = CACHE.lock() else { return (None, None) };
     let map = g.get_or_insert_with(HashMap::new);
@@ -184,7 +184,7 @@ fn forecast(lat: f64, lon: f64, fahrenheit: bool) -> (Option<Forecast>, Option<S
                     s.at = Some(Instant::now());
                     match r {
                         Ok(f) => {
-                            s.data = Some(f);
+                            s.data = Some(std::sync::Arc::new(f));
                             s.error = None;
                         }
                         Err(e) => s.error = Some(e),

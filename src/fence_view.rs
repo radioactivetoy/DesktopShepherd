@@ -69,24 +69,49 @@ pub struct DeskState<'a> {
     pub spacing: (f32, f32),
     pub rules: &'a [CategoryRule],
     pub open_counts: &'a HashMap<String, u32>,
+    /// Changes whenever anything `visible_tabs` reads changes (scan result, which items the
+    /// boxes hold, the rules; once a minute while an age rule exists). See `tabs_key`.
+    pub rev: u64,
 }
 
 /// Sorts items the way the original's menu offers (0x180223170): name, size, type, date
 /// modified, times opened; ascending by default (sort_upper = 1 in the constructor 0x180197810).
 pub fn sort_items(v: &mut [DeskItem], sort: SortKind, open_counts: &HashMap<String, u32>) {
+    // Keys are built once per item (not inside the comparator, which would lower-case names
+    // over and over).
     let name = |a: &DeskItem| a.name.to_lowercase();
     match sort {
         SortKind::Manual => {}
-        SortKind::Name => v.sort_by_key(name),
-        SortKind::Size => v.sort_by(|a, b| (a.is_dir, a.size, name(a)).cmp(&(b.is_dir, b.size, name(b)))),
-        SortKind::Type => v.sort_by(|a, b| (!a.is_dir, a.ext.as_str(), name(a)).cmp(&(!b.is_dir, b.ext.as_str(), name(b)))),
-        SortKind::Modified => v.sort_by(|a, b| b.modified.cmp(&a.modified).then_with(|| name(a).cmp(&name(b)))),
-        SortKind::OpenCount => v.sort_by(|a, b| {
-            let ca = open_counts.get(&a.path.to_lowercase()).copied().unwrap_or(0);
-            let cb = open_counts.get(&b.path.to_lowercase()).copied().unwrap_or(0);
-            cb.cmp(&ca).then_with(|| name(a).cmp(&name(b)))
-        }),
+        SortKind::Name => v.sort_by_cached_key(name),
+        SortKind::Size => v.sort_by_cached_key(|a| (a.is_dir, a.size, name(a))),
+        SortKind::Type => v.sort_by_cached_key(|a| (!a.is_dir, a.ext.clone(), name(a))),
+        SortKind::Modified => v.sort_by_cached_key(|a| (std::cmp::Reverse(a.modified), name(a))),
+        SortKind::OpenCount => v.sort_by_cached_key(|a| (std::cmp::Reverse(open_counts.get(&a.path.to_lowercase()).copied().unwrap_or(0)), name(a))),
     }
+}
+
+/// A fingerprint of everything `visible_tabs` depends on for this box, to tell whether a
+/// result kept from an earlier frame is still right.
+pub fn tabs_key(fence: &Fence, desk: &DeskState) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    (desk.rev, std::mem::discriminant(&fence.sort), fence.auto_sort, &fence.folder).hash(&mut h);
+    if fence.sort == SortKind::OpenCount {
+        // Order-independent sum over the counts.
+        let mut sum: u64 = 0;
+        for (k, v) in desk.open_counts.iter() {
+            let mut eh = std::collections::hash_map::DefaultHasher::new();
+            (k, v).hash(&mut eh);
+            sum = sum.wrapping_add(eh.finish());
+        }
+        (sum, desk.open_counts.len()).hash(&mut h);
+    }
+    if fence.folder.is_none() && !fence.auto_sort {
+        for t in &fence.tabs {
+            (&t.name, &t.items).hash(&mut h);
+        }
+    }
+    h.finish()
 }
 
 /// The tabs as shown: names and the items in each, already filtered and sorted.
@@ -157,9 +182,14 @@ pub struct FenceAreas {
 }
 
 pub fn areas(fence: &Fence, rect: Rect, tab_count: usize, scale: f32) -> FenceAreas {
+    areas_x(fence, fence.expanded, rect, tab_count, scale)
+}
+
+/// `areas` for a box shown open (or rolled up) regardless of its saved `expanded` flag (hover-open).
+pub fn areas_x(fence: &Fence, expanded: bool, rect: Rect, tab_count: usize, scale: f32) -> FenceAreas {
     let ts = TITLE_STRIP * scale;
     let tb = TAB_STRIP * scale;
-    if !fence.expanded {
+    if !expanded {
         return FenceAreas { title: rect, tabs: None, content: Rect::NOTHING };
     }
     let (title, mut rest) = match fence.title_pos {
@@ -323,8 +353,13 @@ pub fn vertical_text(painter: &egui::Painter, strip: Rect, text: &str, font: Fon
 }
 
 pub fn paint_title(painter: &egui::Painter, fence: &Fence, title: Rect, scale: f32, hovered: bool) {
+    paint_title_x(painter, fence, fence.expanded, title, scale, hovered)
+}
+
+/// `paint_title` with the open/rolled-up state given separately (see `areas_x`).
+pub fn paint_title_x(painter: &egui::Painter, fence: &Fence, expanded: bool, title: Rect, scale: f32, hovered: bool) {
     let color = if hovered { text_color(fence, 1.0) } else { text_color(fence, 0.85) };
-    if fence.expanded && fence.title_pos == TitlePos::Hidden {
+    if expanded && fence.title_pos == TitlePos::Hidden {
         // No title: only a faint handle while the mouse is over the strip.
         if hovered {
             let w = (title.width() * 0.2).clamp(24.0 * scale, 80.0 * scale);
@@ -334,7 +369,7 @@ pub fn paint_title(painter: &egui::Painter, fence: &Fence, title: Rect, scale: f
         return;
     }
     let font = FontId::new(fence.title_size * scale, family(fence));
-    if fence.expanded && fence.title_pos == TitlePos::Left {
+    if expanded && fence.title_pos == TitlePos::Left {
         vertical_text(painter, title, &fence.name, font, color);
     } else {
         let galley = painter.layout_no_wrap(fence.name.clone(), font, color);
