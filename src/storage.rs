@@ -172,7 +172,8 @@ pub fn sync_path() -> Option<PathBuf> {
 /// current one if nothing changed).
 pub fn write_sync(layout: &Layout) -> Option<std::time::SystemTime> {
     let path = sync_path()?;
-    let text = serde_json::to_string_pretty(layout).ok()?;
+    // Agenda links (possibly secret calendar addresses) are not copied to OneDrive.
+    let text = serde_json::to_string_pretty(&layout.for_sync()).ok()?;
     if fs::read_to_string(&path).ok().as_deref() != Some(text.as_str()) {
         let dir = path.parent()?;
         fs::create_dir_all(dir).ok()?;

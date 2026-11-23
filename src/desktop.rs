@@ -113,7 +113,7 @@ pub fn scan(extra: &[String]) -> HashMap<String, DeskItem> {
 /// thread so a slow program start never freezes the boxes.
 pub fn open_item(path: &str) {
     let path = path.to_string();
-    std::thread::spawn(move || {
+    let started = std::thread::Builder::new().name("open-item".into()).spawn(move || {
         #[cfg(windows)]
         unsafe {
             use windows::core::{w, HSTRING, PCWSTR};
@@ -146,6 +146,9 @@ pub fn open_item(path: &str) {
             let _ = std::process::Command::new("xdg-open").arg(&path).spawn();
         }
     });
+    if let Err(e) = started {
+        crate::storage::log_line(&format!("could not start the open-item thread: {e}"));
+    }
 }
 
 /// Opens the item's folder with the item selected. Uses Windows' own call (no process started by
@@ -1268,10 +1271,16 @@ pub fn forward_new_request(what: &str) -> bool {
 /// A request left by `forward_new_request` when the program wasn't running (taken once).
 pub fn take_pending_new_request() -> Option<String> {
     let f = crate::storage::data_dir().join("pending-new.txt");
-    let s = std::fs::read_to_string(&f).ok()?;
+    let s = std::fs::read_to_string(&f).ok();
+    // Only a fresh one (the program was started by that click): an old file is just deleted.
+    let fresh = std::fs::metadata(&f)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.elapsed().ok())
+        .map(|age| age < std::time::Duration::from_secs(30))
+        .unwrap_or(false);
     let _ = std::fs::remove_file(&f);
-    // Only a fresh one (the program was started by that click).
-    Some(s).filter(|s| !s.trim().is_empty())
+    s.filter(|s| fresh && !s.trim().is_empty())
 }
 
 const DESKTOP_MENU_KEY: &str = "Software\\Classes\\DesktopBackground\\Shell\\DesktopShepherd";

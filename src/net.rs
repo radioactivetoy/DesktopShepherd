@@ -2,9 +2,15 @@
 //! (WinHTTP), no extra crates, no web engine. Call only from a background thread: a request can
 //! take seconds. Redirects are followed, the system proxy is used, 20 s timeouts.
 
-/// Downloads `url` (https or http) and returns the body, at most `max` bytes.
-#[cfg(windows)]
+/// Downloads `url` (https or http) and returns the body, at most `max` bytes, within 60 s.
 pub fn get_bytes(url: &str, max: usize) -> Result<Vec<u8>, String> {
+    get_bytes_within(url, max, std::time::Duration::from_secs(60))
+}
+
+/// `get_bytes` with a total time budget: a server that trickles bytes can't hold the thread for
+/// ever (each single wait is also limited to 20 s).
+#[cfg(windows)]
+pub fn get_bytes_within(url: &str, max: usize, budget: std::time::Duration) -> Result<Vec<u8>, String> {
     use windows::core::{HSTRING, PCWSTR};
     use windows::Win32::Networking::WinHttp::*;
     let url = url.trim();
@@ -63,7 +69,11 @@ pub fn get_bytes(url: &str, max: usize) -> Result<Vec<u8>, String> {
             return Err(format!("{host} answered with error {status}"));
         }
         let mut body: Vec<u8> = Vec::new();
+        let deadline = std::time::Instant::now() + budget;
         loop {
+            if std::time::Instant::now() > deadline {
+                return Err("the download took too long".into());
+            }
             let mut avail: u32 = 0;
             if WinHttpQueryDataAvailable(request.0, &mut avail).is_err() || avail == 0 {
                 break;
@@ -87,7 +97,7 @@ pub fn get_bytes(url: &str, max: usize) -> Result<Vec<u8>, String> {
 }
 
 #[cfg(not(windows))]
-pub fn get_bytes(_url: &str, _max: usize) -> Result<Vec<u8>, String> {
+pub fn get_bytes_within(_url: &str, _max: usize, _budget: std::time::Duration) -> Result<Vec<u8>, String> {
     Err("not available on this system".into())
 }
 

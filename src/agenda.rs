@@ -38,6 +38,8 @@ struct CalState {
     fetched_at: Option<Instant>,
     error: Option<String>,
     loading: bool,
+    /// The calendar had more events than are read (see `MAX_EVENTS`).
+    truncated: bool,
 }
 
 static STATE: Mutex<Option<HashMap<String, CalState>>> = Mutex::new(None);
@@ -74,6 +76,8 @@ pub struct CalView {
     pub events: std::sync::Arc<Vec<Occurrence>>,
     pub error: Option<String>,
     pub loading: bool,
+    /// Too many events: only the first ones are shown.
+    pub truncated: bool,
 }
 
 /// Starts downloads that are due (never twice at once) and returns what is known now, in the
@@ -91,7 +95,7 @@ pub fn view(urls: &[String], force: bool) -> Vec<CalView> {
             st.loading = true;
             start_download(url.clone());
         }
-        out.push(CalView { name: st.name.clone(), events: st.events.clone(), error: st.error.clone(), loading: st.loading });
+        out.push(CalView { name: st.name.clone(), events: st.events.clone(), error: st.error.clone(), loading: st.loading, truncated: st.truncated });
     }
     // Forget links that were removed from every widget.
     let keep: HashSet<&String> = urls.iter().collect();
@@ -110,7 +114,7 @@ fn start_download(url: String) {
                     return Err(crate::i18n::t("that link isn't an iCal calendar (.ics)").to_string());
                 }
                 let today = chrono::Local::now().date_naive();
-                Ok(parse(&text, today - CDuration::days(BACK_DAYS), today + CDuration::days(AHEAD_DAYS)))
+                Ok(parse_capped(&text, today - CDuration::days(BACK_DAYS), today + CDuration::days(AHEAD_DAYS)))
             })
         })
         .unwrap_or_else(|_| Err(crate::i18n::t("that calendar has something DesktopShepherd can't read").to_string()));
@@ -119,8 +123,9 @@ fn start_download(url: String) {
             st.loading = false;
             st.fetched_at = Some(Instant::now());
             match result {
-                Ok((name, events)) => {
+                Ok((name, events, truncated)) => {
                     st.name = name;
+                    st.truncated = truncated;
                     st.events = std::sync::Arc::new(events);
                     st.error = None;
                 }
@@ -221,7 +226,12 @@ fn download(url: &str) -> Result<String, String> {
             });
         }
         let mut body: Vec<u8> = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(60);
         loop {
+            // A server that trickles bytes can't hold this thread for ever.
+            if Instant::now() > deadline {
+                return Err(crate::i18n::t("the download was interrupted").into());
+            }
             let mut avail: u32 = 0;
             if WinHttpQueryDataAvailable(request.0, &mut avail).is_err() || avail == 0 {
                 break;
@@ -394,6 +404,23 @@ fn nth_weekday(year: i32, month: u32, n: i32, wd: Weekday) -> Option<NaiveDate> 
     }
 }
 
+/// Longest list read from one rule part (BYDAY, BYMONTHDAY): more is not a real calendar.
+const MAX_RULE_LIST: usize = 64;
+/// At most this many events are read from one calendar, and this many occurrences (every repeat
+/// counts) in total: a hostile or huge calendar can't use up memory or time.
+const MAX_EVENTS: usize = 5000;
+const MAX_OCCURRENCES: usize = 20_000;
+/// Total walk steps over all repeating events of one calendar.
+const MAX_STEPS: usize = 3_000_000;
+
+/// What is left to spend while reading one calendar.
+struct Budget {
+    occurrences: usize,
+    steps: usize,
+    /// Something was cut short.
+    hit: bool,
+}
+
 struct Rule {
     freq: String,
     interval: i64,
@@ -402,10 +429,12 @@ struct Rule {
     by_day: Vec<(i32, Weekday)>,
     by_month_day: Vec<i32>,
     by_month: Vec<u32>,
+    /// A part of the rule can never match (e.g. BYMONTHDAY=40): the event does not repeat.
+    impossible: bool,
 }
 
 fn parse_rule(v: &str) -> Option<Rule> {
-    let mut r = Rule { freq: String::new(), interval: 1, count: None, until: None, by_day: Vec::new(), by_month_day: Vec::new(), by_month: Vec::new() };
+    let mut r = Rule { freq: String::new(), interval: 1, count: None, until: None, by_day: Vec::new(), by_month_day: Vec::new(), by_month: Vec::new(), impossible: false };
     for part in v.split(';') {
         let Some((k, val)) = part.split_once('=') else { continue };
         match k.trim().to_ascii_uppercase().as_str() {
@@ -420,12 +449,25 @@ fn parse_rule(v: &str) -> Option<Rule> {
                     let cut = d.char_indices().rev().nth(1).map(|(i, _)| i).unwrap_or(0);
                     let (num, code) = d.split_at(cut);
                     if let Some(wd) = weekday(code) {
-                        r.by_day.push((num.parse::<i32>().unwrap_or(0), wd));
+                        if r.by_day.len() < MAX_RULE_LIST {
+                            r.by_day.push((num.parse::<i32>().unwrap_or(0).clamp(-5, 5), wd));
+                        }
                     }
                 }
             }
-            "BYMONTHDAY" => r.by_month_day = val.split(',').filter_map(|x| x.trim().parse().ok()).collect(),
-            "BYMONTH" => r.by_month = val.split(',').filter_map(|x| x.trim().parse().ok()).filter(|m| (1..=12).contains(m)).collect(),
+            "BYMONTHDAY" => {
+                let all: Vec<i32> = val.split(',').filter_map(|x| x.trim().parse().ok()).take(MAX_RULE_LIST).collect();
+                r.by_month_day = all.iter().copied().filter(|d| (1..=31).contains(d) || (-31..=-1).contains(d)).collect();
+                if r.by_month_day.is_empty() {
+                    r.impossible = true;
+                }
+            }
+            "BYMONTH" => {
+                let mut ms: Vec<u32> = val.split(',').filter_map(|x| x.trim().parse().ok()).filter(|m| (1..=12).contains(m)).collect();
+                ms.sort_unstable();
+                ms.dedup();
+                r.by_month = ms;
+            }
             _ => {}
         }
     }
@@ -435,10 +477,18 @@ fn parse_rule(v: &str) -> Option<Rule> {
 /// The start times of a repeating event, from its first start up to `to` (both the window and
 /// a safety limit end the walk).
 fn expand(start: NaiveDateTime, rule: &Rule, to: NaiveDateTime) -> Vec<NaiveDateTime> {
+    expand_with(start, rule, to, &mut Budget { occurrences: 20_000, steps: 20_000, hit: false })
+}
+
+fn expand_with(start: NaiveDateTime, rule: &Rule, to: NaiveDateTime, budget: &mut Budget) -> Vec<NaiveDateTime> {
     let mut out = Vec::new();
+    if rule.impossible {
+        out.push(start);
+        return out;
+    }
     let time = start.time();
     let mut emitted = 0u32;
-    let mut push = |t: NaiveDateTime, out: &mut Vec<NaiveDateTime>| -> bool {
+    let mut push = |t: NaiveDateTime, out: &mut Vec<NaiveDateTime>, budget: &mut Budget| -> bool {
         // false = stop
         if t < start {
             return true;
@@ -451,17 +501,30 @@ fn expand(start: NaiveDateTime, rule: &Rule, to: NaiveDateTime) -> Vec<NaiveDate
                 return false;
             }
         }
+        if budget.occurrences == 0 {
+            budget.hit = true;
+            return false;
+        }
+        budget.occurrences -= 1;
         emitted += 1;
         out.push(t);
         true
     };
     let d0 = start.date();
     for step in 0..20_000i64 {
+        if budget.steps == 0 {
+            budget.hit = true;
+            break;
+        }
+        budget.steps -= 1;
         let k = step * rule.interval;
         let mut dates: Vec<NaiveDate> = Vec::new();
+        // The first day of the period being looked at: past the end, nothing more can match.
+        let cursor: NaiveDate;
         match rule.freq.as_str() {
             "DAILY" => {
                 let Some(d) = d0.checked_add_signed(CDuration::days(k)) else { break };
+                cursor = d;
                 // "Every weekday" = daily on MO..FR.
                 if rule.by_day.is_empty() || rule.by_day.iter().any(|(_, wd)| *wd == d.weekday()) {
                     dates.push(d);
@@ -469,6 +532,7 @@ fn expand(start: NaiveDateTime, rule: &Rule, to: NaiveDateTime) -> Vec<NaiveDate
             }
             "WEEKLY" => {
                 let Some(week_start) = (d0 - CDuration::days(d0.weekday().num_days_from_monday() as i64)).checked_add_signed(CDuration::weeks(k)) else { break };
+                cursor = week_start;
                 if rule.by_day.is_empty() {
                     let Some(d) = d0.checked_add_signed(CDuration::weeks(k)) else { break };
                     dates.push(d);
@@ -481,6 +545,7 @@ fn expand(start: NaiveDateTime, rule: &Rule, to: NaiveDateTime) -> Vec<NaiveDate
             "MONTHLY" => {
                 let m0 = d0.year() * 12 + d0.month0() as i32 + k as i32;
                 let (y, m) = (m0.div_euclid(12), m0.rem_euclid(12) as u32 + 1);
+                cursor = NaiveDate::from_ymd_opt(y, m, 1).unwrap_or(d0);
                 if !rule.by_day.is_empty() {
                     for (n, wd) in &rule.by_day {
                         if *n != 0 {
@@ -496,7 +561,7 @@ fn expand(start: NaiveDateTime, rule: &Rule, to: NaiveDateTime) -> Vec<NaiveDate
                     for md in &rule.by_month_day {
                         if *md > 0 {
                             dates.extend(NaiveDate::from_ymd_opt(y, m, *md as u32));
-                        } else if let Some(d) = nth_last_day(y, m, -*md) {
+                        } else if let Some(d) = md.checked_neg().and_then(|n| nth_last_day(y, m, n)) {
                             dates.push(d);
                         }
                     }
@@ -507,6 +572,7 @@ fn expand(start: NaiveDateTime, rule: &Rule, to: NaiveDateTime) -> Vec<NaiveDate
             }
             "YEARLY" => {
                 let Some(y) = i32::try_from(k).ok().and_then(|k| d0.year().checked_add(k)).filter(|y| *y < 9999) else { break };
+                cursor = NaiveDate::from_ymd_opt(y, 1, 1).unwrap_or(d0);
                 let months: Vec<u32> = if rule.by_month.is_empty() { vec![d0.month()] } else { rule.by_month.clone() };
                 for m in months {
                     if rule.by_day.iter().any(|(n, _)| *n != 0) {
@@ -525,11 +591,11 @@ fn expand(start: NaiveDateTime, rule: &Rule, to: NaiveDateTime) -> Vec<NaiveDate
                 return out;
             }
         }
-        if dates.first().map(|d| d.and_time(time) > to).unwrap_or(false) {
+        if dates.first().map(|d| d.and_time(time) > to).unwrap_or(false) || cursor.and_time(NaiveTime::MIN) > to {
             break;
         }
         for d in dates {
-            if !push(d.and_time(time), &mut out) {
+            if !push(d.and_time(time), &mut out, budget) {
                 return out;
             }
         }
@@ -539,7 +605,8 @@ fn expand(start: NaiveDateTime, rule: &Rule, to: NaiveDateTime) -> Vec<NaiveDate
 
 fn nth_last_day(y: i32, m: u32, n: i32) -> Option<NaiveDate> {
     let next = if m == 12 { NaiveDate::from_ymd_opt(y + 1, 1, 1)? } else { NaiveDate::from_ymd_opt(y, m + 1, 1)? };
-    Some(next - CDuration::days(n as i64))
+    let d = next - CDuration::days(n as i64);
+    (n >= 1 && d.month() == m).then_some(d)
 }
 
 /// A calendar's time zones: TZID -> (first change, yearly rule, offset from UTC in seconds).
@@ -594,7 +661,15 @@ fn zone_to_local(t: NaiveDateTime, tzid: Option<&str>, zones: &Zones) -> NaiveDa
 }
 
 /// Reads an iCal text into the calendar's name and the events touching [from, to], sorted.
+#[cfg(test)]
 pub fn parse(text: &str, from: NaiveDate, to: NaiveDate) -> (Option<String>, Vec<Occurrence>) {
+    let (name, out, _) = parse_capped(text, from, to);
+    (name, out)
+}
+
+/// `parse`, plus whether the calendar was too large and cut short (see `MAX_EVENTS`).
+pub fn parse_capped(text: &str, from: NaiveDate, to: NaiveDate) -> (Option<String>, Vec<Occurrence>, bool) {
+    let mut budget = Budget { occurrences: MAX_OCCURRENCES, steps: MAX_STEPS, hit: false };
     // Unfold continuation lines (a line starting with a space or tab belongs to the one before).
     let mut lines: Vec<String> = Vec::new();
     for raw in text.split('\n') {
@@ -665,7 +740,11 @@ pub fn parse(text: &str, from: NaiveDate, to: NaiveDate) -> (Option<String>, Vec
         }
         if upper == "END:VEVENT" {
             if let Some(e) = cur.take() {
-                events.push(e);
+                if events.len() < MAX_EVENTS {
+                    events.push(e);
+                } else {
+                    budget.hit = true;
+                }
             }
             continue;
         }
@@ -726,9 +805,16 @@ pub fn parse(text: &str, from: NaiveDate, to: NaiveDate) -> (Option<String>, Vec
                         }
                     }
                 }
-                expand(start, &rule, to_t + CDuration::days(1)).into_iter().filter(|t| !ex.contains(t) && !moved.contains(&(uid.clone(), *t))).collect()
+                expand_with(start, &rule, to_t + CDuration::days(1), &mut budget).into_iter().filter(|t| !ex.contains(t) && !moved.contains(&(uid.clone(), *t))).collect()
             }
-            _ => vec![start],
+            _ => {
+                if budget.occurrences == 0 {
+                    budget.hit = true;
+                    break;
+                }
+                budget.occurrences -= 1;
+                vec![start]
+            }
         };
         // Times with a named zone: worked out in that zone (above), shown in local time.
         let tzid = get("DTSTART").and_then(|p| p.param("TZID")).map(|z| z.to_string());
@@ -742,7 +828,7 @@ pub fn parse(text: &str, from: NaiveDate, to: NaiveDate) -> (Option<String>, Vec
         }
     }
     out.sort_by(|a, b| a.start.cmp(&b.start).then(b.all_day.cmp(&a.all_day)).then(a.title.cmp(&b.title)));
-    (name, out)
+    (name, out, budget.hit)
 }
 
 #[cfg(test)]
@@ -822,6 +908,31 @@ mod tests {
         let (_, ev) = parse(cal, d(2026, 11, 1), d(2026, 11, 30));
         assert_eq!(&*ev[0].location, "Calle Mayor 5, Madrid");
         assert_eq!(&*ev[0].description, "Bring the card.\nAsk about the bill.");
+    }
+
+    #[test]
+    fn hostile_rules_are_cut_short() {
+        // A bad day number: no repeats, no crash (including the most negative number).
+        let cal = "BEGIN:VCALENDAR\nBEGIN:VEVENT\nDTSTART:20261123T080000\nRRULE:FREQ=MONTHLY;BYMONTHDAY=-2147483648,99\nSUMMARY:Bad\nEND:VEVENT\nEND:VCALENDAR\n";
+        let (_, ev, cut) = parse_capped(cal, d(2026, 11, 1), d(2027, 11, 30));
+        assert_eq!(ev.len(), 1);
+        assert!(!cut);
+        // Too many events: capped, and flagged.
+        let mut big = String::from("BEGIN:VCALENDAR\n");
+        for i in 0..(MAX_EVENTS + 10) {
+            big.push_str(&format!("BEGIN:VEVENT\nDTSTART:20261123T080000\nSUMMARY:E{i}\nEND:VEVENT\n"));
+        }
+        let (_, ev, cut) = parse_capped(&big, d(2026, 11, 1), d(2026, 11, 30));
+        assert_eq!(ev.len(), MAX_EVENTS);
+        assert!(cut);
+        // Endless repeating events stop at the occurrence budget.
+        let mut rep = String::from("BEGIN:VCALENDAR\n");
+        for i in 0..200 {
+            rep.push_str(&format!("BEGIN:VEVENT\nDTSTART:20000101T080000\nRRULE:FREQ=DAILY\nSUMMARY:R{i}\nEND:VEVENT\n"));
+        }
+        let (_, ev, cut) = parse_capped(&rep, d(1999, 1, 1), d(2030, 1, 1));
+        assert!(cut);
+        assert!(ev.len() <= MAX_OCCURRENCES);
     }
 
     #[test]

@@ -285,9 +285,17 @@ impl DeskWidget for Weather {
         let view = data["view"].as_str().unwrap_or("").to_string();
         let (f, err) = forecast(lat, lon, fahrenheit);
         let Some(f) = f else {
-            let text = err.unwrap_or_else(|| t("Loading…").to_string());
-            ui.label(egui::RichText::new(text).size(12.0).color(crate::ink::gray(170)));
-            return WidgetOutput { changed: false, repaint_after: Some(Duration::from_secs(2)) };
+            // Loading the first time: look again soon. After an error the data is retried every
+            // 5 minutes, so there is no need to redraw more often than that.
+            let (text, tip, wait) = match err {
+                Some(e) => (t("Weather: no connection, trying again in a few minutes.").to_string(), Some(e), Duration::from_secs(300)),
+                None => (t("Loading…").to_string(), None, Duration::from_secs(2)),
+            };
+            let r = ui.label(egui::RichText::new(text).size(12.0).color(crate::ink::gray(170)));
+            if let Some(tip) = tip {
+                r.on_hover_text(tip);
+            }
+            return WidgetOutput { changed: false, repaint_after: Some(wait) };
         };
         let unit = if fahrenheit { "F" } else { "C" };
         let (icon_name, what) = describe(f.code, f.is_day);

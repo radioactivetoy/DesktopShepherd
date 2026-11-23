@@ -254,6 +254,10 @@ pub struct DeskApp {
     /// OneDrive sync: the shared file's time we last wrote or loaded, and when it was checked.
     sync_seen: Option<std::time::SystemTime>,
     sync_check_at: Instant,
+    /// The next RestoreBackup comes from the OneDrive copy: keep this PC's agenda links.
+    restoring_sync: bool,
+    /// A short message at the bottom of the main monitor (e.g. a refused rename), with its start time.
+    note: Option<(String, Instant)>,
     /// The virtual desktop last seen (index).
     vdesk_seen: Option<usize>,
     /// The desktop menu entries were written for this run.
@@ -475,6 +479,8 @@ impl DeskApp {
             ink_applied: None,
             sync_seen: None,
             sync_check_at: Instant::now() - Duration::from_secs(60),
+            restoring_sync: false,
+            note: None,
             vdesk_seen: None,
             desktop_menu_applied: None,
             ta_buf: String::new(),
@@ -767,8 +773,12 @@ impl DeskApp {
                     self.mark_dirty();
                 }
                 Act::RestoreBackup(p) => {
+                    let from_sync = std::mem::take(&mut self.restoring_sync);
                     if let Some(mut l) = storage::load_backup(&p) {
                         storage::backup_now(&self.layout);
+                        if from_sync {
+                            l.keep_agenda_urls_from(&self.layout);
+                        }
                         sanitize(&mut l);
                         self.layout = l;
                         self.place_all_boxes();
@@ -958,7 +968,7 @@ impl DeskApp {
             let _ = std::thread::Builder::new().name("desktop-menu".into()).spawn(move || desktop::set_desktop_menu(on));
         }
         // New versions on GitHub (Settings > Updates): at start (after 20 s) and once a day.
-        if self.persist && self.layout.settings.check_updates {
+        if self.persist && self.layout.settings.check_updates && self.layout.settings.updates_asked {
             if self.started_at.elapsed() >= Duration::from_secs(20) {
                 crate::update::check(Duration::from_secs(24 * 3600), false);
             } else {
@@ -974,6 +984,7 @@ impl DeskApp {
                     self.sync_seen = Some(t);
                     if let Some(p) = storage::sync_path() {
                         storage::log_line("sync: loading the layout saved on another PC");
+                        self.restoring_sync = true;
                         self.actions.push(Act::RestoreBackup(p));
                     }
                 }
@@ -1137,6 +1148,7 @@ impl DeskApp {
                 // Nothing stays selected in a box you can no longer see (Delete would remove it).
                 self.ui.selection.clear();
                 self.ui.selected = None;
+                self.ui.icon_rename = None; // its box may not be shown any more
             }
         }
         // Hide/show all boxes (shortcut or tray).
@@ -1553,7 +1565,7 @@ impl DeskApp {
                 {
                     let s = &self.layout.settings;
                     let menu_here = matches!(self.ui.menu.as_ref().map(|m| &m.target), Some(MenuTarget::Fence(i)) if *i == id);
-                    let target = if !s.fade_idle || menu_here || self.ui.selection.iter().any(|_| false) {
+                    let target = if !s.fade_idle || menu_here {
                         1.0
                     } else {
                         let delay = Duration::from_secs(s.fade_delay.clamp(1, 60) as u64);
@@ -1628,7 +1640,24 @@ impl DeskApp {
                 h.close_panel(RENAME_PANEL);
             }
             // "Version x is available · Update · Later", once per version.
-            let offer = crate::update::status().0.filter(|r| r.version != self.layout.settings.skipped_version && self.layout.settings.check_updates);
+            let offer = crate::update::status().0.filter(|r| r.version != self.layout.settings.skipped_version && self.layout.settings.check_updates && self.layout.settings.updates_asked);
+            // The one-time question (nothing is checked until the person answered).
+            if self.persist && !self.layout.settings.updates_asked && self.started_at.elapsed() >= Duration::from_secs(10) {
+                self.show_updates_ask_toast(ctx);
+            } else if self.persist && !self.layout.settings.updates_asked {
+                crate::runloop::wake_after(Duration::from_secs(11) - self.started_at.elapsed().min(Duration::from_secs(10)));
+            } else if let Some(h) = self.hosts.as_mut() {
+                h.close_panel(UPDATES_ASK_PANEL);
+            }
+            // A short message (a refused rename…) for 6 seconds.
+            if self.note.as_ref().map(|(_, t)| t.elapsed() < Duration::from_secs(6)).unwrap_or(false) {
+                self.show_note_toast(ctx);
+            } else {
+                self.note = None;
+                if let Some(h) = self.hosts.as_mut() {
+                    h.close_panel(NOTE_PANEL);
+                }
+            }
             if let Some(rel) = offer {
                 self.show_update_toast(ctx, rel);
             } else if let Some(h) = self.hosts.as_mut() {
@@ -4512,7 +4541,7 @@ impl DeskApp {
                 })
                 .map(|f| f.id)
         });
-        let target = under_mouse.or_else(|| self.active_box().map(|b| b.0)).filter(|id| self.layout.fences.iter().any(|f| f.id == *id && !f.auto_sort && f.widget.is_none()));
+        let target = under_mouse.or_else(|| self.active_box().map(|b| b.0)).filter(|id| self.layout.fences.iter().any(|f| f.id == *id && !f.auto_sort && f.widget.is_none() && f.folder.is_none()));
         let tab = target.and_then(|id| self.layout.fences.iter().find(|f| f.id == id)).map(|f| f.sel_tab).unwrap_or(0);
         #[cfg(windows)]
         {
@@ -4553,13 +4582,21 @@ impl DeskApp {
             matches!(base.as_str(), "CON" | "PRN" | "AUX" | "NUL")
                 || ((base.starts_with("COM") || base.starts_with("LPT")) && base.len() == 4 && base[3..].chars().all(|c| c.is_ascii_digit() && c != '0'))
         };
+        let Some(it) = self.items.get(&path.to_lowercase()).cloned() else { return };
+        if new_name == it.name {
+            return; // nothing changes
+        }
         if new_name.is_empty() || reserved || new_name.contains(['\\', '/', ':', '*', '?', '"', '<', '>', '|']) {
+            self.note = Some((t("Couldn't rename: the name has characters Windows doesn't allow.").to_string(), Instant::now()));
+            self.redraw_all = true;
+            crate::runloop::wake_after(Duration::ZERO);
             return;
         }
-        let Some(it) = self.items.get(&path.to_lowercase()).cloned() else { return };
         let old = std::path::Path::new(&it.path);
         let Some(dir) = old.parent() else { return };
-        let file = if it.is_dir || it.ext.is_empty() { new_name.to_string() } else { format!("{new_name}.{}", it.ext) };
+        // The extension comes from the real path (the item's `ext` is lower-cased).
+        let real_ext = old.extension().map(|e| e.to_string_lossy().to_string()).unwrap_or_default();
+        let file = if it.is_dir || real_ext.is_empty() { new_name.to_string() } else { format!("{new_name}.{real_ext}") };
         let new_path = dir.join(file);
         // Only the letter case changes ("foo" -> "Foo"): the "existing" file is this one.
         let same_file = new_path.to_string_lossy().to_lowercase() == it.path.to_lowercase();
@@ -4568,10 +4605,16 @@ impl DeskApp {
         }
         if new_path.exists() && !same_file {
             storage::log_line(&format!("rename: {} already exists", new_path.display()));
+            self.note = Some((t("Couldn't rename: a file with that name already exists.").to_string(), Instant::now()));
+            self.redraw_all = true;
+            crate::runloop::wake_after(Duration::ZERO);
             return;
         }
         if let Err(e) = std::fs::rename(old, &new_path) {
             storage::log_line(&format!("rename failed: {e}"));
+            self.note = Some((t("Couldn't rename: Windows refused (the file may be open).").to_string(), Instant::now()));
+            self.redraw_all = true;
+            crate::runloop::wake_after(Duration::ZERO);
             return;
         }
         let new_s = new_path.to_string_lossy().to_string();
@@ -4951,5 +4994,73 @@ impl DeskApp {
                 crate::update::install(rel);
             }
         }
+    }
+}
+
+#[cfg(windows)]
+const UPDATES_ASK_PANEL: u64 = u64::MAX - 8;
+#[cfg(windows)]
+const NOTE_PANEL: u64 = u64::MAX - 9;
+
+impl DeskApp {
+    /// Asked once, before anything goes online: look for new versions once a day?
+    #[cfg(windows)]
+    fn show_updates_ask_toast(&mut self, _ctx: &egui::Context) {
+        let scale = desktop::system_scale();
+        let work = desktop::work_area_at(Pos2::new(10.0, 10.0), scale);
+        let (w, h) = (440.0_f32, 100.0_f32);
+        let (x, y) = (work.max.x - w - 24.0, work.max.y - h - 24.0 - 70.0);
+        let rect_px = [(x * scale) as i32, (y * scale) as i32, (w * scale) as i32, (h * scale) as i32];
+        let force = self.panel_force;
+        let mut answer: Option<bool> = None;
+        if let Some(mut hosts) = self.hosts.take() {
+            hosts.panel(UPDATES_ASK_PANEL, crate::host::PanelKind::Menu, "DesktopShepherd updates question", rect_px, true, force, |pctx| {
+                let frame = egui::Frame::new().fill(crate::theme::menu()).stroke(egui::Stroke::new(1.0_f32, crate::theme::line())).inner_margin(egui::Margin::symmetric(14, 10));
+                egui::CentralPanel::default().frame(frame).show(pctx, |ui| {
+                    ui.label(egui::RichText::new(t("Check once a day for new versions of DesktopShepherd? (Only asks GitHub for the latest version number.)")).size(14.0).color(crate::theme::strong()));
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        if ui.button(egui::RichText::new(t("Yes")).strong()).clicked() {
+                            answer = Some(true);
+                        }
+                        if ui.button(t("No")).clicked() {
+                            answer = Some(false);
+                        }
+                    });
+                });
+            });
+            self.hosts = Some(hosts);
+        }
+        if let Some(yes) = answer {
+            self.layout.settings.check_updates = yes;
+            self.layout.settings.updates_asked = true;
+            self.mark_dirty();
+            self.redraw_all = true;
+            crate::runloop::wake_after(Duration::ZERO);
+        }
+    }
+
+    /// A short message at the bottom of the main monitor.
+    #[cfg(windows)]
+    fn show_note_toast(&mut self, ctx: &egui::Context) {
+        let Some((text, at)) = self.note.clone() else { return };
+        let left = Duration::from_secs(6).saturating_sub(at.elapsed());
+        let scale = desktop::system_scale();
+        let work = desktop::work_area_at(Pos2::new(10.0, 10.0), scale);
+        let (w, h) = (460.0_f32, 48.0_f32);
+        let (x, y) = (work.center().x - w / 2.0, work.max.y - h - 24.0 - 70.0);
+        let rect_px = [(x * scale) as i32, (y * scale) as i32, (w * scale) as i32, (h * scale) as i32];
+        let force = self.panel_force;
+        if let Some(mut hosts) = self.hosts.take() {
+            hosts.panel(NOTE_PANEL, crate::host::PanelKind::Menu, "DesktopShepherd note", rect_px, true, force, |pctx| {
+                let frame = egui::Frame::new().fill(crate::theme::menu()).stroke(egui::Stroke::new(1.0_f32, crate::theme::line())).inner_margin(egui::Margin::symmetric(14, 10));
+                egui::CentralPanel::default().frame(frame).show(pctx, |ui| {
+                    ui.add(egui::Label::new(egui::RichText::new(&text).size(14.0).color(crate::theme::strong())).truncate());
+                });
+            });
+            self.hosts = Some(hosts);
+        }
+        ctx.request_repaint_after(left + Duration::from_millis(50));
+        crate::runloop::wake_after(left + Duration::from_millis(50));
     }
 }

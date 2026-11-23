@@ -247,6 +247,8 @@ pub struct Settings {
     pub language: u8,
     /// Look for new versions on GitHub (at start and once a day).
     pub check_updates: bool,
+    /// The person was asked once whether to look for new versions (nothing is checked before).
+    pub updates_asked: bool,
     /// A version the person chose to skip ("Later" on the update note).
     pub skipped_version: String,
     /// Highlights use Windows' accent colour.
@@ -286,7 +288,8 @@ impl Default for Settings {
             fade_delay: 3,
             link_vdesks: false,
             language: 0,
-            check_updates: true,
+            check_updates: false,
+            updates_asked: false,
             skipped_version: String::new(),
             follow_accent: true,
             auto_ink: true,
@@ -316,6 +319,42 @@ impl Layout {
     pub fn new_id(&mut self) -> u64 {
         self.next_id = self.next_id.max(1) + 1;
         self.next_id
+    }
+
+    /// A copy for the OneDrive sync file: agenda links can hold secret calendar addresses, so
+    /// they never leave this PC.
+    pub fn for_sync(&self) -> Layout {
+        let mut l = self.clone();
+        for f in &mut l.fences {
+            if let Some(w) = f.widget.as_mut().filter(|w| w.kind == "agenda") {
+                if let Some(o) = w.data.as_object_mut() {
+                    o.remove("urls");
+                }
+            }
+        }
+        l
+    }
+
+    /// After loading a synced layout: agenda boxes keep this PC's own links (by box id).
+    pub fn keep_agenda_urls_from(&mut self, local: &Layout) {
+        for f in &mut self.fences {
+            let Some(w) = f.widget.as_mut().filter(|w| w.kind == "agenda") else { continue };
+            let mine = local
+                .fences
+                .iter()
+                .find(|g| g.id == f.id)
+                .and_then(|g| g.widget.as_ref())
+                .filter(|lw| lw.kind == "agenda")
+                .and_then(|lw| lw.data.get("urls").cloned());
+            if let Some(u) = mine {
+                if !w.data.is_object() {
+                    w.data = serde_json::json!({});
+                }
+                if let Some(o) = w.data.as_object_mut() {
+                    o.insert("urls".to_string(), u);
+                }
+            }
+        }
     }
 }
 

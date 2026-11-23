@@ -26,7 +26,7 @@ mod imp {
         hwnd: isize,
         margin: i32,
         /// (box width, box height, corner radius bits, scale bits) of the picture on screen.
-        drawn: Option<(i32, i32, u32, u32)>,
+        drawn: Option<Key>,
         /// Box position the window was last placed for.
         at: (i32, i32),
         /// Shown or hidden as last told to Windows.
@@ -35,9 +35,26 @@ mod imp {
         app_hidden: bool,
         /// The box is faded out: no shadow either.
         faded: bool,
+        /// The box size is still changing: shadow hidden until it has been stable for a moment.
+        waiting: bool,
+        /// (size key, when it was first seen) of the size being waited for.
+        seen: Option<(Key, std::time::Instant)>,
+        /// Size key whose picture could not be drawn (not retried until the size changes).
+        failed: Option<Key>,
     }
 
+    /// (box width, box height, corner radius bits, scale bits).
+    type Key = (i32, i32, u32, u32);
+
     static SHADOWS: Mutex<Vec<(isize, Entry)>> = Mutex::new(Vec::new());
+    /// Boxes that are faded out. Kept apart from SHADOWS: the fade can be set before the shadow exists.
+    static FADED: Mutex<Vec<isize>> = Mutex::new(Vec::new());
+    /// How long the box size must stay the same before the picture is redrawn.
+    const SETTLE: std::time::Duration = std::time::Duration::from_millis(150);
+
+    fn is_faded(b: isize) -> bool {
+        FADED.lock().map(|f| f.contains(&b)).unwrap_or(false)
+    }
     static LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     static CLASS: std::sync::Once = std::sync::Once::new();
 
@@ -144,7 +161,9 @@ mod imp {
     fn rr_cover(px: f32, py: f32, cx: f32, cy: f32, hx: f32, hy: f32, r: f32) -> f32 {
         let qx = (px - cx).abs() - (hx - r);
         let qy = (py - cy).abs() - (hy - r);
-        let d = qx.max(0.0).hypot(qy.max(0.0)) + qx.max(qy).min(0.0) - r;
+        // hypot only matters in the corner zone; elsewhere the distance is a simple difference.
+        let outside = if qx > 0.0 && qy > 0.0 { qx.hypot(qy) } else { qx.max(0.0).max(qy.max(0.0)) };
+        let d = outside + qx.max(qy).min(0.0) - r;
         (0.5 - d).clamp(0.0, 1.0)
     }
 
@@ -201,9 +220,13 @@ mod imp {
                 for y in 0..h as usize {
                     for x in 0..w as usize {
                         let i = y * w as usize + x;
-                        let a = 1.0 - (1.0 - a1[i]) * (1.0 - a2[i]);
                         // Fully transparent under the box itself.
                         let inside = rr_cover(x as f32 + 0.5, y as f32 + 0.5, cx, cy, bw as f32 / 2.0, bh as f32 / 2.0, r);
+                        if inside >= 1.0 {
+                            px[i] = 0;
+                            continue;
+                        }
+                        let a = 1.0 - (1.0 - a1[i]) * (1.0 - a2[i]);
                         let a = (a * (1.0 - inside)).clamp(0.0, 1.0);
                         // Black: premultiplied colour is zero.
                         px[i] = ((a * 255.0 + 0.5) as u32) << 24;
@@ -229,7 +252,7 @@ mod imp {
     }
 
     fn apply_visibility(b: isize, e: &mut Entry) {
-        let want = !e.app_hidden && !e.faded;
+        let want = !e.app_hidden && !e.faded && !e.waiting;
         unsafe {
             let h = HWND(e.hwnd as *mut _);
             if want {
@@ -248,8 +271,8 @@ mod imp {
     /// Brings the shadow of `b` in line with the box: creates / redraws / moves / removes it.
     /// UI thread only. `corner_pts` is the box's corner radius in points.
     pub fn sync(b: isize, on: bool, corner_pts: f32) {
-        let Ok(mut all) = SHADOWS.lock() else { return };
         if !on {
+            let Ok(mut all) = SHADOWS.lock() else { return };
             if let Some(i) = all.iter().position(|(k, _)| *k == b) {
                 let (_, e) = all.remove(i);
                 unsafe {
@@ -266,34 +289,91 @@ mod imp {
             }
             let scale = (GetDpiForWindow(bh).max(96) as f32) / 96.0;
             let (bw, bht) = (wr.right - wr.left, wr.bottom - wr.top);
-            if all.iter().all(|(k, _)| *k != b) {
-                let Some(hw) = create_window() else {
-                    log_once("could not create the shadow window");
-                    return;
-                };
-                all.push((b, Entry { hwnd: hw, margin: margin_for(scale), drawn: None, at: (i32::MIN, i32::MIN), shown: false, app_hidden: false, faded: false }));
-            }
-            let Some(e) = find(&mut all, b) else { return };
             let m = margin_for(scale);
             let corner_px = corner_pts * scale;
-            let key = (bw, bht, corner_px.to_bits(), scale.to_bits());
-            if e.drawn != Some(key) || e.margin != m {
-                e.margin = m;
-                if render(e.hwnd, bw, bht, m, corner_px, scale, (wr.left, wr.top)) {
-                    e.drawn = Some(key);
-                    e.at = (wr.left, wr.top);
+            let key: Key = (bw, bht, corner_px.to_bits(), scale.to_bits());
+            // Step 1 (locked, quick): look the entry up, move it, or decide that a redraw is due.
+            let hwnd = {
+                let Ok(mut all) = SHADOWS.lock() else { return };
+                if all.iter().all(|(k, _)| *k != b) {
+                    let Some(hw) = create_window() else {
+                        log_once("could not create the shadow window");
+                        return;
+                    };
+                    all.push((
+                        b,
+                        Entry {
+                            hwnd: hw,
+                            margin: m,
+                            drawn: None,
+                            at: (i32::MIN, i32::MIN),
+                            shown: false,
+                            app_hidden: false,
+                            faded: is_faded(b),
+                            waiting: false,
+                            seen: None,
+                            failed: None,
+                        },
+                    ));
+                }
+                let Some(e) = find(&mut all, b) else { return };
+                if e.drawn != Some(key) || e.margin != m {
+                    if e.failed == Some(key) {
+                        return; // already failed for this size: wait for another size
+                    }
+                    let now = std::time::Instant::now();
+                    // The first picture is drawn at once; later ones wait until the size is stable.
+                    let due = e.drawn.is_none()
+                        || match e.seen {
+                            Some((k, t)) if k == key => now.duration_since(t) >= SETTLE,
+                            _ => {
+                                e.seen = Some((key, now));
+                                false
+                            }
+                        };
+                    if !due {
+                        if !e.waiting {
+                            e.waiting = true;
+                            apply_visibility(b, e);
+                        }
+                        crate::runloop::wake_after(SETTLE + std::time::Duration::from_millis(10));
+                        return;
+                    }
+                    e.hwnd
                 } else {
-                    log_once("could not draw the shadow");
+                    if e.at != (wr.left, wr.top) {
+                        let _ = SetWindowPos(HWND(e.hwnd as *mut _), None, wr.left - m, wr.top - m, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+                        e.at = (wr.left, wr.top);
+                    }
+                    e.faded = is_faded(b);
+                    let want = !e.app_hidden && !e.faded;
+                    e.waiting = false;
+                    if !e.shown && want || e.shown && !want {
+                        apply_visibility(b, e);
+                    }
                     return;
                 }
-            } else if e.at != (wr.left, wr.top) {
-                let _ = SetWindowPos(HWND(e.hwnd as *mut _), None, wr.left - m, wr.top - m, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+            };
+            // Step 2 (not locked): draw the picture and hand it to Windows.
+            let ok = render(hwnd, bw, bht, m, corner_px, scale, (wr.left, wr.top));
+            // Step 3 (locked): note the result.
+            let Ok(mut all) = SHADOWS.lock() else { return };
+            let Some(e) = find(&mut all, b) else { return };
+            e.margin = m;
+            e.seen = None;
+            if ok {
+                e.drawn = Some(key);
+                e.failed = None;
                 e.at = (wr.left, wr.top);
-            }
-            let was = (e.shown, e.app_hidden, e.faded);
-            let want = !e.app_hidden && !e.faded;
-            if !e.shown && want || was.0 && !want {
-                apply_visibility(b, e);
+                e.waiting = false;
+                e.faded = is_faded(b);
+                let want = !e.app_hidden && !e.faded;
+                if !e.shown && want {
+                    apply_visibility(b, e);
+                }
+            } else {
+                log_once("could not draw the shadow");
+                e.failed = Some(key);
             }
         }
     }
@@ -340,6 +420,13 @@ mod imp {
 
     /// The box is faded out below half: hide its shadow.
     pub fn set_faded(b: isize, faded: bool) {
+        // Always remembered, even while the box has no shadow (yet): sync reads it when it creates one.
+        if let Ok(mut f) = FADED.lock() {
+            f.retain(|k| *k != b);
+            if faded {
+                f.push(b);
+            }
+        }
         let Ok(mut all) = SHADOWS.lock() else { return };
         if let Some(e) = find(&mut all, b) {
             if e.faded != faded {
@@ -350,6 +437,9 @@ mod imp {
     }
 
     pub fn destroy(b: isize) {
+        if let Ok(mut f) = FADED.lock() {
+            f.retain(|k| *k != b);
+        }
         sync(b, false, 0.0);
     }
 

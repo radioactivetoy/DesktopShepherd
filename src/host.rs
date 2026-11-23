@@ -623,6 +623,8 @@ pub struct HostSystem {
     pub lost: bool,
     /// A drawing error was already written to the log (avoid filling it).
     logged_error: bool,
+    /// Boxes whose window could not be created (logged once each).
+    create_failed: std::collections::HashSet<u64>,
 }
 
 impl HostSystem {
@@ -682,7 +684,7 @@ impl HostSystem {
                 ..Default::default()
             };
             RegisterClassExW(&pc);
-            Ok(Self { _controller: controller, compositor, renderer, ctx, hosts: HashMap::new(), panels: HashMap::new(), start: std::time::Instant::now(), lost: false, logged_error: false })
+            Ok(Self { _controller: controller, compositor, renderer, ctx, hosts: HashMap::new(), panels: HashMap::new(), start: std::time::Instant::now(), lost: false, logged_error: false, create_failed: Default::default() })
         }
     }
 
@@ -816,6 +818,7 @@ impl HostSystem {
     /// its picture shrinks to a few pixels and grows back on its next frame.
     pub fn release_hidden(&mut self, id: u64) {
         if let Some(h) = self.hosts.get_mut(&id) {
+            h.next = None; // a hidden box has no timer (it would keep the app waking up)
             if h.size != [8, 8] && self.renderer.resize(&h.swapchain, 8, 8).is_ok() {
                 h.size = [8, 8];
                 h.applied = None; // the glass layers are re-sized when it shows again
@@ -1017,7 +1020,9 @@ impl HostSystem {
                     self.hosts.insert(id, h);
                 }
                 Err(e) => {
-                    crate::storage::log_line(&format!("could not create box window: {e:?}"));
+                    if self.create_failed.insert(id) {
+                        crate::storage::log_line(&format!("could not create box window {id}: {e:?}"));
+                    }
                     return false;
                 }
             }

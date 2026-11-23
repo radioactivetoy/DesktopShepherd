@@ -552,7 +552,17 @@ impl DeskWidget for Todo {
                     )
                 })
                 .inner;
-            let (enter, esc) = ui.input(|i| (i.key_pressed(egui::Key::Enter), i.key_pressed(egui::Key::Escape)));
+            // Esc counts only while this field has the keyboard (not for the whole window).
+            let has_kb = r.has_focus() || r.lost_focus();
+            let (enter, esc) = ui.input(|i| (i.key_pressed(egui::Key::Enter), has_kb && i.key_pressed(egui::Key::Escape)));
+            // The pointer is on the "+" (its place from the last pass): a click there closes the
+            // field itself, so losing the focus must not close it first.
+            let over_plus = ui
+                .ctx()
+                .data(|d| d.get_temp::<egui::Rect>(aid.with("plus")))
+                .zip(ui.input(|i| i.pointer.hover_pos()))
+                .map(|(r, p)| r.contains(p))
+                .unwrap_or(false);
             if ui.ctx().data(|d| d.get_temp::<bool>(aid.with("focus"))).unwrap_or(false) {
                 r.request_focus();
                 ui.ctx().data_mut(|d| d.remove::<bool>(aid.with("focus")));
@@ -563,8 +573,10 @@ impl DeskWidget for Todo {
                 }
                 new.clear();
                 out.changed = true;
+                // Keep the field open (also when it was only shown because the list was empty).
+                adding = true;
                 r.request_focus();
-            } else if esc || (r.lost_focus() && new.trim().is_empty()) {
+            } else if esc || (r.lost_focus() && new.trim().is_empty() && !over_plus) {
                 new.clear();
                 adding = false;
             }
@@ -679,6 +691,7 @@ impl DeskWidget for Todo {
             let ps = egui::Stroke::new(1.6_f32, pc);
             ui.painter().line_segment([pr.center() - egui::vec2(5.0, 0.0), pr.center() + egui::vec2(5.0, 0.0)], ps);
             ui.painter().line_segment([pr.center() - egui::vec2(0.0, 5.0), pr.center() + egui::vec2(0.0, 5.0)], ps);
+            ui.ctx().data_mut(|d| d.insert_temp(aid.with("plus"), pr));
             if presp.clicked() {
                 adding = !adding;
                 focus_now = adding;
@@ -783,6 +796,9 @@ impl DeskWidget for Agenda {
                     child.label(egui::RichText::new(tf("⚠ {} calendar(s) not updated: {}", &[&failed, &first])).size(11.0).color(crate::ink::adapt(Color32::from_rgb(255, 190, 130)))).on_hover_text(first);
                 } else if cals.iter().any(|c| c.loading && c.events.is_empty()) {
                     child.label(egui::RichText::new(t("Loading…")).size(11.5).color(crate::ink::gray(170)));
+                }
+                if cals.iter().any(|c| c.truncated) {
+                    child.label(egui::RichText::new(t("The calendar is too large; only the first events are shown.")).size(11.0).color(crate::ink::gray(170)));
                 }
             }
         }
@@ -1277,7 +1293,7 @@ fn agenda_list(ui: &mut Ui, cals: &[crate::agenda::CalView], days: i64, open: &m
         }
     }
     rows.sort_by(|a, b| a.0.cmp(&b.0).then(b.2.all_day.cmp(&a.2.all_day)).then(a.2.start.cmp(&b.2.start)));
-    let status_h = if cals.iter().any(|c| c.error.is_some() || (c.loading && c.events.is_empty())) { 20.0 } else { 0.0 };
+    let status_h = if cals.iter().any(|c| c.error.is_some() || c.truncated || (c.loading && c.events.is_empty())) { 20.0 } else { 0.0 };
     egui::ScrollArea::vertical().max_height((ui.available_height() - status_h).max(30.0)).auto_shrink([false, true]).show(ui, |ui| {
         if rows.is_empty() && cals.iter().all(|c| !c.loading) {
             ui.label(egui::RichText::new(tf("Nothing in the next {} days.", &[&days])).size(13.0).color(crate::ink::gray(190)));
@@ -1571,6 +1587,9 @@ struct MediaInfo {
     timeline: Option<(f64, f64, std::time::Instant)>,
     /// Cover picture (decoded, at most 256 px), with a number that changes with the song.
     art: Option<(u64, std::sync::Arc<egui::ColorImage>)>,
+    /// (song key, tries) of reading the cover when there was none: after a few tries the stream is
+    /// not opened again for that song.
+    art_tries: (u64, u8),
 }
 
 /// What's playing, read on a helper thread at most every 2 s while a media widget shows (Windows'
@@ -1625,9 +1644,11 @@ fn read_session(s: &windows::Media::Control::GlobalSystemMediaTransportControlsS
         (&app, &title, &artist).hash(&mut h);
         h.finish()
     };
+    let tried = previous.iter().find(|p| p.art_tries.0 == key).map(|p| p.art_tries.1).unwrap_or(0);
     let art = match previous.iter().find_map(|p| p.art.clone().filter(|(k, _)| *k == key)) {
         Some(a) => Some(a),
-        None => (|| -> Option<(u64, std::sync::Arc<egui::ColorImage>)> {
+        None if tried >= 3 => None,
+        None =>(|| -> Option<(u64, std::sync::Arc<egui::ColorImage>)> {
             use windows::Storage::Streams::DataReader;
             let stream = props.Thumbnail().ok()?.OpenReadAsync().ok()?.get().ok()?;
             let size = stream.Size().ok()? as u32;
@@ -1643,7 +1664,9 @@ fn read_session(s: &windows::Media::Control::GlobalSystemMediaTransportControlsS
             Some((key, std::sync::Arc::new(ci)))
         })(),
     };
-    Some(MediaInfo { app, title, artist, playing, timeline, art })
+    // A cover that is not there (yet) is tried only a few times per song (players fill it in late).
+    let art_tries = if art.is_some() { (key, 0) } else { (key, tried.saturating_add(1)) };
+    Some(MediaInfo { app, title, artist, playing, timeline, art, art_tries })
 }
 #[cfg(not(windows))]
 fn read_media(_previous: &[MediaInfo]) -> Vec<MediaInfo> {

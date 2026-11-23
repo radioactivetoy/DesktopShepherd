@@ -556,6 +556,15 @@ pub static ES: &[(&str, &str)] = &[
     ("Dark", "Oscuro"),
     ("Light", "Claro"),
     ("Raised look", "Aspecto elevado"),
+    ("Check once a day for new versions of DesktopShepherd? (Only asks GitHub for the latest version number.)", "¿Buscar una vez al día nuevas versiones de DesktopShepherd? (Solo pregunta a GitHub cuál es el número de la última versión.)"),
+    ("Yes", "Sí"),
+    ("No", "No"),
+    ("Couldn\x27t rename: a file with that name already exists.", "No se pudo cambiar el nombre: ya existe un archivo con ese nombre."),
+    ("Couldn\x27t rename: the name has characters Windows doesn\x27t allow.", "No se pudo cambiar el nombre: contiene caracteres que Windows no permite."),
+    ("Couldn\x27t rename: Windows refused (the file may be open).", "No se pudo cambiar el nombre: Windows lo rechazó (puede que el archivo esté abierto)."),
+    ("The downloaded update could not be verified; opening the release page instead.", "No se pudo verificar la actualización descargada; se abre la página de la versión."),
+    ("The calendar is too large; only the first events are shown.", "El calendario es demasiado grande; solo se muestran los primeros eventos."),
+    ("Weather: no connection, trying again in a few minutes.", "Tiempo: sin conexión, se reintentará en unos minutos."),
 ];
 
 pub static CA: &[(&str, &str)] = &[
@@ -923,6 +932,15 @@ pub static CA: &[(&str, &str)] = &[
     ("Dark", "Fosc"),
     ("Light", "Clar"),
     ("Raised look", "Aspecte elevat"),
+    ("Check once a day for new versions of DesktopShepherd? (Only asks GitHub for the latest version number.)", "Cercar una vegada al dia noves versions de DesktopShepherd? (Només pregunta a GitHub quin és el número de l\x27última versió.)"),
+    ("Yes", "Sí"),
+    ("No", "No"),
+    ("Couldn\x27t rename: a file with that name already exists.", "No s\x27ha pogut canviar el nom: ja existeix un fitxer amb aquest nom."),
+    ("Couldn\x27t rename: the name has characters Windows doesn\x27t allow.", "No s\x27ha pogut canviar el nom: conté caràcters que Windows no permet."),
+    ("Couldn\x27t rename: Windows refused (the file may be open).", "No s\x27ha pogut canviar el nom: Windows l\x27ha rebutjat (potser el fitxer és obert)."),
+    ("The downloaded update could not be verified; opening the release page instead.", "No s\x27ha pogut verificar l\x27actualització baixada; s\x27obre la pàgina de la versió."),
+    ("The calendar is too large; only the first events are shown.", "El calendari és massa gran; només es mostren els primers esdeveniments."),
+    ("Weather: no connection, trying again in a few minutes.", "Temps: sense connexió, es tornarà a provar d\x27aquí a uns minuts."),
 ];
 
 #[cfg(test)]

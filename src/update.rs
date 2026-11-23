@@ -15,6 +15,8 @@ const REPO: &str = "radioactivetoy/DesktopShepherd";
 pub struct Release {
     pub version: String,
     pub setup_url: Option<String>,
+    /// The release's list of SHA-256 checksums (SHA256SUMS.txt), if it has one.
+    pub sums_url: Option<String>,
     pub page: String,
 }
 
@@ -76,6 +78,72 @@ mod version_tests {
     }
 }
 
+const DOWNLOADS: &str = "https://github.com/radioactivetoy/DesktopShepherd/releases/download/";
+const RELEASES: &str = "https://github.com/radioactivetoy/DesktopShepherd/releases/";
+const LATEST_PAGE: &str = "https://github.com/radioactivetoy/DesktopShepherd/releases/latest";
+const SUMS_NAME: &str = "SHA256SUMS.txt";
+
+/// A version that is safe to put in a file name: only letters, digits, "." and "-", at most 40.
+fn clean_version(v: &str) -> Option<String> {
+    let v = v.trim().trim_start_matches(['v', 'V']);
+    let ok = !v.is_empty() && v.len() <= 40 && v.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-');
+    ok.then(|| v.to_string())
+}
+
+/// The setup file's name for a version.
+fn setup_name(version: &str) -> String {
+    format!("DesktopShepherd-Setup-{version}.exe")
+}
+
+/// A download address of this project's own releases for exactly this file: `.../download/<tag>/<name>`.
+fn is_release_asset(url: &str, name: &str) -> bool {
+    let Some(rest) = url.strip_prefix(DOWNLOADS) else { return false };
+    let mut parts = rest.split('/');
+    let (Some(tag), Some(file), None) = (parts.next(), parts.next(), parts.next()) else { return false };
+    !tag.is_empty() && tag != ".." && tag != "." && tag.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-') && file == name
+}
+
+/// The setup file's address, only if it really is this version's setup file of this project.
+fn good_setup_url(url: &str, version: &str) -> bool {
+    is_release_asset(url, &setup_name(version))
+}
+
+/// A release page of this project.
+fn good_page(url: &str) -> bool {
+    url.starts_with(RELEASES) && !url.contains(['\r', '\n', ' ', '"'])
+}
+
+/// The expected SHA-256 of `name` from a "SHA256SUMS.txt" ("<hex>  <name>" per line).
+fn find_sum(sums: &str, name: &str) -> Option<String> {
+    sums.lines().find_map(|l| {
+        let mut it = l.split_whitespace();
+        let (hash, file) = (it.next()?, it.next()?);
+        let file = file.trim_start_matches('*');
+        (file == name && hash.len() == 64 && hash.chars().all(|c| c.is_ascii_hexdigit())).then(|| hash.to_ascii_lowercase())
+    })
+}
+
+/// SHA-256 of some bytes as lowercase hex (Windows' own crypto library).
+#[cfg(windows)]
+fn sha256_hex(data: &[u8]) -> Option<String> {
+    use windows::Win32::Security::Cryptography::{BCryptCloseAlgorithmProvider, BCryptHash, BCryptOpenAlgorithmProvider, BCRYPT_ALG_HANDLE, BCRYPT_OPEN_ALGORITHM_PROVIDER_FLAGS, BCRYPT_SHA256_ALGORITHM};
+    unsafe {
+        let mut alg = BCRYPT_ALG_HANDLE::default();
+        if BCryptOpenAlgorithmProvider(&mut alg, BCRYPT_SHA256_ALGORITHM, None, BCRYPT_OPEN_ALGORITHM_PROVIDER_FLAGS(0)).is_err() {
+            return None;
+        }
+        let mut out = [0u8; 32];
+        let r = BCryptHash(alg, None, data, &mut out);
+        let _ = BCryptCloseAlgorithmProvider(alg, 0);
+        r.is_ok().then(|| out.iter().map(|b| format!("{b:02x}")).collect())
+    }
+}
+
+#[cfg(not(windows))]
+fn sha256_hex(_data: &[u8]) -> Option<String> {
+    None
+}
+
 fn fetch_latest() -> Result<Release, String> {
     let txt = crate::net::get_text(&format!("https://api.github.com/repos/{REPO}/releases/latest")).map_err(|e| {
         if e.contains("404") {
@@ -85,14 +153,21 @@ fn fetch_latest() -> Result<Release, String> {
         }
     })?;
     let v: serde_json::Value = serde_json::from_str(&txt).map_err(|_| "GitHub answered strangely".to_string())?;
-    let version = v["tag_name"].as_str().ok_or("no version in GitHub's answer")?.trim_start_matches(['v', 'V']).to_string();
-    let setup_url = v["assets"].as_array().and_then(|a| {
-        a.iter()
-            .find(|x| x["name"].as_str().map(|n| n.to_lowercase().contains("setup") && n.to_lowercase().ends_with(".exe")).unwrap_or(false))
-            .and_then(|x| x["browser_download_url"].as_str().map(str::to_string))
-    });
-    let page = v["html_url"].as_str().unwrap_or("").to_string();
-    Ok(Release { version, setup_url, page })
+    let version = clean_version(v["tag_name"].as_str().ok_or("no version in GitHub's answer")?).ok_or("GitHub answered strangely")?;
+    // Only this project's own release files are accepted (exact names, exact address start).
+    let asset = |name: &str| -> Option<String> {
+        v["assets"]
+            .as_array()?
+            .iter()
+            .find(|x| x["name"].as_str() == Some(name))
+            .and_then(|x| x["browser_download_url"].as_str())
+            .filter(|u| is_release_asset(u, name))
+            .map(str::to_string)
+    };
+    let setup_url = asset(&setup_name(&version));
+    let sums_url = asset(SUMS_NAME);
+    let page = v["html_url"].as_str().filter(|p| good_page(p)).unwrap_or(LATEST_PAGE).to_string();
+    Ok(Release { version, setup_url, sums_url, page })
 }
 
 /// Checks in the background if the last check is older than `every` (or `force`).
@@ -146,49 +221,109 @@ fn is_portable() -> bool {
     std::env::current_exe().ok().and_then(|e| e.parent().map(|p| p.join("portable.txt").exists())).unwrap_or(false)
 }
 
-/// Downloads the new setup file and runs it (or opens the release page for a portable copy).
+/// Only one install at a time (a second click while one runs does nothing).
+static INSTALLING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// A new, empty folder for this run's download (%TEMP%\DesktopShepherd-update-<pid>-<time>).
+fn fresh_folder() -> std::io::Result<std::path::PathBuf> {
+    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+    let dir = std::env::temp_dir().join(format!("DesktopShepherd-update-{}-{stamp}", std::process::id()));
+    std::fs::create_dir(&dir)?; // fails if it already exists: never reuse a folder
+    Ok(dir)
+}
+
+/// Downloads the new setup file, checks it against the release's SHA-256 list and runs it (or
+/// opens the release page for a portable copy).
 pub fn install(rel: Release) {
-    let _ = std::thread::Builder::new().name("update-install".into()).spawn(move || {
-        let open_page = |url: &str| {
-            #[cfg(windows)]
-            unsafe {
-                use windows::core::{w, HSTRING, PCWSTR};
-                use windows::Win32::UI::Shell::ShellExecuteW;
-                use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
-                let _ = ShellExecuteW(None, w!("open"), &HSTRING::from(url), PCWSTR::null(), PCWSTR::null(), SW_SHOWNORMAL);
-            }
-            let _ = url;
-        };
-        let Some(url) = rel.setup_url.clone().filter(|_| !is_portable()) else {
+    use std::sync::atomic::Ordering;
+    if INSTALLING.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let spawned = std::thread::Builder::new().name("update-install".into()).spawn(move || {
+        let _ = std::panic::catch_unwind(|| install_now(rel));
+        INSTALLING.store(false, Ordering::SeqCst);
+    });
+    if spawned.is_err() {
+        INSTALLING.store(false, Ordering::SeqCst);
+    }
+}
+
+fn open_page(url: &str) {
+    // Only an address of this project's releases is ever opened.
+    let url = if good_page(url) { url } else { LATEST_PAGE };
+    #[cfg(windows)]
+    unsafe {
+        use windows::core::{w, HSTRING, PCWSTR};
+        use windows::Win32::UI::Shell::ShellExecuteW;
+        use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+        let _ = ShellExecuteW(None, w!("open"), &HSTRING::from(url), PCWSTR::null(), PCWSTR::null(), SW_SHOWNORMAL);
+    }
+    let _ = url;
+}
+
+fn install_now(rel: Release) {
+    let Some(version) = clean_version(&rel.version) else {
+        open_page(&rel.page);
+        return;
+    };
+    let setup = rel.setup_url.clone().filter(|u| good_setup_url(u, &version));
+    let Some(url) = setup.filter(|_| !is_portable()) else {
+        open_page(&rel.page);
+        return;
+    };
+    let budget = Duration::from_secs(300);
+    set_note(Some(crate::i18n::t("Downloading the update…").to_string()));
+    let bytes = match crate::net::get_bytes_within(&url, 128 * 1024 * 1024, budget) {
+        Ok(b) => b,
+        Err(e) => {
+            set_note(Some(format!("{}: {e}", crate::i18n::t("Could not download the update"))));
             open_page(&rel.page);
             return;
-        };
-        set_note(Some(crate::i18n::t("Downloading the update…").to_string()));
-        match crate::net::get_bytes(&url, 128 * 1024 * 1024) {
-            Ok(bytes) if bytes.len() > 100_000 && bytes.starts_with(b"MZ") => {
-                let path = std::env::temp_dir().join(format!("DesktopShepherd-Setup-{}.exe", rel.version));
-                if let Err(e) = std::fs::write(&path, &bytes) {
-                    set_note(Some(format!("{}: {e}", crate::i18n::t("Could not save the update"))));
-                    return;
-                }
-                set_note(None);
-                // The setup asks, closes this copy and installs the new version.
-                if let Err(e) = std::process::Command::new(&path).spawn() {
-                    set_note(Some(format!("{}: {e}", crate::i18n::t("Could not start the update"))));
-                }
-            }
-            Ok(_) => set_note(Some(crate::i18n::t("The downloaded file is not a program; opening the release page instead.").to_string())),
-            Err(e) => {
-                set_note(Some(format!("{}: {e}", crate::i18n::t("Could not download the update"))));
-                open_page(&rel.page);
-            }
         }
-    });
+    };
+    if !(bytes.len() > 100_000 && bytes.starts_with(b"MZ")) {
+        set_note(Some(crate::i18n::t("The downloaded file is not a program; opening the release page instead.").to_string()));
+        return;
+    }
+    // The release's list of checksums must be there and must agree; otherwise nothing is run.
+    let expected = rel
+        .sums_url
+        .as_deref()
+        .filter(|u| is_release_asset(u, SUMS_NAME))
+        .and_then(|u| crate::net::get_bytes_within(u, 64 * 1024, Duration::from_secs(60)).ok())
+        .and_then(|b| find_sum(&String::from_utf8_lossy(&b), &setup_name(&version)));
+    let verified = match (expected, sha256_hex(&bytes)) {
+        (Some(want), Some(got)) => want == got,
+        _ => false,
+    };
+    if !verified {
+        crate::storage::log_line("update: the downloaded setup file could not be verified; not run");
+        set_note(Some(crate::i18n::t("The downloaded update could not be verified; opening the release page instead.").to_string()));
+        open_page(&rel.page);
+        return;
+    }
+    let dir = match fresh_folder() {
+        Ok(d) => d,
+        Err(e) => {
+            set_note(Some(format!("{}: {e}", crate::i18n::t("Could not save the update"))));
+            return;
+        }
+    };
+    let path = dir.join(setup_name(&version));
+    if let Err(e) = std::fs::write(&path, &bytes) {
+        set_note(Some(format!("{}: {e}", crate::i18n::t("Could not save the update"))));
+        return;
+    }
+    set_note(None);
+    // The setup asks, closes this copy and installs the new version.
+    if let Err(e) = std::process::Command::new(&path).spawn() {
+        set_note(Some(format!("{}: {e}", crate::i18n::t("Could not start the update"))));
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::newer_than;
+    use super::*;
 
     #[test]
     fn versions() {
@@ -196,6 +331,50 @@ mod tests {
         assert!(newer_than("v1.10.0", "1.9.3"));
         assert!(!newer_than("0.1.0", "0.1.0"));
         assert!(!newer_than("0.1", "0.1.0"));
+    }
+
+    #[test]
+    fn version_names_are_safe() {
+        assert_eq!(clean_version("v1.0.0-rc.1").as_deref(), Some("1.0.0-rc.1"));
+        assert_eq!(clean_version("1.2.3").as_deref(), Some("1.2.3"));
+        assert!(clean_version("1.0/../x").is_none());
+        assert!(clean_version("1.0 0").is_none());
+        assert!(clean_version("1.0*x").is_none());
+        assert!(clean_version("").is_none());
+        assert!(clean_version(&"1".repeat(41)).is_none());
+        assert!(clean_version(&"1".repeat(40)).is_some());
+    }
+
+    #[test]
+    fn only_our_release_files_are_accepted() {
+        let ok = "https://github.com/radioactivetoy/DesktopShepherd/releases/download/v1.0.0/DesktopShepherd-Setup-1.0.0.exe";
+        assert!(good_setup_url(ok, "1.0.0"));
+        assert!(!good_setup_url(ok, "1.0.1")); // another version's name
+        assert!(!good_setup_url(&ok.replace("radioactivetoy", "someone"), "1.0.0"));
+        assert!(!good_setup_url(&ok.replace("https://", "http://"), "1.0.0"));
+        assert!(!good_setup_url("https://github.com/radioactivetoy/DesktopShepherd/releases/download/v1.0.0/evil.exe", "1.0.0"));
+        assert!(!good_setup_url("https://github.com/radioactivetoy/DesktopShepherd/releases/download/v1.0.0/x/DesktopShepherd-Setup-1.0.0.exe", "1.0.0"));
+        assert!(!good_setup_url("https://github.com/radioactivetoy/DesktopShepherd/releases/download/../DesktopShepherd-Setup-1.0.0.exe", "1.0.0"));
+        assert!(!good_setup_url("https://github.com.evil.com/radioactivetoy/DesktopShepherd/releases/download/v1/DesktopShepherd-Setup-1.0.0.exe", "1.0.0"));
+        assert!(is_release_asset("https://github.com/radioactivetoy/DesktopShepherd/releases/download/v1.0.0/SHA256SUMS.txt", SUMS_NAME));
+        assert!(good_page("https://github.com/radioactivetoy/DesktopShepherd/releases/tag/v1.0.0"));
+        assert!(!good_page("https://evil.example/releases/"));
+        assert!(!good_page("file:///C:/Windows/System32/calc.exe"));
+    }
+
+    #[test]
+    fn checksum_list_is_read() {
+        let h = "ab".repeat(32);
+        let list = format!("{}  DesktopShepherd-Portable-1.0.0.zip\r\n{}  DesktopShepherd-Setup-1.0.0.exe\r\n", "cd".repeat(32), h.to_uppercase());
+        assert_eq!(find_sum(&list, "DesktopShepherd-Setup-1.0.0.exe"), Some(h));
+        assert_eq!(find_sum(&list, "other.exe"), None);
+        assert_eq!(find_sum("short  DesktopShepherd-Setup-1.0.0.exe", "DesktopShepherd-Setup-1.0.0.exe"), None);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn sha256_matches_known_value() {
+        assert_eq!(sha256_hex(b"abc").as_deref(), Some("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"));
     }
 }
 
