@@ -1799,6 +1799,9 @@ fn fence_window(
                 fv::border_stroke(fence, 1.0),
                 egui::StrokeKind::Inside,
             );
+            if fence.raised {
+                fv::paint_raised(&painter, rect.shrink(0.5), fence.corner.clamp(0.0, 40.0), 1.0);
+            }
         } else {
             // No glass available: a solid dark background with the box's tint and border.
             painter.rect_filled(rect, 0.0, Color32::from_rgb(30, 30, 34));

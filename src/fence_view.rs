@@ -230,15 +230,15 @@ fn rounded_points(r: Rect, rad: f32, n: usize) -> Vec<Pos2> {
     pts
 }
 
-/// "Raised look": light from above. A soft sheen on the upper part of the glass, a thin bright
-/// line along the top edge and a darker one along the bottom, so the box reads as a raised
-/// panel. Drawn with the box (no extra windows, nothing kept in memory).
-fn paint_raised(painter: &egui::Painter, rect: Rect, rad: f32, scale: f32) {
+/// "Raised look": a bevel all round the inside edge (top brightest, sides softly lit, bottom dark,
+/// blending through the corners), a soft sheen on the upper glass and a thin top highlight, so the
+/// box reads as a raised panel. Drawn with the box (no extra windows, nothing kept in memory).
+pub fn paint_raised(painter: &egui::Painter, rect: Rect, rad: f32, scale: f32) {
     let pts = rounded_points(rect, rad, 8);
     // Sheen: a fan from the centre; each point's brightness fades from the top to 60 % height.
     let shade = |p: Pos2| {
         let t = ((p.y - rect.min.y) / (rect.height() * 0.6)).clamp(0.0, 1.0);
-        Color32::from_white_alpha(((1.0 - t) * (1.0 - t) * 26.0) as u8)
+        Color32::from_white_alpha(((1.0 - t) * (1.0 - t) * 40.0) as u8)
     };
     let mut mesh = egui::Mesh::default();
     let c = rect.center();
@@ -251,13 +251,33 @@ fn paint_raised(painter: &egui::Painter, rect: Rect, rad: f32, scale: f32) {
         mesh.add_triangle(0, 1 + i, 1 + (i + 1) % n);
     }
     painter.add(egui::Shape::mesh(mesh));
-    // Edge light: the top edge (both top corners and the line between) bright, the bottom dark.
-    let w = (1.0 * scale).max(1.0);
+    // Bevel: a band inside the edge, lit from the top-left. Each edge point gets its colour from
+    // which way the edge faces (light where it faces the light, dark on the far side) and fades to
+    // nothing towards the inside, like a raised button.
+    let d = (10.0 * scale).max(4.0);
+    let inner = rounded_points(rect.shrink(d), (rad - d).max(0.0), 8);
+    let mut bevel = egui::Mesh::default();
+    for (o, i) in pts.iter().zip(inner.iter()) {
+        let n = (*o - *i).normalized();
+        // Top brightest, both sides softly lit (the same left and right, so no seams), bottom
+        // dark; continuous all the way round, so the corners blend.
+        let f = if n.y <= 0.0 { 0.45 + 0.55 * -n.y } else { 0.45 - 1.45 * n.y };
+        let c = if f >= 0.0 { Color32::from_white_alpha((f * 150.0) as u8) } else { Color32::from_black_alpha((-f * 130.0) as u8) };
+        bevel.colored_vertex(*o, c);
+        bevel.colored_vertex(*i, Color32::TRANSPARENT);
+    }
+    let m = pts.len() as u32;
+    for k in 0..m {
+        let (a, b) = (2 * k, 2 * ((k + 1) % m));
+        bevel.add_triangle(a, a + 1, b);
+        bevel.add_triangle(b, a + 1, b + 1);
+    }
+    painter.add(egui::Shape::mesh(bevel));
+    // A crisp highlight on the very top edge.
     let q = pts.len() / 4;
-    let top: Vec<Pos2> = pts[q / 2..q + q / 2 + 1].to_vec();
-    let bottom: Vec<Pos2> = pts[2 * q + q / 2..3 * q + q / 2 + 1].to_vec();
-    painter.add(egui::Shape::line(top, Stroke::new(w, Color32::from_white_alpha(90))));
-    painter.add(egui::Shape::line(bottom, Stroke::new(w, Color32::from_black_alpha(70))));
+    // (only the straight part and the start of each top corner, so it fades into the sides)
+    let top: Vec<Pos2> = pts[q - 3..q + 3].to_vec();
+    painter.add(egui::Shape::line(top, Stroke::new((1.5 * scale).max(1.0), Color32::from_white_alpha(170))));
 }
 
 /// The box's border (its colour and thickness; none at thickness 0).
