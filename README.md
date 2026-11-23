@@ -224,4 +224,8 @@ source file) and [docs/STATUS.md](docs/STATUS.md) (measurements, known issues, i
 - User interface: [egui](https://github.com/emilk/egui).
 - Wallpaper in the screenshots: artwork by Simon Stålenhag (https://www.simonstalenhag.se/).
 
-License of DesktopShepherd itself: not specified yet.
+## License
+
+DesktopShepherd is free software under the [GNU General Public License v3.0 or later](LICENSE):
+you may use, study, share and change it; if you share a changed version, it must stay under the
+same licence, with its source code available.

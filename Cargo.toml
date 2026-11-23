@@ -2,6 +2,7 @@
 name = "desktopshepherd"
 version = "0.2.0-beta.2"
 edition = "2021"
+license = "GPL-3.0-or-later"
 description = "A lightweight desktop icon organizer: boxes (fences) on your desktop, plus widgets."
 
 [[bin]]
