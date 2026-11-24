@@ -669,6 +669,8 @@ pub static ES: &[(&str, &str)] = &[
     ("Unmute", "Activar sonido"),
     ("Sound output: {}", "Salida de sonido: {}"),
     ("Volume {} %", "Volumen {} %"),
+    ("Sound output", "Salida de sonido"),
+    ("Sound settings…", "Configuración de sonido…"),
 ];
 
 pub static CA: &[(&str, &str)] = &[
@@ -1058,6 +1060,8 @@ pub static CA: &[(&str, &str)] = &[
     ("Unmute", "Activa el so"),
     ("Sound output: {}", "Sortida de so: {}"),
     ("Volume {} %", "Volum {} %"),
+    ("Sound output", "Sortida de so"),
+    ("Sound settings…", "Configuració del so…"),
 ];
 
 pub static FR: &[(&str, &str)] = &[
@@ -1447,6 +1451,8 @@ pub static FR: &[(&str, &str)] = &[
     ("Unmute", "Rétablir le son"),
     ("Sound output: {}", "Sortie audio : {}"),
     ("Volume {} %", "Volume {} %"),
+    ("Sound output", "Sortie audio"),
+    ("Sound settings…", "Paramètres audio…"),
 ];
 
 pub static DE: &[(&str, &str)] = &[
@@ -1836,6 +1842,8 @@ pub static DE: &[(&str, &str)] = &[
     ("Unmute", "Ton einschalten"),
     ("Sound output: {}", "Audioausgabe: {}"),
     ("Volume {} %", "Lautstärke {} %"),
+    ("Sound output", "Audioausgabe"),
+    ("Sound settings…", "Soundeinstellungen…"),
 ];
 
 pub static IT: &[(&str, &str)] = &[
@@ -2225,6 +2233,8 @@ pub static IT: &[(&str, &str)] = &[
     ("Unmute", "Riattiva audio"),
     ("Sound output: {}", "Uscita audio: {}"),
     ("Volume {} %", "Volume {} %"),
+    ("Sound output", "Uscita audio"),
+    ("Sound settings…", "Impostazioni audio…"),
 ];
 
 pub static PT: &[(&str, &str)] = &[
@@ -2614,6 +2624,8 @@ pub static PT: &[(&str, &str)] = &[
     ("Unmute", "Repor o som"),
     ("Sound output: {}", "Saída de som: {}"),
     ("Volume {} %", "Volume {} %"),
+    ("Sound output", "Saída de som"),
+    ("Sound settings…", "Definições de som…"),
 ];
 
 #[cfg(test)]

@@ -2565,6 +2565,8 @@ pub enum MenuPage {
     MoveToTabs(u64),
     Pages,
     Shortcut,
+    /// Sound output devices (media boxes).
+    Output,
 }
 
 pub struct OpenMenu {
@@ -2613,6 +2615,15 @@ fn row(ui: &mut egui::Ui, icon_char: char, text: &str, mark: Option<char>, enabl
     } else {
         resp
     }
+}
+
+/// "OUT 1-4 (BEHRINGER UMC 204HD 192k)": the part in brackets is the device's own name; cut to 32 characters.
+fn short_device_name(full: &str) -> String {
+    let n = match (full.find('('), full.rfind(')')) {
+        (Some(a), Some(b)) if b > a + 1 => full[a + 1..b].trim().to_string(),
+        _ => full.to_string(),
+    };
+    if n.chars().count() > 32 { format!("{}…", n.chars().take(31).collect::<String>()) } else { n }
 }
 
 fn sub(ui: &mut egui::Ui, icon_char: char, text: &str) -> bool {
@@ -2951,16 +2962,8 @@ fn fence_menu(ui: &mut egui::Ui, fence: &mut Fence, st: &mut UiState, page: &mut
                 close = true;
             }
             if fence.widget.as_ref().map(|w| w.kind == "media").unwrap_or(false) {
-                let dev = crate::audio::current().map(|v| v.device).filter(|d| !d.is_empty()).unwrap_or_else(|| t("Speakers").to_string());
-                // "OUT 1-4 (BEHRINGER UMC 204HD 192k)": the part in brackets is the device's own name.
-                let dev = match (dev.find('('), dev.rfind(')')) {
-                    (Some(a), Some(b)) if b > a + 1 => dev[a + 1..b].trim().to_string(),
-                    _ => dev,
-                };
-                let dev = if dev.chars().count() > 26 { format!("{}…", dev.chars().take(25).collect::<String>()) } else { dev };
-                if row(ui, '\u{E767}', &tf("Sound output: {}", &[&dev]), None, true).clicked() {
-                    crate::audio::open_output_picker();
-                    close = true;
+                if sub(ui, '\u{E767}', t("Sound output")) {
+                    *page = MenuPage::Output;
                 }
             }
             sep(ui);
@@ -3019,6 +3022,26 @@ fn fence_menu(ui: &mut egui::Ui, fence: &mut Fence, st: &mut UiState, page: &mut
                     dirty = true;
                     close = true;
                 }
+            }
+        }
+        MenuPage::Output => {
+            back(ui, page, t("Sound output"));
+            if crate::audio::want_devices() {
+                crate::widgets::media_wake();
+            }
+            let cur = crate::audio::current();
+            let default_id = cur.as_ref().map(|v| v.device_id.clone()).unwrap_or_default();
+            for (id, name) in cur.map(|v| v.devices).unwrap_or_default() {
+                if check(ui, *id == default_id, &short_device_name(&name)) {
+                    crate::audio::set_default(&id);
+                    crate::widgets::media_wake();
+                    close = true;
+                }
+            }
+            sep(ui);
+            if row(ui, icon::SETTINGS, t("Sound settings…"), None, true).clicked() {
+                crate::audio::open_sound_settings();
+                close = true;
             }
         }
         MenuPage::Shortcut => {

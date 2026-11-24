@@ -2476,7 +2476,7 @@ impl DeskWidget for Media {
 }
 
 /// Wakes the media helper now (a volume command is waiting for it).
-fn media_wake() {
+pub(crate) fn media_wake() {
     let (m, c) = &MEDIA_WAKE;
     if let Ok(mut w) = m.lock() {
         *w = true;
