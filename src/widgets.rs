@@ -65,17 +65,202 @@ pub fn find(id: &str) -> Option<&'static WidgetKind> {
 
 struct Clock;
 
+/// Windows' own list of time zones and the conversion of a moment to a zone's local time
+/// (daylight saving is handled by Windows; no time-zone crate).
+#[cfg(windows)]
+mod tz {
+    use windows::Win32::Foundation::SYSTEMTIME;
+    use windows::Win32::System::Time::{EnumDynamicTimeZoneInformation, SystemTimeToTzSpecificLocalTimeEx, DYNAMIC_TIME_ZONE_INFORMATION};
+
+    pub struct Zone {
+        /// Windows' key name ("W. Europe Standard Time").
+        pub key: String,
+        /// The name shown to people ("(UTC+01:00) Amsterdam, Berlin, ...").
+        pub display: String,
+        info: DYNAMIC_TIME_ZONE_INFORMATION,
+    }
+
+    /// The display name of a zone from the registry, in the language of Windows when possible.
+    fn display_name(key: &str) -> String {
+        use windows::core::PCWSTR;
+        use windows::Win32::UI::Shell::SHLoadIndirectString;
+        use winreg::enums::HKEY_LOCAL_MACHINE;
+        let path = format!("SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Time Zones\\{key}");
+        let Ok(k) = winreg::RegKey::predef(HKEY_LOCAL_MACHINE).open_subkey(path) else { return key.to_string() };
+        if let Ok(mui) = k.get_value::<String, _>("MUI_Display") {
+            let src: Vec<u16> = mui.encode_utf16().chain(Some(0)).collect();
+            let mut buf = [0u16; 256];
+            if unsafe { SHLoadIndirectString(PCWSTR(src.as_ptr()), &mut buf, None) }.is_ok() {
+                let n = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+                let s = String::from_utf16_lossy(&buf[..n]);
+                if !s.trim().is_empty() {
+                    return s;
+                }
+            }
+        }
+        k.get_value::<String, _>("Display").unwrap_or_else(|_| key.to_string())
+    }
+
+    /// All zones, read once (the first time they are needed) and kept.
+    pub fn list() -> &'static [Zone] {
+        static LIST: std::sync::OnceLock<Vec<Zone>> = std::sync::OnceLock::new();
+        LIST.get_or_init(|| {
+            let mut out = Vec::new();
+            for i in 0..1000u32 {
+                let mut info = DYNAMIC_TIME_ZONE_INFORMATION {
+                    Bias: 0,
+                    StandardName: [0; 32],
+                    StandardDate: SYSTEMTIME::default(),
+                    StandardBias: 0,
+                    DaylightName: [0; 32],
+                    DaylightDate: SYSTEMTIME::default(),
+                    DaylightBias: 0,
+                    TimeZoneKeyName: [0; 128],
+                    DynamicDaylightTimeDisabled: Default::default(),
+                };
+                // 0 = found one; anything else (259 = no more) ends the list.
+                if unsafe { EnumDynamicTimeZoneInformation(i, &mut info) } != 0 {
+                    break;
+                }
+                let n = info.TimeZoneKeyName.iter().position(|&c| c == 0).unwrap_or(info.TimeZoneKeyName.len());
+                let key = String::from_utf16_lossy(&info.TimeZoneKeyName[..n]);
+                if key.is_empty() {
+                    continue;
+                }
+                let display = display_name(&key);
+                out.push(Zone { key, display, info });
+            }
+            out.sort_by(|a, b| a.display.cmp(&b.display));
+            out
+        })
+    }
+
+    /// The local time in zone `key` at the moment `utc`; `None` if the zone is unknown.
+    pub fn local_time(key: &str, utc: chrono::DateTime<chrono::Utc>) -> Option<chrono::NaiveDateTime> {
+        use chrono::{Datelike, Timelike};
+        let zone = list().iter().find(|z| z.key == key)?;
+        let src = SYSTEMTIME {
+            wYear: utc.year().try_into().ok()?,
+            wMonth: utc.month() as u16,
+            wDayOfWeek: 0,
+            wDay: utc.day() as u16,
+            wHour: utc.hour() as u16,
+            wMinute: utc.minute() as u16,
+            wSecond: utc.second() as u16,
+            wMilliseconds: 0,
+        };
+        let mut dst = SYSTEMTIME::default();
+        unsafe { SystemTimeToTzSpecificLocalTimeEx(Some(&zone.info), &src, &mut dst) }.ok()?;
+        chrono::NaiveDate::from_ymd_opt(dst.wYear as i32, dst.wMonth as u32, dst.wDay as u32)?.and_hms_opt(dst.wHour as u32, dst.wMinute as u32, 0)
+    }
+}
+
+#[cfg(not(windows))]
+mod tz {
+    pub struct Zone {
+        pub key: String,
+        pub display: String,
+    }
+    pub fn list() -> &'static [Zone] {
+        &[]
+    }
+    pub fn local_time(_key: &str, _utc: chrono::DateTime<chrono::Utc>) -> Option<chrono::NaiveDateTime> {
+        None
+    }
+}
+
+/// The cities of a Windows zone name: "(UTC+09:00) Osaka, Sapporo, Tokyo" -> "Osaka, Sapporo,
+/// Tokyo" (all of them: the first alone is often not the one the person picked it for; a long
+/// list is cut with "…" when drawn, and a short label can be set instead).
+fn zone_city(display: &str) -> String {
+    display.split_once(") ").map(|x| x.1).unwrap_or(display).trim().to_string()
+}
+
+/// "+6 h", "-5:30" (a real minus sign), "0 h".
+fn zone_diff(minutes: i64) -> String {
+    if minutes == 0 {
+        return "0 h".to_string();
+    }
+    let sign = if minutes < 0 { '\u{2212}' } else { '+' };
+    let (h, m) = (minutes.abs() / 60, minutes.abs() % 60);
+    if m == 0 {
+        format!("{sign}{h} h")
+    } else {
+        format!("{sign}{h}:{m:02}")
+    }
+}
+
+/// A small crescent (an open arc) for "it is night there".
+fn paint_moon(p: &egui::Painter, c: Pos2, color: Color32) {
+    let r = 4.5_f32;
+    let pts: Vec<Pos2> = (0..=10)
+        .map(|i| {
+            let a = (60.0 + 240.0 * i as f32 / 10.0).to_radians();
+            Pos2::new(c.x + r * a.cos() * 0.8 + 1.0, c.y - r * a.sin())
+        })
+        .collect();
+    p.add(egui::Shape::line(pts, Stroke::new(2.0_f32, color)));
+}
+
+const MAX_ZONES: usize = 8;
+
 impl DeskWidget for Clock {
     fn ui(&self, ui: &mut Ui, data: &mut Value) -> WidgetOutput {
         let now = chrono::Local::now();
         let h24 = data.get("h24").and_then(|v| v.as_bool()).unwrap_or(true);
         let time = if h24 { now.format("%H:%M").to_string() } else { now.format("%I:%M %p").to_string() };
         let mut changed = false;
+        let zones: Vec<(String, String)> = data
+            .get("zones")
+            .and_then(|z| z.as_array())
+            .map(|a| a.iter().filter_map(|z| Some((z.get("id")?.as_str()?.to_string(), z.get("label").and_then(|l| l.as_str()).unwrap_or("").to_string()))).collect())
+            .unwrap_or_default();
         let resp = ui
             .vertical_centered(|ui| {
                 ui.add_space(4.0);
                 crate::ink::halo_label(ui, time, 44.0, crate::ink::strong());
                 ui.label(egui::RichText::new(crate::i18n::long_date(now.date_naive())).size(14.0).color(crate::ink::gray(200)));
+                if !zones.is_empty() {
+                    ui.add_space(4.0);
+                    let row_h = 18.0;
+                    let fit = ((ui.available_height() / row_h).floor() as usize).min(zones.len());
+                    let utc = chrono::Utc::now();
+                    let local = now.naive_local();
+                    for (id, label) in zones.iter().take(fit) {
+                        let Some(there) = tz::local_time(id, utc) else { continue };
+                        // Both clocks compared minute by minute; rounded to a quarter hour.
+                        let diff = (there - local).num_minutes();
+                        let diff = ((diff as f64 / 15.0).round() as i64) * 15;
+                        let night = {
+                            use chrono::Timelike;
+                            there.hour() >= 20 || there.hour() < 7
+                        };
+                        let name = if label.trim().is_empty() {
+                            tz::list().iter().find(|z| &z.key == id).map(|z| zone_city(&z.display)).unwrap_or_else(|| id.clone())
+                        } else {
+                            label.trim().to_string()
+                        };
+                        let text = if h24 { there.format("%H:%M").to_string() } else { there.format("%I:%M %p").to_string() };
+                        let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width().min(300.0), row_h), Sense::hover());
+                        let p = ui.painter_at(rect);
+                        let col = if night { crate::ink::gray(150) } else { crate::ink::gray(225) };
+                        let font = egui::FontId::proportional(13.0);
+                        let diff_r = p.text(Pos2::new(rect.max.x - 2.0, rect.center().y), egui::Align2::RIGHT_CENTER, zone_diff(diff), egui::FontId::proportional(12.0), crate::ink::gray(170));
+                        let time_r = p.text(Pos2::new(rect.max.x - 10.0 - diff_r.width().max(42.0), rect.center().y), egui::Align2::RIGHT_CENTER, text, font.clone(), col);
+                        if night {
+                            paint_moon(&p, Pos2::new(time_r.min.x - 9.0, rect.center().y), crate::ink::gray(170));
+                        }
+                        // The name gets the room left of the time (cut with "…" if longer).
+                        let room = (time_r.min.x - if night { 22.0 } else { 10.0 } - rect.min.x - 2.0).max(20.0);
+                        let mut job = egui::text::LayoutJob::simple_singleline(name, font, crate::ink::gray(205));
+                        job.wrap.max_width = room;
+                        job.wrap.max_rows = 1;
+                        job.wrap.break_anywhere = true;
+                        job.wrap.overflow_character = Some('…');
+                        let g = p.layout_job(job);
+                        p.galley(Pos2::new(rect.min.x + 2.0, rect.center().y - g.size().y / 2.0), g, crate::ink::gray(205));
+                    }
+                }
             })
             .response;
         resp.context_menu(|ui| {
@@ -95,12 +280,70 @@ impl DeskWidget for Clock {
     }
 
     fn settings(&self, ui: &mut Ui, data: &mut Value) -> bool {
+        let mut changed = false;
         let mut h24 = data_bool(data, "h24", true);
         if ui.checkbox(&mut h24, t("24-hour clock")).changed() {
             data["h24"] = json!(h24);
-            return true;
+            changed = true;
         }
-        false
+        ui.add_space(6.0);
+        ui.label(egui::RichText::new(t("Other time zones")).strong());
+        let mut remove: Option<usize> = None;
+        if let Some(arr) = data.get("zones").and_then(|z| z.as_array()) {
+            for (i, z) in arr.iter().enumerate() {
+                let id = z.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                let label = z.get("label").and_then(|v| v.as_str()).unwrap_or("").trim();
+                let shown = tz::list().iter().find(|x| x.key == id).map(|x| x.display.clone()).unwrap_or_else(|| id.to_string());
+                ui.horizontal(|ui| {
+                    if ui.small_button(t("Remove")).clicked() {
+                        remove = Some(i);
+                    }
+                    ui.label(if label.is_empty() { shown } else { format!("{label}  ({shown})") });
+                });
+            }
+        }
+        if let Some(i) = remove {
+            if let Some(arr) = data.get_mut("zones").and_then(|z| z.as_array_mut()) {
+                if i < arr.len() {
+                    arr.remove(i);
+                    changed = true;
+                }
+            }
+        }
+        let count = data.get("zones").and_then(|z| z.as_array()).map(|a| a.len()).unwrap_or(0);
+        if count < MAX_ZONES {
+            let list = tz::list();
+            let sid = ui.make_persistent_id("clock-add-zone");
+            let mut sel: usize = ui.ctx().data(|d| d.get_temp(sid)).unwrap_or(usize::MAX);
+            let mut label: String = ui.ctx().data(|d| d.get_temp(sid.with("label"))).unwrap_or_default();
+            let shown = list.get(sel).map(|z| z.display.clone()).unwrap_or_else(|| t("Choose a time zone…").to_string());
+            egui::ComboBox::from_id_salt("clock-zone-pick").selected_text(shown).width(300.0).height(320.0).show_ui(ui, |ui| {
+                for (i, z) in list.iter().enumerate() {
+                    ui.selectable_value(&mut sel, i, z.display.as_str());
+                }
+            });
+            ui.horizontal(|ui| {
+                ui.add(egui::TextEdit::singleline(&mut label).hint_text(t("Short label (optional)")).desired_width(150.0));
+                label.truncate(label.char_indices().nth(12).map(|x| x.0).unwrap_or(label.len()));
+                if ui.add_enabled(sel < list.len(), egui::Button::new(t("Add"))).clicked() {
+                    if let Some(z) = list.get(sel) {
+                        let entry = json!({ "id": z.key, "label": label.trim() });
+                        match data.get_mut("zones").and_then(|z| z.as_array_mut()) {
+                            Some(a) => a.push(entry),
+                            None => data["zones"] = json!([entry]),
+                        }
+                        changed = true;
+                        sel = usize::MAX;
+                        label.clear();
+                    }
+                }
+            });
+            ui.ctx().data_mut(|d| {
+                d.insert_temp(sid, sel);
+                d.insert_temp(sid.with("label"), label);
+            });
+        }
+        changed
     }
 }
 
@@ -270,6 +513,44 @@ struct Readings {
     mem_used_gb: f32,
     mem_total_gb: f32,
     disks: std::sync::Arc<Vec<(String, f32, f32)>>, // drive, used fraction, free GB
+    /// Network counters of the last reading: per interface (id, bytes in, bytes out), and when.
+    net_prev: Vec<(u64, u64, u64)>,
+    net_at: Option<std::time::Instant>,
+    /// Bytes per second, received and sent, and the last 60 of them.
+    net_down: f64,
+    net_up: f64,
+    net_hist: std::collections::VecDeque<(f32, f32)>,
+}
+
+/// Total bytes received and sent per network interface that is really connected: up, not
+/// loopback (type 24), not a tunnel (131), and a hardware adapter that is not an endpoint
+/// (so virtual switches, VPN tunnels and WSL do not count the same traffic twice).
+#[cfg(windows)]
+fn net_octets() -> Option<Vec<(u64, u64, u64)>> {
+    use windows::Win32::NetworkManagement::IpHelper::{FreeMibTable, GetIfTable2, MIB_IF_TABLE2};
+    use windows::Win32::NetworkManagement::Ndis::IfOperStatusUp;
+    let mut table: *mut MIB_IF_TABLE2 = std::ptr::null_mut();
+    if unsafe { GetIfTable2(&mut table) }.0 != 0 || table.is_null() {
+        return None;
+    }
+    let mut out = Vec::new();
+    unsafe {
+        let n = (*table).NumEntries as usize;
+        let rows = std::slice::from_raw_parts((*table).Table.as_ptr(), n);
+        for row in rows {
+            // Flag bits: 0 hardware interface, 7 end-point interface.
+            let flags = row.InterfaceAndOperStatusFlags._bitfield;
+            if row.OperStatus == IfOperStatusUp && row.Type != 24 && row.Type != 131 && flags & 1 != 0 && flags & 0x80 == 0 {
+                out.push((row.InterfaceLuid.Value, row.InOctets, row.OutOctets));
+            }
+        }
+        FreeMibTable(table as *const core::ffi::c_void);
+    }
+    Some(out)
+}
+#[cfg(not(windows))]
+fn net_octets() -> Option<Vec<(u64, u64, u64)>> {
+    None
 }
 
 static READINGS: std::sync::Mutex<Option<Readings>> = std::sync::Mutex::new(None);
@@ -338,7 +619,7 @@ fn disks() -> Vec<(String, f32, f32)> {
 type Snapshot = (f32, Vec<f32>, f32, f32, f32, std::sync::Arc<Vec<(String, f32, f32)>>);
 
 /// Takes new readings if the last ones are 2 s old (disks every 60 s), and returns a copy.
-fn read_now() -> Snapshot {
+fn read_now(want_net: bool) -> Snapshot {
     let Ok(mut g) = READINGS.lock() else { return (0.0, Vec::new(), 0.0, 0.0, 0.0, Default::default()) };
     let now = std::time::Instant::now();
     let r = g.get_or_insert_with(|| {
@@ -353,6 +634,11 @@ fn read_now() -> Snapshot {
             mem_used_gb: 0.0,
             mem_total_gb: 0.0,
             disks: Default::default(),
+            net_prev: Vec::new(),
+            net_at: None,
+            net_down: 0.0,
+            net_up: 0.0,
+            net_hist: Default::default(),
         }
     });
     if now.duration_since(r.at) >= SAMPLE_EVERY - Duration::from_millis(150) {
@@ -372,6 +658,34 @@ fn read_now() -> Snapshot {
             r.mem_load = load;
             r.mem_used_gb = used;
             r.mem_total_gb = total;
+        }
+        if want_net {
+            if let Some(cur) = net_octets() {
+                let secs = r.net_at.map(|t| now.duration_since(t).as_secs_f64()).unwrap_or(0.0);
+                // After a long pause (the option was off) there is no speed to compute yet.
+                if secs > 0.2 && secs < 10.0 {
+                    // Only interfaces that were in the last reading too: a new adapter's total
+                    // since boot must not show up as one huge burst.
+                    let (mut down, mut up) = (0u64, 0u64);
+                    for (id, i, o) in &cur {
+                        if let Some((_, pi, po)) = r.net_prev.iter().find(|p| p.0 == *id) {
+                            down += i.saturating_sub(*pi);
+                            up += o.saturating_sub(*po);
+                        }
+                    }
+                    r.net_down = down as f64 / secs;
+                    r.net_up = up as f64 / secs;
+                    if r.net_hist.len() >= 60 {
+                        r.net_hist.pop_front();
+                    }
+                    r.net_hist.push_back((r.net_down as f32, r.net_up as f32));
+                }
+                r.net_prev = cur;
+                r.net_at = Some(now);
+            }
+        } else {
+            r.net_prev.clear();
+            r.net_at = None;
         }
         r.at = now;
     }
@@ -420,8 +734,10 @@ fn meter(ui: &mut Ui, label: &str, frac: f32, text: &str) {
 struct SysMon;
 
 impl DeskWidget for SysMon {
-    fn ui(&self, ui: &mut Ui, _data: &mut Value) -> WidgetOutput {
-        let (cpu, hist, load, used, total, disks) = read_now();
+    fn ui(&self, ui: &mut Ui, data: &mut Value) -> WidgetOutput {
+        let show_net = data_bool(data, "net", true);
+        let bits = data_bool(data, "bits", false);
+        let (cpu, hist, load, used, total, disks) = read_now(show_net);
         ui.add_space(2.0);
         meter(ui, "CPU", cpu, &format!("{:.0} %", cpu * 100.0));
         // The last two minutes of CPU use.
@@ -436,6 +752,9 @@ impl DeskWidget for SysMon {
         }
         ui.add_space(4.0);
         meter(ui, "RAM", load, &format!("{used:.1}/{total:.0} GB"));
+        if show_net {
+            net_rows(ui, bits);
+        }
         // Many drives: the list scrolls.
         egui::ScrollArea::vertical().id_salt("disks").auto_shrink([false, true]).show(ui, |ui| {
             for (name, frac, free) in disks.iter() {
@@ -443,6 +762,74 @@ impl DeskWidget for SysMon {
             }
         });
         WidgetOutput { changed: false, repaint_after: Some(SAMPLE_EVERY) }
+    }
+
+    fn has_settings(&self) -> bool {
+        true
+    }
+
+    fn settings(&self, ui: &mut Ui, data: &mut Value) -> bool {
+        let mut changed = false;
+        let mut net = data_bool(data, "net", true);
+        if ui.checkbox(&mut net, t("Show network speed")).changed() {
+            data["net"] = json!(net);
+            changed = true;
+        }
+        let mut bits = data_bool(data, "bits", false);
+        if ui.add_enabled(net, egui::Checkbox::new(&mut bits, t("Bits per second (Mb/s)"))).changed() {
+            data["bits"] = json!(bits);
+            changed = true;
+        }
+        changed
+    }
+}
+
+/// "12.3 MB/s" (bytes, steps of 1024) or "98.4 Mb/s" (bits, steps of 1000).
+fn speed_text(bytes_per_sec: f64, bits: bool) -> String {
+    let (mut v, step, units): (f64, f64, [&str; 4]) =
+        if bits { (bytes_per_sec * 8.0, 1000.0, ["b/s", "Kb/s", "Mb/s", "Gb/s"]) } else { (bytes_per_sec, 1024.0, ["B/s", "KB/s", "MB/s", "GB/s"]) };
+    let mut u = 0;
+    while v >= step && u < 3 {
+        v /= step;
+        u += 1;
+    }
+    if u == 0 {
+        format!("{v:.0} {}", units[0])
+    } else {
+        format!("{v:.1} {}", units[u])
+    }
+}
+
+/// The network line (download and upload speed) and the two-line history graph.
+fn net_rows(ui: &mut Ui, bits: bool) {
+    let (down, up, hist) = match READINGS.lock() {
+        Ok(g) => match g.as_ref() {
+            Some(r) => (r.net_down, r.net_up, r.net_hist.iter().copied().collect::<Vec<_>>()),
+            None => (0.0, 0.0, Vec::new()),
+        },
+        Err(_) => (0.0, 0.0, Vec::new()),
+    };
+    let down_col = crate::ink::adapt(Color32::from_rgb(110, 190, 255));
+    let up_col = crate::ink::adapt(Color32::from_rgb(255, 170, 90));
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        ui.add_sized([40.0, 18.0], egui::Label::new(egui::RichText::new(t("Network")).size(13.0).color(crate::ink::gray(210))));
+        ui.label(egui::RichText::new(format!("\u{2193} {}", speed_text(down, bits))).size(12.5).color(down_col));
+        ui.label(egui::RichText::new(format!("\u{2191} {}", speed_text(up, bits))).size(12.5).color(up_col));
+    });
+    let (r, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 34.0), Sense::hover());
+    let p = ui.painter();
+    p.rect_filled(r, 3.0, Color32::from_black_alpha(45));
+    if hist.len() > 1 {
+        // Scaled to the highest value in view (at least 10 KB/s, so idle noise stays flat).
+        let top = hist.iter().fold(10_240.0_f32, |m, (d, u)| m.max(*d).max(*u));
+        let step = r.width() / 59.0;
+        let x0 = r.max.x - step * (hist.len() - 1) as f32;
+        let line = |pick: fn(&(f32, f32)) -> f32| -> Vec<Pos2> {
+            hist.iter().enumerate().map(|(i, v)| Pos2::new(x0 + i as f32 * step, r.max.y - 2.0 - pick(v) / top * (r.height() - 4.0))).collect()
+        };
+        p.add(egui::Shape::line(line(|v| v.0), Stroke::new(1.5_f32, down_col)));
+        p.add(egui::Shape::line(line(|v| v.1), Stroke::new(1.5_f32, up_col)));
     }
 }
 
@@ -1432,6 +1819,8 @@ struct LaptopInfo {
     wifi: Option<Option<(String, u32)>>,
     /// Bluetooth: None = no Bluetooth, Some((on, connected device names)).
     bluetooth: Option<(bool, Vec<String>)>,
+    /// Connected Bluetooth devices that report a battery: (name, percent). Read every 5 minutes.
+    bt_batteries: Vec<(String, u8)>,
 }
 
 /// Last reading (and when), Wi-Fi/Bluetooth read on a helper thread at most every 30 s while a laptop widget shows
@@ -1600,6 +1989,7 @@ fn read_laptop() -> LaptopInfo {
             info.bluetooth = Some((on, names));
         }
     }
+    info.bt_batteries = bt_batteries_cached();
     info
 }
 #[cfg(not(windows))]
@@ -1677,6 +2067,10 @@ impl DeskWidget for Laptop {
             Some((true, _)) => status_line(ui, '\u{E702}', t("Bluetooth on"), t("nothing connected"), Color32::from_rgb(110, 190, 255)),
             Some((false, _)) => status_line(ui, '\u{E702}', t("Bluetooth off"), "", crate::ink::gray(150)),
             None => status_line(ui, '\u{E702}', t("No Bluetooth"), "", crate::ink::gray(140)),
+        }
+        for (name, pct) in &info.bt_batteries {
+            let color = if *pct <= 20 { Color32::from_rgb(255, 110, 100) } else { Color32::from_rgb(110, 190, 255) };
+            status_line(ui, bt_device_icon(name), name, &format!("{pct} %"), color);
         }
         WidgetOutput { changed: false, repaint_after: Some(Duration::from_secs(5)) }
     }
@@ -1805,16 +2199,26 @@ fn media_helper() {
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
     }
     let every = if crate::leak_test("media") { Duration::from_millis(100) } else { Duration::from_secs(2) };
+    let mut last_media: Option<std::time::Instant> = None;
     loop {
         let wanted = MEDIA_ASKED.lock().ok().and_then(|g| *g).map(|t| t.elapsed() < Duration::from_secs(10)).unwrap_or(false);
         if wanted {
-            let prev = MEDIA.lock().ok().and_then(|g| g.clone()).map(|(_, m)| m).unwrap_or_default();
-            let info = std::panic::catch_unwind(|| read_media(&prev)).unwrap_or_default();
-            if let Ok(mut g) = MEDIA.lock() {
-                *g = Some((std::time::Instant::now(), info));
+            // A wake-up caused by a volume command only needs the audio part, not the whole
+            // media reading.
+            if last_media.map(|t| t.elapsed() >= every.mul_f32(0.9)).unwrap_or(true) {
+                let prev = MEDIA.lock().ok().and_then(|g| g.clone()).map(|(_, m)| m).unwrap_or_default();
+                let info = std::panic::catch_unwind(|| read_media(&prev)).unwrap_or_default();
+                if let Ok(mut g) = MEDIA.lock() {
+                    *g = Some((std::time::Instant::now(), info));
+                }
+                last_media = Some(std::time::Instant::now());
+                let _ = std::panic::catch_unwind(crate::audio::tick);
+                #[cfg(windows)]
+                crate::runloop::wake_after(Duration::ZERO);
+            } else if std::panic::catch_unwind(crate::audio::tick).unwrap_or(false) {
+                #[cfg(windows)]
+                crate::runloop::wake_after(Duration::ZERO);
             }
-            #[cfg(windows)]
-            crate::runloop::wake_after(Duration::ZERO);
         }
         // Sleep: `every` while wanted, otherwise until a widget asks again.
         let (m, c) = &MEDIA_WAKE;
@@ -2016,17 +2420,49 @@ impl DeskWidget for Media {
             media_command(2, m.app.clone());
         }
         y += 44.0;
-        // Progress: where in the song, moving on by itself while playing.
         let mut repaint = Duration::from_secs(2);
+        // Volume (right end of the buttons row), only while the mouse is over the widget.
+        if ui.rect_contains_pointer(ui.max_rect()) {
+            if let Some(vol) = crate::audio::current() {
+                media_volume_controls(ui, cy, mid.x + 44.0 + 15.0 + 18.0, x0 + w, &vol);
+                repaint = Duration::from_secs(1);
+            }
+        }
+        // Progress: where in the song, moving on by itself while playing; click or drag to seek.
         if let Some((pos, end, read_at)) = m.timeline {
-            let now = if m.playing { pos + read_at.elapsed().as_secs_f64() } else { pos };
+            let seek_id = ui.make_persistent_id("media-seek");
+            let over: Option<(String, f64, std::time::Instant)> = ui.ctx().data(|d| d.get_temp(seek_id));
+            let now = match over.filter(|(a, _, t)| *a == m.app && t.elapsed() < Duration::from_millis(2500)) {
+                Some((_, p, t)) => if m.playing { p + t.elapsed().as_secs_f64() } else { p },
+                None => if m.playing { pos + read_at.elapsed().as_secs_f64() } else { pos },
+            };
             let now = now.min(end);
+            let hit = egui::Rect::from_min_size(Pos2::new(x0, y), egui::vec2(w, 12.0));
+            let resp = ui.interact(hit, ui.id().with("media-seek-bar"), Sense::click_and_drag());
             let bar = egui::Rect::from_min_size(Pos2::new(x0, y + 4.0), egui::vec2(w, 4.0));
+            let mut shown = now;
+            if resp.hovered() || resp.dragged() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+            }
+            if resp.dragged() || resp.clicked() {
+                if let Some(pp) = ui.input(|i| i.pointer.interact_pos()) {
+                    shown = (((pp.x - bar.min.x) / bar.width().max(1.0)).clamp(0.0, 1.0) as f64) * end;
+                }
+            }
+            if resp.drag_stopped() || resp.clicked() {
+                ui.ctx().data_mut(|d| d.insert_temp(seek_id, (m.app.clone(), shown, std::time::Instant::now())));
+                media_seek(m.app.clone(), shown);
+            }
+            let pa = ui.painter();
             pa.rect_filled(bar, 2.0, crate::ink::white_alpha(40));
             let mut done = bar;
-            done.set_width(bar.width() * (now / end).clamp(0.0, 1.0) as f32);
+            let frac = (shown / end).clamp(0.0, 1.0) as f32;
+            done.set_width(bar.width() * frac);
             pa.rect_filled(done, 2.0, crate::ink::gray(230));
-            pa.text(Pos2::new(x0, y + 10.0), egui::Align2::LEFT_TOP, mmss(now), egui::FontId::proportional(10.5), crate::ink::gray(160));
+            if resp.hovered() || resp.dragged() {
+                pa.circle_filled(Pos2::new(bar.min.x + bar.width() * frac, bar.center().y), 5.5, crate::ink::strong());
+            }
+            pa.text(Pos2::new(x0, y + 10.0), egui::Align2::LEFT_TOP, mmss(shown), egui::FontId::proportional(10.5), crate::ink::gray(160));
             pa.text(Pos2::new(x0 + w, y + 10.0), egui::Align2::RIGHT_TOP, mmss(end), egui::FontId::proportional(10.5), crate::ink::gray(160));
             if m.playing {
                 repaint = Duration::from_secs(1); // the seconds move on
@@ -2036,5 +2472,190 @@ impl DeskWidget for Media {
             repaint = Duration::from_millis(100);
         }
         WidgetOutput { changed: false, repaint_after: Some(repaint) }
+    }
+}
+
+/// Wakes the media helper now (a volume command is waiting for it).
+fn media_wake() {
+    let (m, c) = &MEDIA_WAKE;
+    if let Ok(mut w) = m.lock() {
+        *w = true;
+        c.notify_one();
+    }
+}
+
+
+// ---- Bluetooth device batteries (Laptop widget) -------------------------------------------------
+
+/// Last Bluetooth battery reading and when: read at most every 5 minutes, on the laptop Poller thread.
+#[cfg(windows)]
+static BT_BATT: std::sync::Mutex<Option<(std::time::Instant, Vec<(String, u8)>)>> = std::sync::Mutex::new(None);
+
+#[cfg(windows)]
+fn bt_batteries_cached() -> Vec<(String, u8)> {
+    let stale = BT_BATT.lock().ok().map(|g| g.as_ref().map(|(t, _)| t.elapsed() >= Duration::from_secs(300)).unwrap_or(true)).unwrap_or(false);
+    if stale {
+        let rows = std::panic::catch_unwind(read_bt_batteries).unwrap_or_default();
+        if let Ok(mut g) = BT_BATT.lock() {
+            *g = Some((std::time::Instant::now(), rows));
+        }
+    }
+    BT_BATT.lock().ok().and_then(|g| g.as_ref().map(|(_, r)| r.clone())).unwrap_or_default()
+}
+#[cfg(not(windows))]
+fn bt_batteries_cached() -> Vec<(String, u8)> {
+    Vec::new()
+}
+
+/// Connected Bluetooth devices that report a battery level to Windows (the property Settings >
+/// Bluetooth shows). Devices that don't report one are simply not listed. Any error gives no rows.
+#[cfg(windows)]
+fn read_bt_batteries() -> Vec<(String, u8)> {
+    use windows::core::{Interface, HSTRING};
+    use windows::Devices::Enumeration::{DeviceInformation, DeviceInformationKind};
+    use windows::Foundation::Collections::IIterable;
+    use windows::Foundation::IReference;
+    use windows::Storage::Search::QueryOptions;
+    use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
+    thread_local! {
+        /// COM is started once for this thread; the list of requested properties is kept too.
+        static READY: std::cell::RefCell<Option<IIterable<HSTRING>>> = const { std::cell::RefCell::new(None) };
+    }
+    const KEY: &str = "{104EA319-6EE2-4701-BD47-8DDBF425BBE5} 2"; // DEVPKEY_Bluetooth_Battery
+    let props = READY.with(|r| {
+        let mut r = r.borrow_mut();
+        if r.is_none() {
+            unsafe {
+                let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+            }
+            // A WinRT list of strings to ask with (QueryOptions hands out an empty one).
+            *r = (|| -> Option<IIterable<HSTRING>> {
+                let v = QueryOptions::new().ok()?.FileTypeFilter().ok()?;
+                v.Append(&HSTRING::from(KEY)).ok()?;
+                v.cast::<IIterable<HSTRING>>().ok()
+            })();
+        }
+        r.clone()
+    });
+    let Some(props) = props else { return Vec::new() };
+    let key = HSTRING::from(KEY);
+    let mut rows: Vec<(String, u8)> = Vec::new();
+    // Paired Bluetooth (classic and low energy) that is connected now, then connected devices of
+    // the device tree (where classic headsets keep the property).
+    let queries = [
+        (
+            "System.Devices.Aep.ProtocolId:=\"{e0cbf06c-cd8b-4647-bb8a-263b43f0f974}\" OR System.Devices.Aep.ProtocolId:=\"{bb7bb05e-5972-42b5-94fc-76eaa7084d49}\"",
+            DeviceInformationKind::AssociationEndpoint,
+        ),
+        ("System.Devices.Connected:=System.StructuredQueryType.Boolean#True", DeviceInformationKind::Device),
+    ];
+    for (filter, kind) in queries {
+        let Ok(op) = DeviceInformation::FindAllAsyncWithKindAqsFilterAndAdditionalProperties(&HSTRING::from(filter), &props, kind) else { continue };
+        let Ok(list) = op.get() else { continue };
+        for d in list {
+            let Ok(map) = d.Properties() else { continue };
+            let Ok(v) = map.Lookup(&key) else { continue };
+            let Ok(r) = v.cast::<IReference<u8>>() else { continue };
+            let Ok(pct) = r.Value() else { continue };
+            let name = d.Name().map(|n| n.to_string()).unwrap_or_default();
+            if pct <= 100 && !name.is_empty() && !rows.iter().any(|(n, _)| *n == name) {
+                rows.push((name, pct));
+            }
+            if rows.len() >= 12 {
+                break;
+            }
+        }
+    }
+    rows
+}
+
+/// An icon for a Bluetooth device from its name (mouse, keyboard, headphones), else the Bluetooth sign.
+fn bt_device_icon(name: &str) -> char {
+    let n = name.to_lowercase();
+    if ["mouse", "mx master", "mx anywhere", "trackpad"].iter().any(|k| n.contains(k)) {
+        '\u{E962}'
+    } else if n.contains("keyboard") || n.contains("keys") || n.contains("teclado") {
+        '\u{E765}'
+    } else if ["head", "buds", "airpods", "wh-", "wf-", "earphone", "pods", "auricular"].iter().any(|k| n.contains(k)) {
+        '\u{E7F6}'
+    } else {
+        '\u{E702}'
+    }
+}
+
+/// Moves the song to `secs` on a helper thread (the player answers when it likes).
+fn media_seek(app: String, secs: f64) {
+    let _ = std::thread::Builder::new().name("media-seek".into()).spawn(move || {
+        #[cfg(windows)]
+        if let Some(s) = media_sessions().into_iter().find(|s| s.SourceAppUserModelId().map(|h| h.to_string() == app).unwrap_or(false)) {
+            if let Ok(op) = s.TryChangePlaybackPositionAsync((secs.max(0.0) * 1e7) as i64) {
+                let _ = op.get();
+            }
+        }
+        std::thread::sleep(Duration::from_millis(400));
+        if let Ok(mut g) = MEDIA.lock() {
+            if let Some((t, _)) = g.as_mut() {
+                *t = std::time::Instant::now() - Duration::from_secs(10);
+            }
+        }
+        #[cfg(windows)]
+        crate::runloop::wake_after(Duration::ZERO);
+    });
+}
+
+/// Speaker (click = mute) and a short slider (drag/click, wheel +-2 %) at the right end of the
+/// buttons row, between `x_min` and `x_max`. Too narrow: only the speaker. No percentage text
+/// (tooltip). COM work happens on the media helper; this only reads and leaves commands.
+fn media_volume_controls(ui: &mut Ui, cy: f32, x_min: f32, x_max: f32, vol: &crate::audio::Volume) {
+    let room = x_max - x_min;
+    if room < 22.0 {
+        return;
+    }
+    // The slider takes the room there is (up to 70 px), down to 34 px; below that, only the icon.
+    let slider_w = (room - 22.0 - 6.0).min(70.0);
+    let with_slider = slider_w >= 34.0;
+    let spk_c = if with_slider { Pos2::new(x_max - slider_w - 6.0 - 11.0, cy) } else { Pos2::new(x_max - 11.0, cy) };
+    let spk = egui::Rect::from_center_size(spk_c, egui::vec2(22.0, 22.0));
+    let track = egui::Rect::from_min_max(Pos2::new(x_max - slider_w, cy - 8.0), Pos2::new(x_max, cy + 8.0));
+    let tip = tf("Volume {} %", &[&((vol.level * 100.0).round() as u32)]);
+    let spk_resp = ui.interact(spk, ui.id().with("media-mute"), Sense::click()).on_hover_text(if vol.muted { t("Unmute") } else { t("Mute") });
+    let mut level = vol.level;
+    let scroll = ui.input(|i| i.raw_scroll_delta.y);
+    let step = |hover: bool, level: &mut f32| {
+        if hover && scroll != 0.0 {
+            *level = (*level + 0.02 * scroll.signum()).clamp(0.0, 1.0);
+        }
+    };
+    step(spk_resp.hovered(), &mut level);
+    let spk_col = if spk_resp.hovered() { crate::ink::strong() } else { crate::ink::gray(215) };
+    ui.painter().text(spk.center(), egui::Align2::CENTER_CENTER, if vol.muted || vol.level <= 0.0 { "\u{E74F}" } else { "\u{E767}" }, egui::FontId::proportional(15.0), spk_col);
+    if spk_resp.clicked() {
+        crate::audio::set_mute(!vol.muted);
+        media_wake();
+    }
+    if with_slider {
+        let resp = ui.interact(track, ui.id().with("media-vol"), Sense::click_and_drag()).on_hover_text(tip);
+        if resp.dragged() || resp.clicked() || resp.is_pointer_button_down_on() {
+            if let Some(p) = ui.input(|i| i.pointer.interact_pos()) {
+                level = ((p.x - track.min.x) / track.width().max(1.0)).clamp(0.0, 1.0);
+            }
+        }
+        step(resp.hovered(), &mut level);
+        let bar = egui::Rect::from_center_size(track.center(), egui::vec2(track.width(), 4.0));
+        let p = ui.painter();
+        p.rect_filled(bar, 2.0, crate::ink::white_alpha(40));
+        let mut done = bar;
+        done.set_width(bar.width() * level);
+        p.rect_filled(done, 2.0, if vol.muted { crate::ink::gray(120) } else { crate::ink::gray(230) });
+        p.circle_filled(Pos2::new(bar.min.x + bar.width() * level, bar.center().y), if resp.hovered() || resp.dragged() { 6.0 } else { 5.0 }, crate::ink::strong());
+    } else {
+        spk_resp.on_hover_text(tip);
+    }
+    if (level - vol.level).abs() > 0.0005 {
+        crate::audio::set_level(level);
+        if vol.muted && level > vol.level {
+            crate::audio::set_mute(false);
+        }
+        media_wake();
     }
 }

@@ -2950,6 +2950,19 @@ fn fence_menu(ui: &mut egui::Ui, fence: &mut Fence, st: &mut UiState, page: &mut
                 actions.push(Act::WidgetSettings(fence.id));
                 close = true;
             }
+            if fence.widget.as_ref().map(|w| w.kind == "media").unwrap_or(false) {
+                let dev = crate::audio::current().map(|v| v.device).filter(|d| !d.is_empty()).unwrap_or_else(|| t("Speakers").to_string());
+                // "OUT 1-4 (BEHRINGER UMC 204HD 192k)": the part in brackets is the device's own name.
+                let dev = match (dev.find('('), dev.rfind(')')) {
+                    (Some(a), Some(b)) if b > a + 1 => dev[a + 1..b].trim().to_string(),
+                    _ => dev,
+                };
+                let dev = if dev.chars().count() > 26 { format!("{}…", dev.chars().take(25).collect::<String>()) } else { dev };
+                if row(ui, '\u{E767}', &tf("Sound output: {}", &[&dev]), None, true).clicked() {
+                    crate::audio::open_output_picker();
+                    close = true;
+                }
+            }
             sep(ui);
             if sub(ui, icon::ADD, t("New")) {
                 *page = MenuPage::New;
@@ -3627,15 +3640,24 @@ impl DeskApp {
         let s = &mut self.layout.settings;
         let mut dirty = false;
         let mut icons_changed = false;
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.label(crate::i18n::t("Language"));
-            for (v, name) in crate::i18n::CHOICES {
-                let label = if *v == 0 { crate::i18n::t(name) } else { name };
-                if ui.selectable_label(s.language == *v, label).clicked() && s.language != *v {
-                    s.language = *v;
-                    crate::i18n::set_lang(*v);
-                    dirty = true;
-                }
+            // A drop-down list (each language in its own name; "Automatic" translated).
+            let shown = |v: u8, name: &'static str| if v == 0 { crate::i18n::t(name) } else { name };
+            let current = crate::i18n::CHOICES.iter().find(|(v, _)| *v == s.language).map(|(v, n)| shown(*v, n)).unwrap_or("");
+            let mut picked = s.language;
+            egui::ComboBox::from_id_salt("language")
+                .selected_text(current)
+                .width(220.0)
+                .show_ui(ui, |ui| {
+                    for (v, name) in crate::i18n::CHOICES {
+                        ui.selectable_value(&mut picked, *v, shown(*v, name));
+                    }
+                });
+            if picked != s.language {
+                s.language = picked;
+                crate::i18n::set_lang(picked);
+                dirty = true;
             }
         });
         ui.add_space(6.0);

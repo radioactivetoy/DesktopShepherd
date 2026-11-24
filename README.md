@@ -148,7 +148,7 @@ menu under **"Widget settings..."**.
 - Optional: keep your layout in sync between PCs through OneDrive.
 - Optional: check for new versions (once a day).
 - Start with Windows.
-- Languages: English, Spanish and Catalan (follows Windows by default).
+- Languages: English, Spanish, Catalan, French, German, Italian and Portuguese (follows Windows by default). Native speakers: if a translation reads badly, please suggest better wording in a GitHub issue.
 
 <p>
 <img src="docs/screenshots/settings.png" alt="Settings window" width="700">
@@ -218,7 +218,7 @@ containing `beta` or `rc` are marked as pre-releases.
 | `src/shellmenu.rs` | Windows' own context menu in a helper process |
 | `src/model.rs`, `src/storage.rs` | saved layout and settings, backups |
 | `src/install.rs` | built-in installer and uninstaller |
-| `src/i18n.rs` | English, Spanish and Catalan texts |
+| `src/i18n.rs` | English, Spanish, Catalan, French, German, Italian and Portuguese texts |
 
 More in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) (processes, threads, rendering, every
 source file) and [docs/STATUS.md](docs/STATUS.md) (measurements, known issues, ideas).

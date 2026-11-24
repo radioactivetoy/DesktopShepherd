@@ -117,8 +117,36 @@ fn dir_size_kb(dir: &Path) -> u32 {
     std::fs::read_dir(dir).map(|rd| rd.flatten().filter_map(|e| e.metadata().ok()).map(|m| m.len()).sum::<u64>() / 1024).unwrap_or(0) as u32
 }
 
-/// The installer (DesktopShepherd-Setup.exe).
-pub fn run_setup() {
+/// Switches that mean "no windows, no questions" (for winget and scripts).
+const SILENT_FLAGS: [&str; 5] = ["--silent", "/s", "-s", "/quiet", "--quiet"];
+
+fn is_silent_flag(a: &str) -> bool {
+    let a = a.to_ascii_lowercase();
+    SILENT_FLAGS.contains(&a.as_str())
+}
+
+/// True when the command line (program name first) asks for a silent setup or uninstall.
+pub fn is_silent(args: &[String]) -> bool {
+    args.iter().skip(1).any(|a| is_silent_flag(a))
+}
+
+/// True when the command line asks for the normal setup: nothing but silent switches after the
+/// program name (any other `--` option belongs to the program itself).
+pub fn wants_setup(args: &[String]) -> bool {
+    !args.iter().skip(1).any(|a| a.starts_with("--") && !is_silent_flag(a))
+}
+
+/// A message for the person; in silent mode only written to the log.
+fn say(silent: bool, text: &str, style: MESSAGEBOX_STYLE) {
+    if silent {
+        crate::storage::log_line(&format!("setup (silent): {}", text.lines().next().unwrap_or("")));
+    } else {
+        tell(text, style);
+    }
+}
+
+/// The installer (DesktopShepherd-Setup.exe). Returns the exit code (0 = fine).
+pub fn run_setup(silent: bool) -> i32 {
     let dir = install_dir();
     let exe = dir.join(format!("{APP}.exe"));
     let again = exe.exists();
@@ -127,17 +155,17 @@ pub fn run_setup() {
     } else {
         tf("Install {}?\n\nIt goes to\n{}\n(just for you, no admin rights needed), gets a Start menu entry and starts with Windows.\n\nYou can remove it later from Settings > Apps > Installed apps.", &[&APP, &dir.display()])
     };
-    if !ask(&q, MB_YESNO | MB_ICONQUESTION) {
-        return;
+    if !silent && !ask(&q, MB_YESNO | MB_ICONQUESTION) {
+        return 0;
     }
     if !stop_running() {
-        tell(&tf("{} is still running and didn't close. Quit it from its tray icon, then run the setup again.", &[&APP]), MB_ICONWARNING);
-        return;
+        say(silent, &tf("{} is still running and didn't close. Quit it from its tray icon, then run the setup again.", &[&APP]), MB_ICONWARNING);
+        return 1;
     }
-    let Ok(me) = std::env::current_exe() else { return };
+    let Ok(me) = std::env::current_exe() else { return 1 };
     if let Err(e) = std::fs::create_dir_all(&dir).and_then(|_| std::fs::copy(&me, &exe).map(|_| ())) {
-        tell(&tf("Could not copy the program to\n{}\n\n{}", &[&dir.display(), &e]), MB_ICONWARNING);
-        return;
+        say(silent, &tf("Could not copy the program to\n{}\n\n{}", &[&dir.display(), &e]), MB_ICONWARNING);
+        return 1;
     }
     if let Some(lnk) = shortcut_path() {
         if let Err(e) = make_shortcut(&exe, &lnk) {
@@ -155,6 +183,7 @@ pub fn run_setup() {
             let _ = key.set_value("DisplayIcon", &format!("{},0", exe.display()));
             let _ = key.set_value("InstallLocation", &dir.display().to_string());
             let _ = key.set_value("UninstallString", &format!("{} --uninstall", q(&exe)));
+            let _ = key.set_value("QuietUninstallString", &format!("{} --uninstall --silent", q(&exe)));
             let _ = key.set_value("NoModify", &1u32);
             let _ = key.set_value("NoRepair", &1u32);
             let _ = key.set_value("EstimatedSize", &dir_size_kb(&dir));
@@ -171,6 +200,11 @@ pub fn run_setup() {
             let _ = crate::storage::save(&layout);
         }
     }
+    if silent {
+        // No window and the program is not started: winget expects no UI.
+        crate::storage::log_line("setup (silent): installed");
+        return 0;
+    }
     // Said before starting it: the starting program would close this message right away.
     let done = if again {
         tf("{} is updated. It starts when you press OK; its icon is in the tray (next to the clock).", &[&APP])
@@ -181,16 +215,18 @@ pub fn run_setup() {
     if let Err(e) = std::process::Command::new(&exe).current_dir(&dir).env("DESKTOPSHEPHERD_INSTALLED", "1").spawn() {
         tell(&tf("{} is installed but did not start: {}", &[&APP, &e]), MB_ICONWARNING);
     }
+    0
 }
 
-/// `--uninstall`, run by Windows' "Installed apps".
-pub fn run_uninstall() {
-    if !ask(&tf("Remove {} from this computer?", &[&APP]), MB_YESNO | MB_ICONQUESTION) {
-        return;
+/// `--uninstall` (`--uninstall --silent`: no questions, the saved boxes are kept), run by
+/// Windows' "Installed apps" or winget. Returns the exit code (0 = fine).
+pub fn run_uninstall(silent: bool) -> i32 {
+    if !silent && !ask(&tf("Remove {} from this computer?", &[&APP]), MB_YESNO | MB_ICONQUESTION) {
+        return 0;
     }
     if !stop_running() {
-        tell(&tf("{} is still running and didn't close. Quit it from its tray icon, then try again.", &[&APP]), MB_ICONWARNING);
-        return;
+        say(silent, &tf("{} is still running and didn't close. Quit it from its tray icon, then try again.", &[&APP]), MB_ICONWARNING);
+        return 1;
     }
     // Make sure the normal desktop icons are back (the program does it when it quits, too).
     crate::desktop::force_show_desktop_icons();
@@ -208,10 +244,12 @@ pub fn run_uninstall() {
         let _ = std::fs::remove_file(lnk);
     }
     let data = crate::storage::data_dir();
-    let delete_data = ask(
-        &tf("Also delete your saved boxes and settings?\n\n{}\n\nChoose No to keep them in case you install {} again.", &[&data.display(), &APP]),
-        MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2,
-    );
+    // Silent: never deletes the person's data.
+    let delete_data = !silent
+        && ask(
+            &tf("Also delete your saved boxes and settings?\n\n{}\n\nChoose No to keep them in case you install {} again.", &[&data.display(), &APP]),
+            MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2,
+        );
     if delete_data {
         let _ = std::fs::remove_dir_all(&data);
     } else if let Some(mut layout) = crate::storage::load() {
@@ -220,7 +258,11 @@ pub fn run_uninstall() {
         let _ = crate::storage::save(&layout);
     }
     // Said first: while this message is open the program is still running from the folder.
-    tell(&tf("{} has been removed.", &[&APP]), MB_ICONINFORMATION);
+    if silent {
+        crate::storage::log_line("setup (silent): removed");
+    } else {
+        tell(&tf("{} has been removed.", &[&APP]), MB_ICONINFORMATION);
+    }
     // This program is running from the folder being removed: a short-lived, hidden command
     // window deletes it a moment after we exit.
     let dir = install_dir();
@@ -239,5 +281,39 @@ pub fn run_uninstall() {
             .spawn();
     } else {
         let _ = std::fs::remove_dir_all(&dir);
+    }
+    0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn v(a: &[&str]) -> Vec<String> {
+        a.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn silent_switches() {
+        for f in ["--silent", "/S", "/s", "-s", "-S", "/quiet", "/QUIET", "--quiet"] {
+            assert!(is_silent(&v(&["setup.exe", f])), "{f}");
+            assert!(wants_setup(&v(&["setup.exe", f])), "{f}");
+        }
+        assert!(is_silent(&v(&["x.exe", "--uninstall", "--silent"])));
+    }
+
+    #[test]
+    fn not_silent() {
+        assert!(!is_silent(&v(&["setup.exe"])));
+        assert!(!is_silent(&v(&["--silent"]))); // that is the program name slot
+        assert!(!is_silent(&v(&["setup.exe", "--uninstall"])));
+        assert!(!is_silent(&v(&["setup.exe", "/silent"])));
+    }
+
+    #[test]
+    fn setup_only_without_other_options() {
+        assert!(wants_setup(&v(&["setup.exe"])));
+        assert!(!wants_setup(&v(&["setup.exe", "--worker"])));
+        assert!(!wants_setup(&v(&["setup.exe", "--silent", "--screenshot"])));
     }
 }

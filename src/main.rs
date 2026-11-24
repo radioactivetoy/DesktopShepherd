@@ -2,6 +2,7 @@
 //! DesktopShepherd — a lightweight desktop icon organizer (boxes on the desktop) with widgets.
 
 mod agenda;
+mod audio;
 mod apps;
 mod i18n;
 mod net;
@@ -159,13 +160,14 @@ fn main() {
     // Installing (a copy named *Setup*.exe) and uninstalling (from Windows' Installed apps).
     #[cfg(windows)]
     if args.iter().any(|a| a == "--uninstall") {
-        install::run_uninstall();
-        return;
+        let code = install::run_uninstall(install::is_silent(&args));
+        std::process::exit(code);
     }
+    // `--silent` (or /S, -s, /quiet): no windows at all, for winget and scripts.
     #[cfg(windows)]
-    if install::is_setup_exe() && !args.iter().any(|a| a.starts_with("--")) {
-        install::run_setup();
-        return;
+    if install::is_setup_exe() && install::wants_setup(&args) {
+        let code = install::run_setup(install::is_silent(&args));
+        std::process::exit(code);
     }
 
     // Windows' right-click menu, shown by a short-lived helper process (see shellmenu.rs).
