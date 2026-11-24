@@ -15,7 +15,9 @@ changing anything. The owner does not code: explain results in plain words, no j
      `desktop::restore_desktop_icons()`.
 2. **Performance.** Idle CPU must stay ~0 %. Don't add per-frame polling or continuous
    repaints; repaint only on input, data changes or a widget's `repaint_after`. Measure memory
-   and CPU before/after big changes (see "Measuring").
+   and CPU before/after big changes (see "Measuring"). Never start a new thread or create a new
+   COM/WinRT object for every periodic reading (that leaked ~4.6 MB/h in Now playing); use one
+   long-lived helper: the shared `Poller` in `widgets.rs` or the media helper thread.
 3. **No web engine, no telemetry.** Online features are allowed since 2026-11-22 (owner's
    decision), on these terms: only for a feature the person turns on or adds (e.g. agenda links),
    with Windows' own WinHTTP (no extra network crates), on a background thread, never blocking the
@@ -60,11 +62,18 @@ Get-CimInstance Win32_Process -Filter "Name='desktopshepherd.exe'" | % {
   "{0} ws={1:N0}MB cpu={2:N2}%" -f $_.CommandLine, ($p.WorkingSet64/1MB), (($b-$a)/10000/[Environment]::ProcessorCount*100) }
 ```
 
-Current baseline (2026-11-23, 9 boxes, 2 monitors): worker ~99 MB working set (~80 MB private),
-~0.02 % CPU idle with drop shadow and raised look off; ~113 MB working set (~78 MB private),
-~0.03 % CPU idle with drop shadow and raised look on for all 9 boxes (shadow memory only exists
-for boxes that have it on); supervisor ~2 MB private. (A release build is no smaller, so the debug build, which is opt-level 3, is fine
-for daily use.)
+Current baseline (2026-11-24, 9 boxes, 2 monitors, music playing): worker ~93-97 MB private
+(flat for hours), ~126-129 MB working set, ~0.05 % CPU with music playing, ~0.03 % without,
+~0.009 % while a full-screen game paused the boxes; supervisor ~2 MB private. (A release build
+is no smaller, so the debug build, which is opt-level 3, is fine for daily use.)
+
+- Over hours: `tools\profile_over_time.ps1` records memory, CPU, handles, GDI/USER objects and
+  threads every N seconds to `profile\*.csv` (run it hidden for hours).
+- Leaks: `tools\leak_test.ps1` runs the app with `DESKTOPSHEPHERD_LEAKTEST=<mode>` so one periodic
+  job repeats much faster and samples private memory. Modes: `agenda`, `weather`, `backdrop`
+  (1/min), `media` (0.1 s), `poller` (x100). Pass a single mode per `-Modes` argument, e.g.
+  `-Modes media`.
+- `DESKTOPSHEPHERD_DEBUG_INK=1` logs each box's adaptive-text decisions.
 
 ## Gotchas learned the hard way
 
@@ -132,7 +141,13 @@ for daily use.)
 - Snapping (incl. optional grid) → `src/snap.rs` (+ `snap_targets` in `app.rs`).
 - Releases: `.github/workflows/release.yml` (tag vX.Y.Z = GitHub Release with installer and
   portable zip; built with MSVC on GitHub, so this PC's GNU workarounds don't apply there).
-- Installer / uninstaller → `src/install.rs`; build the setup file with `scripts\make-setup.ps1`.
+  Release process: write `docs/release-notes/<tag>.md`, push the tag, and when the workflow has
+  finished run `gh release edit <tag> --title "DesktopShepherd 1.0 RC N" --notes-file
+  docs/release-notes/<tag>.md --prerelease=false --latest` (beta/rc tags start as pre-releases).
+- winget → `packaging/winget/` (manifests, `make-manifest.ps1`, README).
+- Installer / uninstaller → `src/install.rs` (`--silent`, `--uninstall --silent`); build the setup file with `scripts\make-setup.ps1`.
+- Now playing volume, mute, sound output → `src/audio.rs` (Core Audio objects live on the media
+  helper thread in `widgets.rs`; the UI only reads `audio::current()` and sends commands).
 - Pages of boxes → `Fence.page`, `Layout.current_page`, page block in `update_inner` (`app.rs`).
 - Light or dark menus and settings → `src/theme.rs` (`Settings.theme`: 0 like Windows, 1 dark,
   2 light; use its palette functions in panel UI, not fixed colours; the panel pass in `host.rs`

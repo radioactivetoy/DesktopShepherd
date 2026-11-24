@@ -12,6 +12,9 @@ desktopshepherd.exe            supervisor (main.rs: supervise)
   with growing waits for failures in a row (2, 5, 15, 30, 60, 120, then every 300 s; a run of
   ≥ 60 s resets them). Only exit code 0 (a real quit) stops the supervisor. A failed start
   (no DirectX device at all) exits with code 2 and is retried the same way.
+- Watchdog: after the worker's first minute the supervisor pings the worker's hidden window every
+  10 s (`WATCHDOG_EVERY_MS` in `main.rs`, with a timeout, never blocking). After 3 failed pings in
+  a row it kills the worker and restarts it; the icons come back in between like after any exit.
 - Clean stop: the worker waits on a named event `Local\DesktopShepherd.Quit`
   (`desktop::watch_quit_signal`, hooked to `runloop::request_quit`). `scripts\stop.ps1` sets
   it, waits up to 5 s and only force-kills if the worker does not leave.
@@ -48,6 +51,15 @@ There is no eframe, no GL and no main window to draw on any more.
     `take_display_changed`. The app then re-reads the monitors, re-places the boxes and puts
     every box back just above the desktop at once, after 1.5 s and after 4 s
     (`DeskApp.restack_at`; log line "display change: re-stacking N boxes").
+  - Pausing: the window also gets the power-setting notice (screen off/on) and the session notice
+    (lock/unlock); while the screen is off or the session locked all boxes pause
+    (`runloop::display_asleep`). `desktop::poll_fullscreen` (run on foreground change,
+    minimize/restore, display change, and again after 0.5 s and 1.5 s; no polling) finds a full-screen
+    app or game (SHQueryUserNotificationState, or a window covering its whole monitor) or a maximized
+    window on a monitor. Boxes centred on a covered monitor are not drawn and have no timer
+    (`HostSystem::set_occluded`); a real full-screen app also gives back all global shortcuts
+    (`runloop::set_hotkeys_paused`) and holds the toasts. Setting `Settings.pause_fullscreen`
+    (default on) covers the full-screen part; maximized windows always pause their monitor.
 - The loop sleeps in `MsgWaitForMultipleObjectsEx` until a message arrives or the next due
   pass. Idle = blocked in the wait = 0 % CPU.
 - A "root" `egui::Context` is kept only for scheduling: its repaint callback calls
@@ -143,6 +155,9 @@ There is no eframe, no GL and no main window to draw on any more.
 | desktop reader | re-reads the folders when the folder watch or the app wakes it (and once a minute as a safety net); monitors come from WM_DISPLAYCHANGE, not polling |
 | short-lived helpers | agenda downloads, drive space (system monitor), picture decoding (picture frame), file pickers, "open file location", paste / Recycle Bin, autostart entry: each on its own thread so the boxes never wait |
 | icon loader | SHGetFileInfo/IShellItemImageFactory → textures (cached in `icons.rs`, with a 5 s watchdog that replaces a stuck loader thread); icons are loaded at the size shown in real pixels (`IconCache::get(path, px)`, icon size × display scale), and textures of sizes no longer used are dropped (`IconCache::keep_only_sizes`, called from `app.rs` when the set of sizes changes) |
+| `Poller` (`widgets.rs`) | one long-lived helper for slow readings (laptop Wi-Fi/Bluetooth every 30 s, Bluetooth device batteries every 5 min, drive space every 60 s): runs only while a widget keeps asking, sleeps without waking otherwise. Never start a thread per reading |
+| media helper | one long-lived thread owning the WinRT media-session manager (Now playing) and the Core Audio objects (`audio.rs`: volume, mute, output device); the UI only reads `audio::current()` and leaves commands for it |
+| supervisor watchdog | in the supervisor process: pings the worker's window every 10 s (see Processes) |
 | icon hide/show | toggles the desktop ListView asynchronously (never blocks on Explorer) |
 | move helper | `host::move_with_mouse`, alive only during a box drag |
 | flying icon | topmost layered window during icon drag (`ghost::begin_icon_drag(path, px) -> DragImage`); the picture loads its icon on its own thread and can be cancelled with `DragImage::destroy`, so a slow shortcut (network drive) cannot freeze the boxes |
@@ -171,6 +186,14 @@ a second) or a wake-up posted by another thread.
 | `icons.rs` | icon cache (`get(path, px)`, `keep_only_sizes`); loader watchdog: a load over 5 s is marked failed (placeholder) and a fresh loader thread takes the other pending icons (at most one restart per 5 s) |
 | `appicon.rs` | app icon as runtime HICONs (big and small) from the PNGs in `assets/icon`, used for the box windows' class icon and the tray/settings windows; the ico in the exe comes from `build.rs` (MSVC) |
 | `shadow.rs` | optional drop shadow: one click-through layered window (`DesktopShepherdShadow`) directly below each box with `Fence.shadow` on, picture via UpdateLayeredWindow (freed right after), `sync` (UI pass), `follow` (move thread), `restack`, `set_visible`, `set_faded`, `destroy` (Host drop) |
+| `audio.rs` | volume, mute and default output device name through Core Audio; all COM on the media helper thread, objects kept and recreated only when the output device changes; `set_level` / `set_mute` leave commands for the helper; the box menu's "Sound output" opens Windows' output picker |
+| `net.rs` | WinHTTP downloads (`get_bytes`), the only network code; call from background threads only |
+| `update.rs` | opt-in update check (at start and once a day); verifies the setup file's SHA-256 against `SHA256SUMS.txt` and only accepts this repo's release assets |
+| `apps.rs` | Start menu programs for quick search (helper thread, re-read when 10 minutes old) |
+| `vdesk.rs` | virtual desktops: registry change notification, `IVirtualDesktopManager` for our own windows |
+| `drawbox.rs` | "Draw a new box" overlay (GDI layered window, only while drawing) |
+| `timer.rs` | the timer widget (countdown / Pomodoro) |
+| `import_original.rs` | reads the original organizer's saved layout so it can be imported |
 | `snap.rs` | box snapping arithmetic (pure, 7 unit tests: `cargo test snap`) |
 | `search.rs` | quick-search ranking (pure, 4 unit tests): name starts with text, then a word starts with it, then contains it (or file type), then letters in order; 12 results |
 | `model.rs` | saved data types: `Layout`, `Fence`, `Tab`, `Settings`, `CategoryRule`, widgets config. Look fields on `Fence` (all with defaults; `sanitize()` repairs odd values): `border_width`, `text_color`, `text_shadow`, `font`, `title_size`, `caption_size`, `show_captions`, `icon_spacing`; `Fence::copy_look_from` backs "Apply this look to all boxes" (`Act::ApplyLookToAll`) |
@@ -180,7 +203,7 @@ a second) or a wake-up posted by another thread.
 | `backdrop.rs` | wallpaper brightness for adaptive text: helper thread (COM `IDesktopWallpaper`, checks file dates every 30 s and on `poke()`), per-monitor 48x27 luminance grid, `brightness(rect_px)`, `generation()` |
 | `ink.rs` | text palette for boxes (`set(dark)` per box while it draws; `text`, `strong`, `soft`, `faint`, `line`, `halo`, `adapt`, `gray`, `white_alpha`, `halo_label`) |
 | `weather.rs` | weather widget: looks (Compact / Standard / Detailed / adaptive), Meteocons icons from `assets/meteocons/` (MIT, licence file there) embedded as 128 px PNGs |
-| `widgets.rs` | widget registry (clock, note, drawing pad, system monitor, calendar, to-do list, agenda, picture frame; the search box is drawn by `search_widget` in `app.rs`) – add new widgets here. The system monitor shares one reading for all monitors (CPU/RAM every 2 s, drives every 60 s) and reads only while shown |
+| `widgets.rs` | widget registry (clock, note, drawing pad, system monitor, calendar, to-do list, agenda, picture frame; the search box is drawn by `search_widget` in `app.rs`) – add new widgets here. The system monitor shares one reading for all monitors (CPU/RAM and network speed via `GetIfTable2` every 2 s, drives every 60 s) and reads only while shown. The clock has a world clock (other zones from Windows' list, converted by Windows with daylight saving). Now playing, laptop status and drive space use the long-lived media helper / `Poller` (see Threads) |
 
 (`wallpaper.rs` and the classic GL drawing path were deleted in phase C.)
 

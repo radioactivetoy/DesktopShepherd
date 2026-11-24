@@ -1,13 +1,40 @@
-# Status (1.0.0-rc.1, 2026-11-23)
+# Status (1.0.0-rc.3, 2026-11-25)
 
-Current version: **1.0.0-rc.1**, the first release candidate for 1.0. Releases so far: tags
-v0.2.0-beta.1 to beta.5 published. The release workflow marks beta and rc tags as pre-releases;
-they were switched to "Latest" by hand (`gh release edit <tag> --prerelease=false --latest`) so
-they show on the repo main page. 1.0.0-rc.1 is next.
+Current version: **1.0.0-rc.3**, the Latest release. Releases so far: v0.2.0-beta.1 to beta.5,
+v1.0.0-rc.1, rc.2 and rc.3. The workflow (read-only build job + separate publish job, actions
+pinned to SHAs, Rust 1.100.0) publishes the Setup exe, the Portable zip and `SHA256SUMS.txt`, and
+marks beta and rc tags as pre-releases. Release notes live in `docs/release-notes/<tag>.md`; after
+the workflow finishes they are put on the release page and the release is made "Latest" by hand so
+it shows on the repo main page:
+`gh release edit <tag> --title "DesktopShepherd 1.0 RC N" --notes-file docs/release-notes/<tag>.md --prerelease=false --latest`.
+
+Added since rc.1 (all in rc.2/rc.3): world clock (clock widget); network speed (system monitor,
+`GetIfTable2`, graph); Now playing volume slider + mute (hover), seek on the progress bar, and
+"Sound output: <device>" in the box menu (`src/audio.rs`); Bluetooth device batteries in Laptop
+status (every 5 min, WinRT device enumeration); languages FR/DE/IT/PT; pause for full-screen
+apps / screen off or locked; maximized windows pause drawing on their monitor; version next to the
+name in Settings; silent setup (`--silent`) and silent uninstall (`--uninstall --silent`, keeps
+boxes, `QuietUninstallString`); supervisor watchdog; drop shadow and raised look; adaptive text
+recheck after hidden wallpaper changes; duplicate-item protection (dedupe on save, logged); the
+update check is opt-in (asked once) and the updater checks the SHA-256 against `SHA256SUMS.txt` and
+only accepts this repo's release assets.
 
 ## Measurements (this PC, Windows 11 Pro 26340, debug profile = opt-level 3)
 
-Measured 2026-11-23 with 9 boxes on 2 monitors.
+**Latest (2026-11-24, after the memory-leak fix, 9 boxes, 2 monitors, music playing):** worker
+private memory ~93-97 MB, flat for hours (rises and falls, no trend); working set ~126-129 MB; CPU
+~0.05 % with music playing (progress bar redraw), ~0.03 % without, ~0.009 % while a full-screen
+game paused the boxes; supervisor ~2 MB.
+
+Leak story: Now playing created a new thread and a new WinRT media manager every 2 s, which grew
+memory by ~4.6 MB/h (+26 MB in under 5 h). Fix: one long-lived helper thread with one manager.
+The same pattern is applied through the shared `Poller` in `widgets.rs` (laptop Wi-Fi/Bluetooth
+every 30 s, drive space every 60 s): it runs only while a widget asks and sleeps otherwise. Rule
+for new code: never a new thread or new COM/WinRT object per periodic reading. Tools:
+`tools\profile_over_time.ps1` (memory, CPU, handles, GDI/USER objects, threads every N s to
+`profile\*.csv`) and `tools\leak_test.ps1` (see CLAUDE.md "Measuring").
+
+Older table, measured 2026-11-23 with 9 boxes on 2 monitors (before the new widgets):
 
 | Process | Working set | Private | Threads | CPU idle (10 s, all cores) |
 |---|---|---|---|---|
@@ -254,12 +281,21 @@ egui font atlases, and the icon textures.
   backup/import, roll-up from settings) now really move the DirectX windows; the Settings page
   scrolls (its bottom – backups list and Quit button – used to be cut off).
 
-## Open items (2026-11-23)
+## Open items (2026-11-25)
 
-- Laptop: per-setup positions still need a test on a real laptop.
+- winget: rc.3 submitted as microsoft/winget-pkgs#488743 (manifests in `packaging/winget/`); waiting
+  for the owner to accept Microsoft's CLA and for review. Once merged:
+  `winget install radioactivetoy.DesktopShepherd`.
+- Microsoft Store: not started (needs the owner's free Partner Center account; plan in
+  `docs/plans/next-features.md` section 9).
+- Bluetooth batteries: not yet tested with a real device (devices that don't report a battery don't show).
+- Silent install (`--silent`) not tested end to end.
+- Native-speaker review of the FR/DE/IT/PT texts (maybe Brazilian Portuguese; German "Strg" instead of "Ctrl").
+- Laptop: per-monitor-setup positions still need a test on a real laptop.
 - Code signing: the installer and program are not signed yet (SmartScreen warning).
-- Library updates are blocked on the GNU toolchain (`docs/BUILDING.md`); MSVC Build Tools would lift it.
+- Library updates are blocked on this PC's GNU toolchain (`docs/BUILDING.md`); MSVC Build Tools would lift it.
 - Dependabot glib alert: glib is not used on Windows.
+- `.cargo/config.toml` is no longer in the repo (personal path): copy `.cargo/config.example.toml` (see `docs/BUILDING.md`).
 
 ## Improvement ideas (ordered by value)
 

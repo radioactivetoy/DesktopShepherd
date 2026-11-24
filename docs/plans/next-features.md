@@ -1,5 +1,12 @@
 # Plan: next features (5, 6, 7, 8, 9, 10)
 
+## Status (2026-11-25)
+
+- Done in 1.0.0-rc.3: 5 (world clock), 6 (network speed), 7 (volume / sound output), 8 (Bluetooth
+  batteries, not yet tested with a real device), 10 (languages FR/DE/IT/PT).
+- 9: winget submitted (microsoft/winget-pkgs#488743, waiting for the owner's CLA and review);
+  Microsoft Store not started (needs the owner's Partner Center account).
+
 Agreed 2026-11-24. All within the rules in CLAUDE.md: no new crates (only extra Windows API
 *features* on the existing `windows` dependency, Cargo.lock unchanged), no polling beyond what a
 shown widget needs, slow readings on the shared long-lived `Poller` helper (widgets.rs), every

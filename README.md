@@ -33,7 +33,9 @@ These rules decide what goes in and what stays out.
 - **Performance.** About 0 % CPU when idle, and no continuous redrawing: a box is redrawn only
   when something changes. Measured on a Windows 11 PC: the main process uses about 99 MB of
   memory (113 MB with drop shadow and raised look on all boxes) and about 0.02 % CPU at idle; the
-  supervisor uses about 2 MB.
+  supervisor uses about 2 MB. Memory stays flat over hours (checked with 9 boxes, 2 monitors and
+  music playing). While a full-screen app or game runs, or the screen is off or locked, the
+  boxes stop drawing and give the shortcuts back (can be turned off in Settings).
 - **Privacy.** No telemetry, ever. Online features only work when you turn them on or add them:
   weather (from Open-Meteo), agenda calendar links, and an optional once-a-day check for new
   versions. They use Windows' own WinHTTP, run in the background, and send nothing about you.
@@ -96,12 +98,12 @@ Create a widget from a box's "New" menu, or draw one anywhere.
 
 | Widget | What it does |
 |---|---|
-| Clock | Time and date (24-hour option) |
+| Clock | Time and date (24-hour option), plus a world clock: other time zones from Windows' list, with your own labels |
 | Sticky note | Free text, copy and paste work |
 | Drawing pad | Quick sketches |
-| System monitor | CPU, memory and drive space |
-| Laptop status | Battery, Wi-Fi and Bluetooth |
-| Now playing | Current track with cover, play/pause/next/previous and progress; several players switch with dots |
+| System monitor | CPU, memory, drive space and network speed (with a graph) |
+| Laptop status | Battery, Wi-Fi and Bluetooth, including the battery of connected Bluetooth devices that report it |
+| Now playing | Current track with cover, play/pause/next/previous; click or drag the progress bar to seek; volume slider and mute appear when you hover; several players switch with dots. The box menu has "Sound output" to pick the speakers |
 | Weather | Several places (dots to switch), Meteocons icons, feels-like, humidity, wind, chance of rain, sunrise/sunset, UV, hourly strip and 7 days. Looks: Compact, Standard, Detailed or adapts to the box size |
 | Timer | Countdown / Pomodoro timer |
 | Calendar | Month view, week start option |
@@ -169,6 +171,10 @@ Get the latest files from the
   `portable.txt` file next to it, all settings live in a `data` folder beside the program.
   Delete `portable.txt` to use your user profile instead.
 
+- **Scripted install:** run the Setup with `--silent` for an install with no questions, and
+  `desktopshepherd.exe --uninstall --silent` to remove it (your boxes are kept).
+- **winget:** a submission to the winget catalogue is in review; it is not available there yet.
+
 Requires **Windows 11**. Other versions have not been tested.
 
 The program is not code-signed yet, so Windows SmartScreen may say "unknown publisher". Choose
@@ -218,6 +224,7 @@ containing `beta` or `rc` are marked as pre-releases.
 | `src/shellmenu.rs` | Windows' own context menu in a helper process |
 | `src/model.rs`, `src/storage.rs` | saved layout and settings, backups |
 | `src/install.rs` | built-in installer and uninstaller |
+| `src/audio.rs` | volume, mute and sound output for Now playing |
 | `src/i18n.rs` | English, Spanish, Catalan, French, German, Italian and Portuguese texts |
 
 More in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) (processes, threads, rendering, every
