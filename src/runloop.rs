@@ -104,6 +104,9 @@ pub fn take_box_keys() -> Vec<u8> {
 /// Ctrl+Alt+digits: on many keyboards that is AltGr, which types @, # and |.)
 pub fn set_box_hotkeys(nums: &[u8]) {
     use windows::Win32::UI::Input::KeyboardAndMouse::{RegisterHotKey, UnregisterHotKey, HOT_KEY_MODIFIERS};
+    if HOTKEYS_PAUSED.load(Ordering::SeqCst) {
+        return;
+    }
     let h = WAKE_HWND.load(Ordering::SeqCst);
     if h == 0 {
         return;
@@ -124,6 +127,42 @@ pub fn set_box_hotkeys(nums: &[u8]) {
     }
 }
 
+/// All global shortcuts are given back while a full-screen app or game runs (see `set_hotkeys_paused`).
+static HOTKEYS_PAUSED: AtomicBool = AtomicBool::new(false);
+
+/// Gives back every global shortcut (quick search, hide/show, pages, draw a box, box shortcuts,
+/// typing keys) while `paused`, so a game gets all its keys; while paused the register functions
+/// do nothing. On resume (`false`) the caller registers them again as configured. App thread only.
+pub fn set_hotkeys_paused(paused: bool) {
+    use windows::Win32::UI::Input::KeyboardAndMouse::UnregisterHotKey;
+    if HOTKEYS_PAUSED.swap(paused, Ordering::SeqCst) == paused {
+        return;
+    }
+    if !paused {
+        return;
+    }
+    let h = WAKE_HWND.load(Ordering::SeqCst);
+    if h == 0 {
+        return;
+    }
+    let hwnd = HWND(h as *mut _);
+    unsafe {
+        for id in 1..=5 {
+            let _ = UnregisterHotKey(hwnd, id);
+        }
+        if let Ok(mut set) = BOX_KEYS_SET.lock() {
+            for n in set.drain(..) {
+                let _ = UnregisterHotKey(hwnd, BOX_KEY_ID + n as i32);
+            }
+        }
+        if TYPING_STATE.swap(0, Ordering::SeqCst) != 0 {
+            for (i, _) in typing_keys().enumerate() {
+                let _ = UnregisterHotKey(hwnd, TYPING_ID + i as i32);
+            }
+        }
+    }
+}
+
 /// Page switches asked for with Ctrl+Alt+PageDown (+1) / PageUp (-1) since the last pass.
 static PAGE_STEP: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
 
@@ -135,6 +174,9 @@ pub fn take_page_step() -> i32 {
 /// Registers the page shortcuts (Ctrl+Alt+PageDown / PageUp). Call once, from the app's thread.
 pub fn set_page_hotkeys() {
     use windows::Win32::UI::Input::KeyboardAndMouse::{RegisterHotKey, HOT_KEY_MODIFIERS};
+    if HOTKEYS_PAUSED.load(Ordering::SeqCst) {
+        return;
+    }
     let h = WAKE_HWND.load(Ordering::SeqCst);
     if h == 0 {
         return;
@@ -168,6 +210,9 @@ pub fn set_hide_hotkey(index: usize) -> bool {
 
 fn set_hotkey(id: i32, what: &str, index: usize) -> bool {
     use windows::Win32::UI::Input::KeyboardAndMouse::{RegisterHotKey, UnregisterHotKey, HOT_KEY_MODIFIERS};
+    if HOTKEYS_PAUSED.load(Ordering::SeqCst) {
+        return true;
+    }
     let h = WAKE_HWND.load(Ordering::SeqCst);
     if h == 0 {
         return false;
@@ -210,6 +255,9 @@ fn typing_keys() -> impl Iterator<Item = (u32, u32)> {
 /// Ordinary hotkeys, no hook. Call from the app's thread.
 pub fn set_typing_keys(on: bool, letters: bool) {
     use windows::Win32::UI::Input::KeyboardAndMouse::{RegisterHotKey, UnregisterHotKey, HOT_KEY_MODIFIERS};
+    if HOTKEYS_PAUSED.load(Ordering::SeqCst) {
+        return;
+    }
     let h = WAKE_HWND.load(Ordering::SeqCst);
     let want: u8 = if on { 1 | if letters { 2 } else { 0 } } else { 0 };
     if h == 0 {
@@ -264,6 +312,18 @@ pub fn take_display_changed() -> bool {
     DISPLAY_CHANGED.swap(false, Ordering::SeqCst)
 }
 const WM_APP_WAKE: u32 = WM_APP + 1;
+const WM_WTSSESSION_CHANGE_ID: u32 = 0x02B1;
+/// GUID_CONSOLE_DISPLAY_STATE.
+const DISPLAY_STATE_GUID: windows::core::GUID = windows::core::GUID::from_u128(0x6fe69556_704a_47a0_8f24_c28d936fda47);
+
+/// The screen is off (display state notification) or the session is locked: no box is drawn.
+static SCREEN_OFF: AtomicBool = AtomicBool::new(false);
+static SESSION_LOCKED: AtomicBool = AtomicBool::new(false);
+
+/// True while the screen is off or the Windows session is locked (nobody can see the boxes).
+pub fn display_asleep() -> bool {
+    SCREEN_OFF.load(Ordering::SeqCst) || SESSION_LOCKED.load(Ordering::SeqCst)
+}
 
 thread_local! {
     /// The app, reachable from the hidden window's procedure for the shutdown save.
@@ -387,8 +447,31 @@ unsafe extern "system" fn main_wndproc(h: HWND, m: u32, wp: WPARAM, lp: LPARAM) 
             wake_after(Duration::from_millis(300));
             DefWindowProcW(h, m, wp, lp)
         }
+        // Screen switched off / on (GUID_CONSOLE_DISPLAY_STATE: 0 off, 1 on, 2 dimmed).
+        WM_POWERBROADCAST => {
+            if wp.0 == 0x8013 && lp.0 != 0 {
+                let s = &*(lp.0 as *const windows::Win32::System::Power::POWERBROADCAST_SETTING);
+                if s.PowerSetting == DISPLAY_STATE_GUID && s.DataLength >= 4 {
+                    let v = std::ptr::read_unaligned(s.Data.as_ptr() as *const u32);
+                    SCREEN_OFF.store(v == 0, Ordering::SeqCst);
+                    wake_after(Duration::ZERO);
+                }
+            }
+            LRESULT(1)
+        }
+        // Session locked (7) / unlocked (8).
+        WM_WTSSESSION_CHANGE_ID => {
+            match wp.0 {
+                7 => SESSION_LOCKED.store(true, Ordering::SeqCst),
+                8 => SESSION_LOCKED.store(false, Ordering::SeqCst),
+                _ => {}
+            }
+            wake_after(Duration::ZERO);
+            LRESULT(0)
+        }
         WM_DISPLAYCHANGE => {
             DISPLAY_CHANGED.store(true, Ordering::SeqCst);
+            crate::desktop::request_fullscreen_check();
             wake_after(Duration::ZERO);
             LRESULT(0)
         }
@@ -445,6 +528,19 @@ pub fn run(screenshot: Option<PathBuf>) -> i32 {
             return crate::EXIT_START_FAILED;
         };
         WAKE_HWND.store(hwnd.0 as isize, Ordering::SeqCst);
+        // Screen off / session locked notices (ordinary notifications, nothing is hooked). Failure is
+        // harmless: the boxes are then simply drawn as before.
+        {
+            use windows::Win32::Foundation::HANDLE;
+            use windows::Win32::System::Power::RegisterPowerSettingNotification;
+            use windows::Win32::System::RemoteDesktop::WTSRegisterSessionNotification;
+            if RegisterPowerSettingNotification(HANDLE(hwnd.0), &DISPLAY_STATE_GUID, DEVICE_NOTIFY_WINDOW_HANDLE).is_err() {
+                crate::storage::log_line("could not register for screen on/off notices");
+            }
+            if WTSRegisterSessionNotification(hwnd, 0).is_err() {
+                crate::storage::log_line("could not register for lock/unlock notices");
+            }
+        }
         {
             use windows::Win32::UI::WindowsAndMessaging::RegisterWindowMessageW;
             TASKBAR_CREATED.store(RegisterWindowMessageW(windows::core::w!("TaskbarCreated")), Ordering::SeqCst);

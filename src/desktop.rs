@@ -618,6 +618,7 @@ pub fn watch_show_desktop() {
         }
         unsafe extern "system" fn cb(_h: HWINEVENTHOOK, _ev: u32, hwnd: HWND, _o: i32, _c: i32, _t: u32, _ms: u32) {
             // Any window came to the front: the app re-checks whether the desktop has the focus.
+            request_fullscreen_check();
             crate::runloop::wake_after(std::time::Duration::ZERO);
             if let Ok(mut t) = FG_CHANGED_AT.lock() {
                 *t = Some(std::time::Instant::now());
@@ -739,6 +740,21 @@ pub fn watch_show_desktop() {
             WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS,
         );
         storage_log(&format!("show-desktop focus watch: {:?}", focus_hook.0));
+
+        // A window minimized or restored: the monitor it covered may be free (or covered) again.
+        unsafe extern "system" fn minimize_cb(_h: HWINEVENTHOOK, _ev: u32, _hwnd: HWND, _o: i32, _c: i32, _t: u32, _ms: u32) {
+            request_fullscreen_check();
+        }
+        let min_hook = SetWinEventHook(
+            windows::Win32::UI::WindowsAndMessaging::EVENT_SYSTEM_MINIMIZESTART,
+            windows::Win32::UI::WindowsAndMessaging::EVENT_SYSTEM_MINIMIZEEND,
+            None,
+            Some(minimize_cb),
+            0,
+            0,
+            WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS,
+        );
+        storage_log(&format!("minimize watch: {:?}", min_hook.0));
     }
 }
 
@@ -1064,6 +1080,124 @@ static FG_CHANGED_AT: std::sync::Mutex<Option<std::time::Instant>> = std::sync::
 /// (Show desktop especially), so the app looks again a few times in that second.
 pub fn foreground_changed_recently() -> bool {
     FG_CHANGED_AT.lock().ok().and_then(|t| *t).map(|t| t.elapsed() < std::time::Duration::from_secs(1)).unwrap_or(false)
+}
+
+/// A real full-screen app or game is in front (see `poll_fullscreen`).
+static FULLSCREEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// The monitor (left, top, right, bottom in pixels) that a full-screen or maximized window of
+/// another program covers: boxes there are not drawn (nobody can see them).
+static COVERED: std::sync::Mutex<Option<[i32; 4]>> = std::sync::Mutex::new(None);
+/// Moments when the state is looked at again (a foreground change queues now, +0.5 s, +1.5 s).
+static FS_DUE: std::sync::Mutex<Vec<std::time::Instant>> = std::sync::Mutex::new(Vec::new());
+
+/// True while a real full-screen app or game is in front (cheap: reads a flag).
+pub fn fullscreen_app_running() -> bool {
+    FULLSCREEN.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// The monitor rectangle (pixels) covered by a full-screen or maximized window, if any.
+pub fn covered_monitor() -> Option<[i32; 4]> {
+    COVERED.lock().ok().and_then(|c| *c)
+}
+
+/// Queues a look now and twice more shortly after (games resize after they are activated).
+/// Safe from any thread; no polling, the app is woken for each look.
+pub fn request_fullscreen_check() {
+    let now = std::time::Instant::now();
+    if let Ok(mut d) = FS_DUE.lock() {
+        // Games often switch to full screen a few seconds after they come forward: look again later too.
+        d.extend([500u64, 1500, 3000, 6000].iter().map(|ms| now + std::time::Duration::from_millis(*ms)).chain([now]));
+        if d.len() > 64 {
+            d.sort();
+            let cut = d.len() - 64;
+            d.drain(..cut);
+        }
+    }
+    crate::runloop::wake_after(std::time::Duration::ZERO);
+}
+
+/// Looks at the state when a look is due (otherwise does nothing). Returns true when the
+/// full-screen flag or the covered monitor changed. Call from the app's pass.
+pub fn poll_fullscreen() -> bool {
+    let now = std::time::Instant::now();
+    let (due, next) = match FS_DUE.lock() {
+        Ok(mut d) => {
+            let before = d.len();
+            d.retain(|t| *t > now);
+            (d.len() != before, d.iter().min().copied())
+        }
+        Err(_) => return false,
+    };
+    if let Some(n) = next {
+        crate::runloop::wake_after(n.saturating_duration_since(now));
+    }
+    if !due {
+        return false;
+    }
+    let (fs, mon) = detect_fullscreen();
+    let old_fs = FULLSCREEN.swap(fs, std::sync::atomic::Ordering::Relaxed);
+    let mut changed = old_fs != fs;
+    if let Ok(mut c) = COVERED.lock() {
+        changed |= *c != mon;
+        *c = mon;
+    }
+    changed
+}
+
+/// (full screen?, monitor covered). Windows' own answer (SHQueryUserNotificationState: busy = a
+/// full-screen app, also borderless; exclusive Direct3D full screen; presentation mode), or a
+/// foreground window of another program that covers its whole monitor. A maximized window (or one
+/// filling the monitor's work area) only covers its monitor (no full screen).
+fn detect_fullscreen() -> (bool, Option<[i32; 4]>) {
+    #[cfg(windows)]
+    unsafe {
+        use windows::Win32::Foundation::{HWND, RECT};
+        use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONULL};
+        use windows::Win32::UI::Shell::{SHQueryUserNotificationState, QUNS_BUSY, QUNS_PRESENTATION_MODE, QUNS_RUNNING_D3D_FULL_SCREEN};
+        use windows::Win32::UI::WindowsAndMessaging::{GetClassNameW, GetForegroundWindow, GetWindowRect, GetWindowThreadProcessId, IsIconic, IsWindowVisible, IsZoomed};
+        let fg: HWND = GetForegroundWindow();
+        if fg.0.is_null() || !IsWindowVisible(fg).as_bool() || IsIconic(fg).as_bool() {
+            return (false, None);
+        }
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(fg, Some(&mut pid));
+        if pid == std::process::id() {
+            return (false, None);
+        }
+        let mut buf = [0u16; 64];
+        let n = GetClassNameW(fg, &mut buf);
+        let class = String::from_utf16_lossy(&buf[..n.max(0) as usize]);
+        if matches!(class.as_str(), "Progman" | "WorkerW" | "Shell_TrayWnd" | "Shell_SecondaryTrayWnd") {
+            return (false, None);
+        }
+        let mon = MonitorFromWindow(fg, MONITOR_DEFAULTTONULL);
+        let mut mi = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
+        if mon.is_invalid() || !GetMonitorInfoW(mon, &mut mi).as_bool() {
+            return (false, None);
+        }
+        let m = mi.rcMonitor;
+        let monitor = Some([m.left, m.top, m.right, m.bottom]);
+        let mut r = RECT::default();
+        let have_rect = GetWindowRect(fg, &mut r).is_ok();
+        let covers = |a: RECT| have_rect && r.left <= a.left && r.top <= a.top && r.right >= a.right && r.bottom >= a.bottom;
+        let busy = matches!(SHQueryUserNotificationState(), Ok(s) if s == QUNS_BUSY || s == QUNS_RUNNING_D3D_FULL_SCREEN || s == QUNS_PRESENTATION_MODE);
+        // Covering the whole monitor only means "full screen" for a window without a title bar that
+        // isn't maximized: a maximized window's hidden borders also reach past the monitor's edges.
+        let style = windows::Win32::UI::WindowsAndMessaging::GetWindowLongW(fg, windows::Win32::UI::WindowsAndMessaging::GWL_STYLE) as u32;
+        let has_caption = style & windows::Win32::UI::WindowsAndMessaging::WS_CAPTION.0 == windows::Win32::UI::WindowsAndMessaging::WS_CAPTION.0;
+        let borderless_full = covers(m) && !IsZoomed(fg).as_bool() && !has_caption;
+        if busy || borderless_full {
+            return (true, monitor);
+        }
+        if IsZoomed(fg).as_bool() || covers(mi.rcWork) {
+            return (false, monitor);
+        }
+        (false, None)
+    }
+    #[cfg(not(windows))]
+    {
+        (false, None)
+    }
 }
 
 /// A click in an icon box: give the keyboard to the desktop, as a click on the real desktop

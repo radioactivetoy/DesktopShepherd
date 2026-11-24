@@ -277,3 +277,12 @@ egui font atlases, and the icon textures.
 5. ~~Rename to DesktopShepherd~~ – done, with an installer (2026-11-22).
 6. Features: more widgets (calendar, system monitor, to-do, search box, agenda and picture frame are done), per-box hotkeys (done), quick
    (Quick search, snapping to boxes/screen edges and an optional grid are done, 2026-11-22.)
+- New (2026-11-24): pause when nobody can see the boxes (Settings > Desktop "Pause while a full-screen
+  app or game is running", default on; `Settings.pause_fullscreen`). `desktop::poll_fullscreen` looks (no polling:
+  on foreground change, minimize/restore, display change, plus again after 0.5 s and 1.5 s) at the foreground
+  window of another program: SHQueryUserNotificationState (busy / exclusive D3D / presentation) or a window covering
+  its whole monitor = full screen; a maximized window (always, no setting) or one filling the work area only covers
+  its monitor. Boxes whose centre is on a covered monitor are not drawn and have no timer (`HostSystem::set_occluded`,
+  redrawn forced when visible again); other monitors keep running. A real full-screen app also gives back all global
+  shortcuts (`runloop::set_hotkeys_paused`) and holds the toasts. Screen off (power-setting notice) or session locked
+  (WTS notice) pauses all boxes. Log lines "paused: ..." / "resumed". Not yet checked live with a game.

@@ -263,6 +263,14 @@ pub struct DeskApp {
     /// What the box windows were last shown or hidden for (page, hidden, each box's page).
     shown_for: Option<(u32, bool, Vec<(u64, u32)>)>,
     page_hotkeys_set: bool,
+    /// Paused because a full-screen app or game is in front (see `desktop::poll_fullscreen`).
+    fs_paused: bool,
+    /// Screen off or session locked (nothing is drawn), and the monitor (pixels) covered by a
+    /// full-screen or maximized window of another program.
+    asleep: bool,
+    occ_rect: Option<[i32; 4]>,
+    /// Boxes not drawn right now because nobody can see them (redrawn at once when they can be seen).
+    occluded: HashSet<u64>,
     /// Deleted boxes (for Undo) and when they were deleted.
     deleted: Vec<(Fence, Instant)>,
     /// A layout file chosen in "Import layout…", waiting to be loaded.
@@ -536,6 +544,10 @@ impl DeskApp {
             current_setup: String::new(),
             shown_for: None,
             page_hotkeys_set: false,
+            fs_paused: false,
+            asleep: false,
+            occ_rect: None,
+            occluded: HashSet::new(),
             deleted: Vec::new(),
             picked_layout: Arc::new(Mutex::new(None)),
             box_hotkeys_applied: None,
@@ -964,6 +976,36 @@ impl DeskApp {
     fn update_inner(&mut self, ctx: &egui::Context) {
         if debug_flag(0) && ctx.cumulative_pass_nr() % 120 == 0 {
             storage::log_line(&format!("repaint causes: {:?}", ctx.repaint_causes()));
+        }
+        // A full-screen app/game, a maximized window, a switched-off screen or a locked session:
+        // boxes nobody can see are not drawn (per box, below); a real full-screen app also gets the
+        // global shortcuts back and holds the toasts.
+        #[cfg(windows)]
+        {
+            desktop::poll_fullscreen();
+            let on = self.layout.settings.pause_fullscreen;
+            let fs = desktop::fullscreen_app_running();
+            let paused = on && fs;
+            let asleep = on && crate::runloop::display_asleep();
+            // A maximized window always covers its monitor; a real full-screen one only with the setting.
+            self.occ_rect = if fs && !on { None } else { desktop::covered_monitor() };
+            if asleep != self.asleep {
+                self.asleep = asleep;
+                storage::log_line(if asleep { "paused: screen off or session locked" } else { "resumed: screen on" });
+            }
+            if paused != self.fs_paused {
+                self.fs_paused = paused;
+                storage::log_line(if paused { "paused: full-screen app" } else { "resumed" });
+                crate::runloop::set_hotkeys_paused(paused);
+                if !paused {
+                    // Register everything again as configured.
+                    self.hotkey_applied = usize::MAX;
+                    self.hide_hotkey_applied = usize::MAX;
+                    self.page_hotkeys_set = false;
+                    self.cfg_fp = None;
+                    ctx.request_repaint();
+                }
+            }
         }
         // ---- inputs from background threads and the tray icon
         let mut changed_files = false;
@@ -1617,6 +1659,21 @@ impl DeskApp {
                 if self.boxes_hidden || fence.page != self.layout.current_page {
                     continue; // on another page, or all hidden: nothing to draw
                 }
+                // Under a full-screen / maximized window, or screen off / locked: not drawn, no timers.
+                let box_h = if fence.expanded { fence.rect[3] } else { ROLLED_HEIGHT };
+                let hidden_from_view = self.asleep
+                    || self.occ_rect.is_some_and(|m| {
+                        let sc = desktop::system_scale();
+                        let (cx, cy) = ((fence.rect[0] + fence.rect[2] / 2.0) * sc, (fence.rect[1] + box_h / 2.0) * sc);
+                        cx >= m[0] as f32 && cx < m[2] as f32 && cy >= m[1] as f32 && cy < m[3] as f32
+                    });
+                if hidden_from_view {
+                    if self.occluded.insert(fence.id) {
+                        hosts.set_occluded(fence.id);
+                    }
+                    continue;
+                }
+                let was_occluded = self.occluded.remove(&fence.id);
                 let look = crate::host::Look {
                     tint: [fence.color[0], fence.color[1], fence.color[2], fence.alpha],
                     corner_points: fence.corner,
@@ -1660,7 +1717,7 @@ impl DeskApp {
                     dark = self.ink_dark.get(&id).copied().unwrap_or(false);
                 }
                 crate::ink::set(dark);
-                let drew = hosts.frame(id, rect, &look, force_all || ink_force, |ctx| {
+                let drew = hosts.frame(id, rect, &look, force_all || ink_force || was_occluded, |ctx| {
                     let r = fence_window(ctx, fence, &desk, icons, ui_state, actions, expand_on_hover);
                     dirty |= r.0;
                     wake_scan |= r.1;
@@ -1745,6 +1802,14 @@ impl DeskApp {
             } else if let Some(h) = self.hosts.as_mut() {
                 h.close_panel(RENAME_PANEL);
             }
+            if self.fs_paused || self.asleep {
+                // Toasts wait for the end of the full-screen app (a note or the undo window just expires).
+                if let Some(h) = self.hosts.as_mut() {
+                    for p in [UPDATES_ASK_PANEL, NOTE_PANEL, UPDATE_PANEL, UNDO_PANEL] {
+                        h.close_panel(p);
+                    }
+                }
+            } else {
             // "Version x is available · Update · Later", once per version.
             let offer = crate::update::status().0.filter(|r| r.version != self.layout.settings.skipped_version && self.layout.settings.check_updates && self.layout.settings.updates_asked);
             // The one-time question (nothing is checked until the person answered).
@@ -1774,6 +1839,7 @@ impl DeskApp {
                 self.show_undo_toast(ctx);
             } else if let Some(h) = self.hosts.as_mut() {
                 h.close_panel(UNDO_PANEL);
+            }
             }
         }
         // Commands for box windows from the menus (focus for renaming, roll up/down).
@@ -3577,6 +3643,7 @@ impl DeskApp {
             icons_changed = true;
         }
         ui.label(egui::RichText::new(t("They always come back when DesktopShepherd closes, even after a crash.")).color(crate::theme::faint()).size(12.0));
+        dirty |= ui.checkbox(&mut s.pause_fullscreen, t("Pause while a full-screen app or game is running (no redraws, shortcuts free for the game)")).changed();
         dirty |= ui.checkbox(&mut s.expand_on_hover, t("Open rolled-up boxes while the mouse is over them")).changed();
         ui.horizontal(|ui| {
             dirty |= ui.checkbox(&mut s.fade_idle, t("Fade boxes while the mouse is away")).changed();

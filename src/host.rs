@@ -860,6 +860,15 @@ impl HostSystem {
         }
     }
 
+    /// A box nobody can see (under a full-screen or maximized window, screen off, session locked):
+    /// no timer, so it doesn't wake the app. Its picture stays as it is; it is redrawn (forced) when
+    /// it can be seen again.
+    pub fn set_occluded(&mut self, id: u64) {
+        if let Some(h) = self.hosts.get_mut(&id) {
+            h.next = None;
+        }
+    }
+
     /// Fades the whole box (glass, text and icons) to `a` (0..1) over a short animation, done by
     /// Windows' compositor: nothing is redrawn. Without glass it does nothing.
     pub fn set_box_opacity(&mut self, id: u64, a: f32) {

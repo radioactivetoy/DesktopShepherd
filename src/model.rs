@@ -207,6 +207,8 @@ pub struct Settings {
     pub categories: Vec<CategoryRule>,
     /// Hide Windows' own desktop icons while boxes show them (restored on exit or crash).
     pub hide_desktop_icons: bool,
+    /// Pause (no redraws, shortcuts given back) while a full-screen app or game is running.
+    pub pause_fullscreen: bool,
     /// Rolled-up boxes open while the mouse is over them.
     pub expand_on_hover: bool,
     pub start_with_windows: bool,
@@ -269,6 +271,7 @@ impl Default for Settings {
             categories: default_categories(),
             // The boxes replace the desktop icons while DesktopShepherd runs (original: organize_hide).
             hide_desktop_icons: true,
+            pause_fullscreen: true,
             expand_on_hover: true,
             start_with_windows: false,
             low_priority: true,
