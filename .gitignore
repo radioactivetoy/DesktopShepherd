@@ -4,3 +4,4 @@ shots/
 layout.json.tmp
 /dist
 .cargo/config.toml
+/profile
