@@ -269,11 +269,12 @@ struct Readings {
     mem_load: f32,
     mem_used_gb: f32,
     mem_total_gb: f32,
-    disks_at: Option<std::time::Instant>,
     disks: std::sync::Arc<Vec<(String, f32, f32)>>, // drive, used fraction, free GB
 }
 
 static READINGS: std::sync::Mutex<Option<Readings>> = std::sync::Mutex::new(None);
+/// Reads drive space once a minute on one long-lived thread while a system monitor shows.
+static DISKS_POLL: Poller = Poller::new();
 
 const SAMPLE_EVERY: Duration = Duration::from_secs(2);
 
@@ -351,7 +352,6 @@ fn read_now() -> Snapshot {
             mem_load: 0.0,
             mem_used_gb: 0.0,
             mem_total_gb: 0.0,
-            disks_at: None,
             disks: Default::default(),
         }
     });
@@ -375,19 +375,16 @@ fn read_now() -> Snapshot {
         }
         r.at = now;
     }
-    if r.disks_at.map(|t| now.duration_since(t) >= Duration::from_secs(60)).unwrap_or(true) {
-        // A sleeping or stuck drive can take seconds to answer: ask on a helper thread, never
-        // here on the thread that draws every box. The answer shows on the next update.
-        r.disks_at = Some(now);
-        let _ = std::thread::Builder::new().name("drive-space".into()).spawn(|| {
-            let found = disks();
-            if let Ok(mut g) = READINGS.lock() {
-                if let Some(r) = g.as_mut() {
-                    r.disks = std::sync::Arc::new(found);
-                }
+    // A sleeping or stuck drive can take seconds to answer: drive space is read once a minute on
+    // the long-lived helper, never here on the thread that draws every box.
+    DISKS_POLL.ask("drive-space", Duration::from_secs(60), || {
+        let found = disks();
+        if let Ok(mut g) = READINGS.lock() {
+            if let Some(r) = g.as_mut() {
+                r.disks = std::sync::Arc::new(found);
             }
-        });
-    }
+        }
+    });
     (r.cpu, r.history.iter().copied().collect(), r.mem_load, r.mem_used_gb, r.mem_total_gb, r.disks.clone())
 }
 
@@ -1440,7 +1437,70 @@ struct LaptopInfo {
 /// Last reading (and when), Wi-Fi/Bluetooth read on a helper thread at most every 30 s while a laptop widget shows
 /// (the battery is a cheap call, read directly).
 static LAPTOP: std::sync::Mutex<Option<(std::time::Instant, LaptopInfo)>> = std::sync::Mutex::new(None);
-static LAPTOP_BUSY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Reads Wi-Fi and Bluetooth every 30 s on one long-lived thread while a laptop widget shows.
+static LAPTOP_POLL: Poller = Poller::new();
+
+/// One long-lived helper thread for a widget's slow readings: it runs `job` every `every` while a
+/// widget keeps asking (`ask`, called when the widget draws) and sleeps without waking once no
+/// widget has asked for a while. (A new thread for every reading — what the media widget used to
+/// do every 2 s — slowly grew memory inside Windows' services.)
+struct Poller {
+    asked: std::sync::Mutex<Option<std::time::Instant>>,
+    wake: std::sync::Mutex<bool>,
+    cv: std::sync::Condvar,
+    started: std::sync::atomic::AtomicBool,
+}
+
+impl Poller {
+    const fn new() -> Self {
+        Poller { asked: std::sync::Mutex::new(None), wake: std::sync::Mutex::new(false), cv: std::sync::Condvar::new(), started: std::sync::atomic::AtomicBool::new(false) }
+    }
+
+    /// A widget wants fresh readings: start the thread the first time, wake it if it was asleep.
+    fn ask(&'static self, name: &'static str, every: Duration, job: fn()) {
+        use std::sync::atomic::Ordering;
+        // Leak test: read 100 times as often.
+        let every = if crate::leak_test("poller") { every / 100 } else { every };
+        // Asleep when nobody asked for three periods (at least 10 s).
+        let idle_after = (every * 3).max(Duration::from_secs(10));
+        let was_idle = self
+            .asked
+            .lock()
+            .map(|mut g| {
+                let idle = g.map(|t| t.elapsed() >= idle_after).unwrap_or(true);
+                *g = Some(std::time::Instant::now());
+                idle
+            })
+            .unwrap_or(false);
+        if !self.started.swap(true, Ordering::SeqCst) {
+            let spawned = std::thread::Builder::new().name(name.into()).spawn(move || loop {
+                let wanted = self.asked.lock().ok().and_then(|g| *g).map(|t| t.elapsed() < idle_after).unwrap_or(false);
+                if wanted {
+                    let _ = std::panic::catch_unwind(job);
+                    #[cfg(windows)]
+                    crate::runloop::wake_after(Duration::ZERO);
+                }
+                let g = self.wake.lock().unwrap_or_else(|e| e.into_inner());
+                let mut g = if wanted {
+                    self.cv.wait_timeout_while(g, every, |w| !*w).map(|(g, _)| g).unwrap_or_else(|e| e.into_inner().0)
+                } else {
+                    self.cv.wait_while(g, |w| !*w).unwrap_or_else(|e| e.into_inner())
+                };
+                *g = false;
+            });
+            if spawned.is_err() {
+                self.started.store(false, Ordering::SeqCst);
+            }
+            return; // a new thread reads at once
+        }
+        if was_idle {
+            if let Ok(mut w) = self.wake.lock() {
+                *w = true;
+                self.cv.notify_one();
+            }
+        }
+    }
+}
 
 #[cfg(windows)]
 fn read_battery() -> Option<(u8, bool, Option<u32>)> {
@@ -1549,21 +1609,12 @@ fn read_laptop() -> LaptopInfo {
 
 fn laptop_now() -> LaptopInfo {
     let current = LAPTOP.lock().ok().and_then(|g| g.clone());
-    let stale = current.as_ref().map(|(t, _)| t.elapsed() >= Duration::from_secs(30)).unwrap_or(true);
-    if stale && !LAPTOP_BUSY.swap(true, std::sync::atomic::Ordering::SeqCst) {
-        let spawned = std::thread::Builder::new().name("laptop-status".into()).spawn(|| {
-            let info = std::panic::catch_unwind(read_laptop).unwrap_or_default();
-            if let Ok(mut g) = LAPTOP.lock() {
-                *g = Some((std::time::Instant::now(), info));
-            }
-            LAPTOP_BUSY.store(false, std::sync::atomic::Ordering::SeqCst);
-            #[cfg(windows)]
-            crate::runloop::wake_after(Duration::ZERO);
-        });
-        if spawned.is_err() {
-            LAPTOP_BUSY.store(false, std::sync::atomic::Ordering::SeqCst);
+    LAPTOP_POLL.ask("laptop-status", Duration::from_secs(30), || {
+        let info = read_laptop();
+        if let Ok(mut g) = LAPTOP.lock() {
+            *g = Some((std::time::Instant::now(), info));
         }
-    }
+    });
     let mut info = current.map(|(_, i)| i).unwrap_or_default();
     info.battery = read_battery();
     info

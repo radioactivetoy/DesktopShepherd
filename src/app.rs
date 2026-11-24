@@ -287,7 +287,9 @@ pub struct DeskApp {
     /// generation the decision was made for; the setting last applied.
     ink_dark: HashMap<u64, bool>,
     ink_rects: HashMap<u64, [i32; 4]>,
-    ink_gen: u64,
+    /// Per box: the wallpaper reading (backdrop generation) its text colour was chosen for. A box that
+    /// was hidden (other page, covered, screen off) when the wallpaper changed is re-checked when shown.
+    ink_gen: HashMap<u64, u64>,
     ink_applied: Option<bool>,
     /// OneDrive sync: the shared file's time we last wrote or loaded, and when it was checked.
     sync_seen: Option<std::time::SystemTime>,
@@ -556,7 +558,7 @@ impl DeskApp {
             accent_applied: None,
             ink_dark: HashMap::new(),
             ink_rects: HashMap::new(),
-            ink_gen: 0,
+            ink_gen: HashMap::new(),
             ink_applied: None,
             sync_seen: None,
             sync_check_at: Instant::now() - Duration::from_secs(60),
@@ -1344,6 +1346,7 @@ impl DeskApp {
                 if !on {
                     self.ink_dark.clear();
                     self.ink_rects.clear();
+                    self.ink_gen.clear();
                 }
                 self.redraw_all = true;
                 self.ink_applied = Some(on);
@@ -1695,7 +1698,7 @@ impl DeskApp {
                     let sc = desktop::system_scale();
                     let px = [(rect[0] * sc).round() as i32, (rect[1] * sc).round() as i32, ((rect[0] + rect[2]) * sc).round() as i32, ((rect[1] + rect[3]) * sc).round() as i32];
                     let was = self.ink_dark.get(&id).copied();
-                    if was.is_none() || ink_gen_now != self.ink_gen || self.ink_rects.get(&id) != Some(&px) {
+                    if was.is_none() || self.ink_gen.get(&id) != Some(&ink_gen_now) || self.ink_rects.get(&id) != Some(&px) {
                         let prev = was.unwrap_or(false);
                         let now = match crate::backdrop::brightness(px) {
                             Some(b) => {
@@ -1712,6 +1715,7 @@ impl DeskApp {
                         }
                         self.ink_rects.insert(id, px);
                         self.ink_dark.insert(id, now);
+                        self.ink_gen.insert(id, ink_gen_now);
                         ink_force = was.is_some() && was != Some(now);
                     }
                     dark = self.ink_dark.get(&id).copied().unwrap_or(false);
@@ -1761,7 +1765,6 @@ impl DeskApp {
                 }
             }
             crate::ink::set(false);
-            self.ink_gen = ink_gen_now;
             // Wake up again when the earliest box timer is due (see HostSystem::next_due).
             if let Some(t) = hosts.next_due() {
                 ctx.request_repaint_after(t.saturating_duration_since(Instant::now()).max(crate::host::MIN_PASS_GAP));
