@@ -378,6 +378,10 @@ fn make_grid(th: &Thumb, mon: [i32; 4], target: [i32; 4], pos: i32, bg: f32) -> 
 }
 
 fn check(last_sig: &mut String, cache: &mut ThumbCache) {
+    if crate::leak_test("backdrop") {
+        last_sig.clear();
+        *cache = ThumbCache::default();
+    }
     let sc = scan();
     if sc.sig == *last_sig {
         return;

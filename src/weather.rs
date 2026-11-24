@@ -173,7 +173,7 @@ fn forecast(lat: f64, lon: f64, fahrenheit: bool) -> (Option<std::sync::Arc<Fore
     let Ok(mut g) = CACHE.lock() else { return (None, None) };
     let map = g.get_or_insert_with(HashMap::new);
     let slot = map.entry(key.clone()).or_insert(Slot { at: None, data: None, error: None, busy: false });
-    let wait = if slot.error.is_some() { Duration::from_secs(300) } else { Duration::from_secs(1800) };
+    let wait = if slot.error.is_some() { Duration::from_secs(300) } else if crate::leak_test("weather") { Duration::from_secs(60) } else { Duration::from_secs(1800) };
     if !slot.busy && slot.at.map(|t| t.elapsed() >= wait).unwrap_or(true) {
         slot.busy = true;
         let _ = std::thread::Builder::new().name("weather".into()).spawn(move || {
@@ -251,7 +251,7 @@ pub struct Weather;
 
 impl DeskWidget for Weather {
     fn ui(&self, ui: &mut Ui, data: &mut Value) -> WidgetOutput {
-        let out = WidgetOutput { changed: false, repaint_after: Some(Duration::from_secs(600)) };
+        let out = WidgetOutput { changed: false, repaint_after: Some(Duration::from_secs(if crate::leak_test("weather") { 60 } else { 600 })) };
         let list = places(data);
         if list.is_empty() {
             ui.add_space(6.0);

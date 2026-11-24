@@ -89,7 +89,7 @@ pub fn view(urls: &[String], force: bool) -> Vec<CalView> {
     let mut out = Vec::new();
     for url in urls {
         let st = map.entry(url.clone()).or_default();
-        let wait = if st.error.is_some() { RETRY } else { REFRESH };
+        let wait = if st.error.is_some() { RETRY } else if crate::leak_test("agenda") { Duration::from_secs(60) } else { REFRESH };
         let due = st.fetched_at.map(|t| now.duration_since(t) >= wait).unwrap_or(true);
         if !st.loading && (due || force) {
             st.loading = true;
