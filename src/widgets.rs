@@ -2005,7 +2005,7 @@ impl DeskWidget for Media {
         pa.text(Pos2::new(mid.x - 44.0, cy), egui::Align2::CENTER_CENTER, "\u{E892}", egui::FontId::proportional(17.0), dim(&prev));
         pa.text(Pos2::new(mid.x + 44.0, cy), egui::Align2::CENTER_CENTER, "\u{E893}", egui::FontId::proportional(17.0), dim(&next));
         pa.circle_filled(mid, if play.hovered() { 19.0 } else { 18.0 }, crate::ink::strong());
-        pa.text(mid + egui::vec2(if m.playing { 0.0 } else { 1.5 }, 0.0), egui::Align2::CENTER_CENTER, if m.playing { "\u{E769}" } else { "\u{E768}" }, egui::FontId::proportional(16.0), Color32::from_rgb(20, 20, 24));
+        pa.text(mid + egui::vec2(if m.playing { 0.0 } else { 1.5 }, 0.0), egui::Align2::CENTER_CENTER, if m.playing { "\u{E769}" } else { "\u{E768}" }, egui::FontId::proportional(16.0), if crate::ink::is_dark() { Color32::WHITE } else { Color32::from_rgb(20, 20, 24) });
         if prev.clicked() {
             media_command(0, m.app.clone());
         }
