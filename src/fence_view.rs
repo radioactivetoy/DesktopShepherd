@@ -157,8 +157,16 @@ pub fn visible_tabs(fence: &Fence, desk: &DeskState) -> Vec<(String, Vec<DeskIte
         .tabs
         .iter()
         .map(|t| {
-            let mut v: Vec<DeskItem> =
-                t.items.iter().filter_map(|p| desk.items.get(&p.to_lowercase()).cloned()).collect();
+            // Each file once, even if the layout lists it twice (see dedupe_items in app.rs).
+            let mut seen = std::collections::HashSet::new();
+            let mut v: Vec<DeskItem> = t
+                .items
+                .iter()
+                .filter_map(|p| {
+                    let k = p.to_lowercase();
+                    if seen.insert(k.clone()) { desk.items.get(&k).cloned() } else { None }
+                })
+                .collect();
             sort_items(&mut v, fence.sort, desk.open_counts);
             (t.name.clone(), v)
         })

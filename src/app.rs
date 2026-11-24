@@ -630,6 +630,7 @@ impl DeskApp {
         if !self.persist {
             return;
         }
+        dedupe_items(&mut self.layout);
         if self.layout.settings.per_setup && !self.current_setup.is_empty() {
             let map = self.layout.fences.iter().map(|f| (f.id, f.rect)).collect();
             self.layout.setup_positions.insert(self.current_setup.clone(), map);
@@ -4066,6 +4067,21 @@ impl DeskApp {
 }
 
 /// Repairs anything odd in a loaded layout so drawing can never fail on it.
+/// A file listed twice in one box tab (it would show as two icons). Removes the extra copies and
+/// logs it, so the cause can be found if it happens again. Called before every save.
+fn dedupe_items(layout: &mut Layout) {
+    for f in &mut layout.fences {
+        for t in &mut f.tabs {
+            let mut seen = HashSet::new();
+            let before = t.items.len();
+            t.items.retain(|p| seen.insert(p.to_lowercase()));
+            if t.items.len() != before {
+                storage::log_line(&format!("layout: box '{}' listed {} file(s) twice; extra copies removed", f.name, before - t.items.len()));
+            }
+        }
+    }
+}
+
 fn sanitize(layout: &mut Layout) {
     // Version 2: boxes still on the first build's guessed look (opacity 170, 6 px corners)
     // move to the defaults read from the original (opacity 50, see model.rs).
@@ -4843,6 +4859,11 @@ impl DeskApp {
         let new_s = new_path.to_string_lossy().to_string();
         for f in &mut self.layout.fences {
             for t in &mut f.tabs {
+                // A box may still list a deleted file with the new name (kept in case it comes
+                // back): the renamed file takes its place, keeping the renamed icon's position.
+                if !same_file && t.items.iter().any(|p| p.eq_ignore_ascii_case(&it.path)) {
+                    t.items.retain(|p| !p.eq_ignore_ascii_case(&new_s));
+                }
                 for p in &mut t.items {
                     if p.eq_ignore_ascii_case(&it.path) {
                         *p = new_s.clone();
