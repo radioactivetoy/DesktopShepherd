@@ -1648,16 +1648,27 @@ struct MediaInfo {
     art_tries: (u64, u8),
 }
 
-/// What's playing, read on a helper thread at most every 2 s while a media widget shows (Windows'
+/// What's playing, read by one helper thread every 2 s while a media widget shows (Windows'
 /// own media controls: Spotify, browsers, VLC… anything that shows in the volume flyout).
 /// Every player Windows knows (the one it calls "current" first).
 static MEDIA: std::sync::Mutex<Option<(std::time::Instant, Vec<MediaInfo>)>> = std::sync::Mutex::new(None);
-static MEDIA_BUSY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Windows' media session manager, asked for once and kept (asking for a new one every few
+/// seconds, each time on a new thread, made memory grow by a few MB an hour).
+#[cfg(windows)]
+fn media_manager() -> Option<windows::Media::Control::GlobalSystemMediaTransportControlsSessionManager> {
+    use windows::Media::Control::GlobalSystemMediaTransportControlsSessionManager as M;
+    static KEPT: std::sync::Mutex<Option<M>> = std::sync::Mutex::new(None);
+    let mut g = KEPT.lock().ok()?;
+    if g.is_none() {
+        *g = M::RequestAsync().ok().and_then(|op| op.get().ok());
+    }
+    g.clone()
+}
 
 #[cfg(windows)]
 fn media_sessions() -> Vec<windows::Media::Control::GlobalSystemMediaTransportControlsSession> {
-    use windows::Media::Control::GlobalSystemMediaTransportControlsSessionManager as M;
-    let Some(m) = M::RequestAsync().ok().and_then(|op| op.get().ok()) else { return Vec::new() };
+    let Some(m) = media_manager() else { return Vec::new() };
     let mut v = Vec::new();
     let current = m.GetCurrentSession().ok();
     let cur_id = current.as_ref().and_then(|s| s.SourceAppUserModelId().ok()).map(|h| h.to_string());
@@ -1729,22 +1740,62 @@ fn read_media(_previous: &[MediaInfo]) -> Vec<MediaInfo> {
     Vec::new()
 }
 
-fn refresh_media(force: bool) {
-    let current = MEDIA.lock().ok().and_then(|g| g.clone());
-    let stale = current.as_ref().map(|(t, _)| t.elapsed() >= Duration::from_secs(2)).unwrap_or(true);
-    if (stale || force) && !MEDIA_BUSY.swap(true, std::sync::atomic::Ordering::SeqCst) {
-        let prev = current.map(|(_, m)| m).unwrap_or_default();
-        let spawned = std::thread::Builder::new().name("media-status".into()).spawn(move || {
+/// When a media widget last asked for news (the helper sleeps once nobody has asked for 10 s).
+static MEDIA_ASKED: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+/// Wakes the media helper (a widget showed again, or a button was pressed).
+static MEDIA_WAKE: (std::sync::Mutex<bool>, std::sync::Condvar) = (std::sync::Mutex::new(false), std::sync::Condvar::new());
+
+/// One long-lived helper thread reads what's playing every 2 s while a media widget shows, using
+/// one media manager for its whole life; with no widget showing it sleeps without waking.
+fn media_helper() {
+    #[cfg(windows)]
+    unsafe {
+        use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
+        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+    }
+    let every = if crate::leak_test("media") { Duration::from_millis(100) } else { Duration::from_secs(2) };
+    loop {
+        let wanted = MEDIA_ASKED.lock().ok().and_then(|g| *g).map(|t| t.elapsed() < Duration::from_secs(10)).unwrap_or(false);
+        if wanted {
+            let prev = MEDIA.lock().ok().and_then(|g| g.clone()).map(|(_, m)| m).unwrap_or_default();
             let info = std::panic::catch_unwind(|| read_media(&prev)).unwrap_or_default();
             if let Ok(mut g) = MEDIA.lock() {
                 *g = Some((std::time::Instant::now(), info));
             }
-            MEDIA_BUSY.store(false, std::sync::atomic::Ordering::SeqCst);
             #[cfg(windows)]
             crate::runloop::wake_after(Duration::ZERO);
-        });
-        if spawned.is_err() {
-            MEDIA_BUSY.store(false, std::sync::atomic::Ordering::SeqCst);
+        }
+        // Sleep: `every` while wanted, otherwise until a widget asks again.
+        let (m, c) = &MEDIA_WAKE;
+        let g = m.lock().unwrap_or_else(|e| e.into_inner());
+        let mut g = if wanted {
+            c.wait_timeout_while(g, every, |w| !*w).map(|(g, _)| g).unwrap_or_else(|e| e.into_inner().0)
+        } else {
+            c.wait_while(g, |w| !*w).unwrap_or_else(|e| e.into_inner())
+        };
+        *g = false;
+    }
+}
+
+fn refresh_media(force: bool) {
+    static STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    let first_ask = MEDIA_ASKED.lock().ok().map(|mut g| {
+        let idle = g.map(|t| t.elapsed() >= Duration::from_secs(10)).unwrap_or(true);
+        *g = Some(std::time::Instant::now());
+        idle
+    });
+    if !STARTED.swap(true, std::sync::atomic::Ordering::SeqCst)
+        && std::thread::Builder::new().name("media-status".into()).spawn(media_helper).is_err()
+    {
+        STARTED.store(false, std::sync::atomic::Ordering::SeqCst);
+        return;
+    }
+    // Wake the helper if it was asleep (no widget showed) or a fresh reading is wanted now.
+    if force || first_ask.unwrap_or(false) {
+        let (m, c) = &MEDIA_WAKE;
+        if let Ok(mut w) = m.lock() {
+            *w = true;
+            c.notify_one();
         }
     }
 }
@@ -1822,7 +1873,7 @@ impl DeskWidget for Media {
         let all: Vec<MediaInfo> = MEDIA.lock().ok().and_then(|g| g.as_ref().map(|(_, m)| m.clone())).unwrap_or_default();
         // Nothing playing: an empty box (it fills again when music starts).
         if all.is_empty() {
-            return WidgetOutput { changed: false, repaint_after: Some(Duration::from_secs(3)) };
+            return WidgetOutput { changed: false, repaint_after: Some(if crate::leak_test("media") { Duration::from_millis(100) } else { Duration::from_secs(3) }) };
         }
         // Several players: the one chosen with the dots (by its app), else Windows' current one.
         let sid = ui.make_persistent_id("media-player");
@@ -1929,6 +1980,9 @@ impl DeskWidget for Media {
             if m.playing {
                 repaint = Duration::from_secs(1); // the seconds move on
             }
+        }
+        if crate::leak_test("media") {
+            repaint = Duration::from_millis(100);
         }
         WidgetOutput { changed: false, repaint_after: Some(repaint) }
     }

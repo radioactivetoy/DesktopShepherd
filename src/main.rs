@@ -141,8 +141,8 @@ fn supervise(boot: bool) {
     }
 }
 
-/// Test switch for hunting slow memory growth: DESKTOPSHEPHERD_LEAKTEST=agenda | weather | backdrop
-/// makes that part refresh every minute instead of every 30 (see toolsprofile_over_time.ps1).
+/// Test switch for hunting slow memory growth: DESKTOPSHEPHERD_LEAKTEST=agenda | weather | backdrop | media
+/// makes that part refresh every minute instead of every 30 (media: every 0.1 s instead of 2 s) (see toolsprofile_over_time.ps1).
 pub fn leak_test(what: &str) -> bool {
     static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     V.get_or_init(|| std::env::var("DESKTOPSHEPHERD_LEAKTEST").unwrap_or_default().to_ascii_lowercase()) == what
