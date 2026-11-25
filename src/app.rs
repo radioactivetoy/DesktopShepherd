@@ -2618,12 +2618,20 @@ fn row(ui: &mut egui::Ui, icon_char: char, text: &str, mark: Option<char>, enabl
 }
 
 /// "OUT 1-4 (BEHRINGER UMC 204HD 192k)": the part in brackets is the device's own name; cut to 32 characters.
-fn short_device_name(full: &str) -> String {
-    let n = match (full.find('('), full.rfind(')')) {
-        (Some(a), Some(b)) if b > a + 1 => full[a + 1..b].trim().to_string(),
-        _ => full.to_string(),
-    };
-    if n.chars().count() > 32 { format!("{}…", n.chars().take(31).collect::<String>()) } else { n }
+/// "OUT 1-2 (BEHRINGER UMC 204HD 192k)" -> the device name in brackets ("BEHRINGER UMC 204HD 192k"),
+/// or, when other outputs share it (several channels of one audio interface), the name and its
+/// own part: "BEHRINGER UMC 204HD 192k · OUT 1-2". `all` = every output's full name.
+fn short_device_name(full: &str, all: &[String]) -> String {
+    fn split(s: &str) -> (String, String) {
+        match (s.find('('), s.rfind(')')) {
+            (Some(a), Some(b)) if b > a + 1 => (s[..a].trim().to_string(), s[a + 1..b].trim().to_string()),
+            _ => (String::new(), s.trim().to_string()),
+        }
+    }
+    let (own, dev) = split(full);
+    let shared = all.iter().filter(|o| split(o).1 == dev).count() > 1;
+    let n = if shared && !own.is_empty() { format!("{dev} · {own}") } else { dev };
+    if n.chars().count() > 44 { format!("{}…", n.chars().take(43).collect::<String>()) } else { n }
 }
 
 fn sub(ui: &mut egui::Ui, icon_char: char, text: &str) -> bool {
@@ -3031,8 +3039,10 @@ fn fence_menu(ui: &mut egui::Ui, fence: &mut Fence, st: &mut UiState, page: &mut
             }
             let cur = crate::audio::current();
             let default_id = cur.as_ref().map(|v| v.device_id.clone()).unwrap_or_default();
-            for (id, name) in cur.map(|v| v.devices).unwrap_or_default() {
-                if check(ui, *id == default_id, &short_device_name(&name)) {
+            let devices = cur.map(|v| v.devices).unwrap_or_default();
+            let names: Vec<String> = devices.iter().map(|(_, n)| n.clone()).collect();
+            for (id, name) in &devices {
+                if check(ui, *id == default_id, &short_device_name(name, &names)) {
                     crate::audio::set_default(&id);
                     crate::widgets::media_wake();
                     close = true;
