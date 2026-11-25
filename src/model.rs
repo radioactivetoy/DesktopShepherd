@@ -114,6 +114,52 @@ pub struct Fence {
     /// "Raised look": edge lighting and a sheen on the glass.
     #[serde(default)]
     pub raised: bool,
+    /// Header: 0 none, 1 tinted band behind the title, 2 thin line under it.
+    pub header_style: u8,
+    /// Title placement along a top or bottom title: 0 centre, 1 left, 2 right.
+    pub title_align: u8,
+    /// A symbol before the title: a Segoe Fluent Icons character or a typed emoji (empty = none).
+    pub title_icon: String,
+    /// Own colour of the title (None = the box's text colour).
+    pub title_color: Option<[u8; 3]>,
+    /// 0 normal, 1 bold, 2 light.
+    pub title_weight: u8,
+    /// A small badge with the number of items at the end of the title.
+    pub show_count: bool,
+    /// The title only shows while the mouse is over the box.
+    pub title_on_hover: bool,
+    /// UPPERCASE title with a little letter spacing.
+    pub title_caps: bool,
+    /// A colour fade over the box (None = off).
+    pub gradient: Option<Gradient>,
+    /// Faint acrylic noise over the box.
+    pub texture: bool,
+    /// While the mouse is over the box: brighter border and stronger drop shadow.
+    pub hover_lift: bool,
+    /// Border in Windows' accent colour: 0 off, 1 always, 2 only while hovered.
+    pub accent_border: u8,
+    /// A soft backing behind each icon caption.
+    pub name_backing: bool,
+    /// The icon under the mouse is drawn a little larger.
+    pub hover_zoom: bool,
+    /// Icons slightly dimmed until hovered or selected.
+    pub calm_icons: bool,
+}
+
+/// A fade from clear (at the top / left) to `color2` with opacity `alpha2` (at the bottom / right).
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct Gradient {
+    pub color2: [u8; 3],
+    pub alpha2: u8,
+    /// 0 vertical, 1 horizontal, 2 diagonal.
+    pub angle: u8,
+}
+
+impl Default for Gradient {
+    fn default() -> Self {
+        Self { color2: [60, 90, 160], alpha2: 90, angle: 0 }
+    }
 }
 
 impl Default for Fence {
@@ -158,6 +204,21 @@ impl Default for Fence {
             hotkey: 0,
             shadow: false,
             raised: false,
+            header_style: 0,
+            title_align: 0,
+            title_icon: String::new(),
+            title_color: None,
+            title_weight: 0,
+            show_count: false,
+            title_on_hover: false,
+            title_caps: false,
+            gradient: None,
+            texture: false,
+            hover_lift: false,
+            accent_border: 0,
+            name_backing: false,
+            hover_zoom: false,
+            calm_icons: false,
         }
     }
 }
@@ -185,6 +246,21 @@ impl Fence {
         self.overflow = o.overflow;
         self.shadow = o.shadow;
         self.raised = o.raised;
+        self.header_style = o.header_style;
+        self.title_align = o.title_align;
+        self.title_icon = o.title_icon.clone();
+        self.title_color = o.title_color;
+        self.title_weight = o.title_weight;
+        self.show_count = o.show_count;
+        self.title_on_hover = o.title_on_hover;
+        self.title_caps = o.title_caps;
+        self.gradient = o.gradient.clone();
+        self.texture = o.texture;
+        self.hover_lift = o.hover_lift;
+        self.accent_border = o.accent_border;
+        self.name_backing = o.name_backing;
+        self.hover_zoom = o.hover_zoom;
+        self.calm_icons = o.calm_icons;
     }
 
     pub fn remove_item(&mut self, path: &str) {
@@ -316,6 +392,79 @@ pub struct Layout {
     pub setup_positions: std::collections::HashMap<String, std::collections::HashMap<u64, [f32; 4]>>,
     /// The page of boxes shown (0 = the first).
     pub current_page: u32,
+    /// The person's own saved looks (Personalize > Presets). Built-in ones live in code.
+    pub look_presets: Vec<LookPreset>,
+}
+
+/// A saved box look. `look` is a Fence used only for its look fields (no items, no widget).
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct LookPreset {
+    pub name: String,
+    pub look: Fence,
+}
+
+/// Most looks the person can save.
+pub const MAX_LOOK_PRESETS: usize = 30;
+
+impl LookPreset {
+    /// A preset holding the look of `f` (everything else cleared).
+    pub fn from_fence(name: &str, f: &Fence) -> LookPreset {
+        let mut look = f.clone();
+        look.name = String::new();
+        look.tabs = Vec::new();
+        look.widget = None;
+        look.folder = None;
+        look.sel_tab = 0;
+        LookPreset { name: name.to_string(), look }
+    }
+}
+
+/// The looks that come with the program (not saved in the layout, can't be deleted).
+pub const BUILTIN_LOOK_NAMES: [&str; 5] = ["Glass", "Solid dark", "Minimal", "Light frost", "Accent"];
+
+pub fn builtin_look_presets() -> Vec<LookPreset> {
+    let base = Fence::default();
+    let glass = base.clone();
+    let solid_dark = Fence {
+        color: [24, 26, 32],
+        alpha: 235,
+        blur: 0,
+        border_color: [255, 255, 255, 30],
+        border_width: 1.0,
+        ..base.clone()
+    };
+    let minimal = Fence {
+        alpha: 20,
+        blur: 8,
+        border_width: 0.0,
+        title_on_hover: true,
+        header_style: 0,
+        name_backing: true,
+        ..base.clone()
+    };
+    let light_frost = Fence {
+        color: [236, 241, 248],
+        alpha: 150,
+        blur: 24,
+        border_color: [255, 255, 255, 120],
+        text_color: [24, 28, 36],
+        text_shadow: false,
+        ..base.clone()
+    };
+    let accent = Fence {
+        accent_border: 1,
+        border_width: 1.5,
+        header_style: 2,
+        title_weight: 1,
+        raised: true,
+        ..base
+    };
+    [glass, solid_dark, minimal, light_frost, accent]
+        .into_iter()
+        .zip(BUILTIN_LOOK_NAMES)
+        .map(|(f, n)| LookPreset::from_fence(n, &f))
+        .collect()
 }
 
 impl Layout {

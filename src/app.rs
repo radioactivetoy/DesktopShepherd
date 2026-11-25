@@ -131,6 +131,8 @@ struct UiState {
     start_draw: bool,
     /// When the mouse was last over each box (for fading).
     hover_at: HashMap<u64, Instant>,
+    /// Boxes the mouse is over right now (for the hover lift of the drop shadow).
+    hot_boxes: std::collections::HashSet<u64>,
     /// Pages: how many there are and which is shown (for the box menu), and a switch asked
     /// for from the tray.
     page_count: u32,
@@ -1759,6 +1761,9 @@ impl DeskApp {
                     }
                     // Optional drop shadow: its own window below the box (only exists while on).
                     crate::shadow::sync(hw, fence.shadow, fence.corner);
+                    if fence.shadow {
+                        crate::shadow::set_lift(hw, fence.hover_lift, self.ui.hot_boxes.contains(&id));
+                    }
                 }
                 if drew {
                     DRAW_STATS.1.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -1915,6 +1920,12 @@ fn fence_window(
         st.hover_open.remove(&fence.id);
     }
     let showing_full = fence.expanded || st.hover_open.contains(&fence.id);
+    // The mouse over this box (the box redraws when it enters and leaves).
+    if pointer_inside {
+        st.hot_boxes.insert(fence.id);
+    } else {
+        st.hot_boxes.remove(&fence.id);
+    }
 
     // Native Windows 11 rounded corners matching the box's corner setting.
     let want = fence.corner.round() as i32;
@@ -1998,10 +2009,11 @@ fn fence_window(
         if st.glass {
             // Only the border: Windows draws the glass, tint and rounded corners. Drawn on the very
             // edge, so no glass shows outside it.
+            fv::paint_body_overlays(&painter, fence, rect, 1.0);
             painter.rect_stroke(
                 rect,
                 egui::CornerRadius::same(fence.corner.round().clamp(0.0, 40.0) as u8),
-                fv::border_stroke(fence, 1.0),
+                fv::border_stroke_h(fence, 1.0, pointer_inside),
                 egui::StrokeKind::Inside,
             );
             if fence.raised {
@@ -2010,7 +2022,7 @@ fn fence_window(
         } else {
             // No glass available: a solid dark background with the box's tint and border.
             painter.rect_filled(rect, 0.0, Color32::from_rgb(30, 30, 34));
-            fv::paint_background(&painter, fence, rect, 1.0);
+            fv::paint_background_h(&painter, fence, rect, 1.0, pointer_inside);
         }
         if hovering_files && !fence.auto_sort {
             painter.rect_stroke(
@@ -2120,7 +2132,8 @@ fn fence_window(
         if title.secondary_clicked() {
             open_menu(ctx, st, MenuTarget::Fence(fence.id));
         }
-        fv::paint_title_x(&painter, fence, showing_full, a.title, 1.0, title.hovered());
+        let item_count = if fence.widget.is_some() { None } else { Some(tabs.iter().map(|t| t.1.len()).sum::<usize>()) };
+        fv::paint_title_x(&painter, fence, showing_full, a.title, 1.0, title.hovered(), pointer_inside, item_count);
 
         // Renaming box or tab.
         if let Some((rid, tab, mut text)) = st.renaming.take() {
@@ -2347,10 +2360,10 @@ fn fence_window(
                         let renaming_this = st.icon_rename.as_ref().map(|r| r.box_id == fence.id && r.path.eq_ignore_ascii_case(&it.path)).unwrap_or(false);
                         if renaming_this {
                             let plain = fv::TextStyle { captions: false, ..style.clone() };
-                            fv::paint_item(ui.painter(), icons, it, cr, icon, 1.0, hl, &plain);
+                            fv::paint_item(ui.painter(), icons, it, cr, icon, 1.0, hl, &plain, resp.hovered(), selected);
                             rename_in_place(ui, st, actions, cr, icon, &style);
                         } else {
-                            fv::paint_item(ui.painter(), icons, it, cr, icon, 1.0, hl, &style);
+                            fv::paint_item(ui.painter(), icons, it, cr, icon, 1.0, hl, &style, resp.hovered(), selected);
                         }
                         if resp.clicked() {
                             // Click: just this icon; Ctrl+click: add or remove it.
@@ -2698,6 +2711,304 @@ fn slider_row(ui: &mut egui::Ui, label: &str, value: String, slider: &mut dyn Fn
     changed
 }
 
+/// Symbols the title can carry (Segoe Fluent Icons): folder, music, games, star, heart, code,
+/// document, picture, video, download, settings, globe, home, work, cloud, calendar, chat, shopping,
+/// book, terminal, phone, lightning, pin, flag.
+const TITLE_ICONS: [char; 24] = [
+    '\u{E8B7}', '\u{E8D6}', '\u{E7FC}', '\u{E734}', '\u{EB51}', '\u{E943}', '\u{E8A5}', '\u{E91B}', '\u{E714}', '\u{E896}', '\u{E713}', '\u{E774}',
+    '\u{E80F}', '\u{E821}', '\u{E753}', '\u{E787}', '\u{E8BD}', '\u{E719}', '\u{E736}', '\u{E756}', '\u{E717}', '\u{E945}', '\u{E718}', '\u{E7C1}',
+];
+
+/// A labelled row of choice buttons (like the Title / Tabs switches). Returns the one clicked.
+fn pick_row(ui: &mut egui::Ui, label: &str, options: &[&str], current: usize, width: f32) -> Option<usize> {
+    let mut pick = None;
+    ui.horizontal(|ui| {
+        ui.add_space(14.0);
+        let (lr, _) = ui.allocate_exact_size(Vec2::new(70.0, 30.0), Sense::hover());
+        ui.painter().text(Pos2::new(lr.min.x, lr.center().y), egui::Align2::LEFT_CENTER, label, FontId::proportional(14.0), crate::theme::text());
+        ui.spacing_mut().item_spacing.x = 4.0;
+        for (i, text) in options.iter().enumerate() {
+            let on = i == current;
+            let fill = if on { accent().linear_multiply(0.35) } else { crate::theme::hover() };
+            let b = egui::Button::new(egui::RichText::new(*text).size(13.0).color(if on { crate::theme::strong() } else { crate::theme::soft() }))
+                .fill(fill)
+                .corner_radius(egui::CornerRadius::same(4))
+                .min_size(Vec2::new(width, 26.0));
+            if ui.add(b).clicked() && !on {
+                pick = Some(i);
+            }
+        }
+    });
+    pick
+}
+
+/// A checkbox indented like the other rows. Returns true if toggled.
+fn check_row(ui: &mut egui::Ui, value: &mut bool, label: &str) -> bool {
+    ui.horizontal(|ui| {
+        ui.add_space(14.0);
+        ui.checkbox(value, label).changed()
+    })
+    .inner
+}
+
+/// A folded group of options (closed at first, so the window stays short).
+fn group(ui: &mut egui::Ui, id: &str, title: &str, body: impl FnOnce(&mut egui::Ui) -> bool) -> bool {
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        ui.add_space(8.0);
+        ui.vertical(|ui| {
+            egui::CollapsingHeader::new(egui::RichText::new(title).size(14.0).color(crate::theme::text())).id_salt(id).show(ui, |ui| {
+                changed = body(ui);
+            });
+        });
+    });
+    changed
+}
+
+/// Personalize > "Header": style, alignment, symbol, colour, weight, badge and the on-hover switch.
+fn header_options(ui: &mut egui::Ui, fence: &mut Fence) -> bool {
+    let mut dirty = false;
+    if let Some(i) = pick_row(ui, t("Style"), &[t("None"), t("Band"), t("Line")], fence.header_style as usize, 60.0) {
+        fence.header_style = i as u8;
+        dirty = true;
+    }
+    if let Some(i) = pick_row(ui, t("Align"), &[t("Centre"), t("Left"), t("Right")], fence.title_align as usize, 60.0) {
+        fence.title_align = i as u8;
+        dirty = true;
+    }
+    if let Some(i) = pick_row(ui, t("Weight"), &[t("Normal"), t("Bold"), t("Light")], fence.title_weight as usize, 60.0) {
+        fence.title_weight = i as u8;
+        dirty = true;
+    }
+    // Title colour: the box's text colour unless one is picked.
+    let shown = fence.title_color.unwrap_or(fence.text_color);
+    let mut c = Color32::from_rgb(shown[0], shown[1], shown[2]);
+    if color_row(ui, "title-colour", t("Title colour…"), &mut c, false) {
+        let [r, g, b, _] = c.to_srgba_unmultiplied();
+        fence.title_color = Some([r, g, b]);
+        dirty = true;
+    }
+    if fence.title_color.is_some() {
+        ui.horizontal(|ui| {
+            ui.add_space(14.0);
+            if ui.button(t("Same as the text colour")).clicked() {
+                fence.title_color = None;
+                dirty = true;
+            }
+        });
+    }
+    sep(ui);
+    ui.horizontal(|ui| {
+        ui.add_space(14.0);
+        ui.label(egui::RichText::new(t("Symbol before the title")).size(12.0).color(crate::theme::faint()));
+    });
+    ui.horizontal(|ui| {
+        ui.add_space(14.0);
+        ui.spacing_mut().item_spacing = Vec2::new(3.0, 3.0);
+        ui.vertical(|ui| {
+            ui.horizontal_wrapped(|ui| {
+                let none_on = fence.title_icon.is_empty();
+                let nb = egui::Button::new(egui::RichText::new(t("None")).size(12.0).color(crate::theme::soft()))
+                    .fill(if none_on { accent().linear_multiply(0.35) } else { crate::theme::hover() })
+                    .corner_radius(egui::CornerRadius::same(4))
+                    .min_size(Vec2::new(44.0, 30.0));
+                if ui.add(nb).clicked() && !none_on {
+                    fence.title_icon.clear();
+                    dirty = true;
+                }
+                for ch in TITLE_ICONS {
+                    let s = ch.to_string();
+                    let on = fence.title_icon == s;
+                    let b = egui::Button::new(egui::RichText::new(s.clone()).size(17.0).color(crate::theme::text()))
+                        .fill(if on { accent().linear_multiply(0.35) } else { crate::theme::hover() })
+                        .corner_radius(egui::CornerRadius::same(4))
+                        .min_size(Vec2::new(30.0, 30.0));
+                    if ui.add(b).clicked() && !on {
+                        fence.title_icon = s;
+                        dirty = true;
+                    }
+                }
+            });
+        });
+    });
+    ui.horizontal(|ui| {
+        ui.add_space(14.0);
+        ui.label(egui::RichText::new(t("Or an emoji")).size(13.0).color(crate::theme::soft()));
+        let mut text = fence.title_icon.clone();
+        if ui.add(egui::TextEdit::singleline(&mut text).desired_width(70.0)).changed() {
+            // One symbol: an emoji may be several code points, so keep a short run, no spaces.
+            fence.title_icon = text.chars().filter(|c| !c.is_whitespace()).take(8).collect();
+            dirty = true;
+        }
+    });
+    sep(ui);
+    dirty |= check_row(ui, &mut fence.title_caps, t("UPPERCASE title"));
+    dirty |= check_row(ui, &mut fence.title_on_hover, t("Show the title only when the mouse is over"));
+    if fence.widget.is_none() {
+        dirty |= check_row(ui, &mut fence.show_count, t("Number of items badge"));
+    }
+    dirty
+}
+
+/// Personalize > "Effects": colour fade, acrylic texture, accent border, hover lift.
+fn effect_options(ui: &mut egui::Ui, fence: &mut Fence) -> bool {
+    let mut dirty = false;
+    let mut fade = fence.gradient.is_some();
+    if check_row(ui, &mut fade, t("Colour fade")) {
+        fence.gradient = if fade { Some(crate::model::Gradient::default()) } else { None };
+        dirty = true;
+    }
+    if let Some(g) = fence.gradient.as_mut() {
+        let mut c = Color32::from_rgb(g.color2[0], g.color2[1], g.color2[2]);
+        if color_row(ui, "fade-colour", t("Fade colour…"), &mut c, false) {
+            let [r, gg, b, _] = c.to_srgba_unmultiplied();
+            g.color2 = [r, gg, b];
+            dirty = true;
+        }
+        let pct = format!("{}%", (g.alpha2 as f32 / 2.55).round());
+        dirty |= slider_row(ui, t("Strength"), pct, &mut |ui| ui.add(egui::Slider::new(&mut g.alpha2, 0..=255).show_value(false)).changed());
+        if let Some(i) = pick_row(ui, t("Direction"), &[t("Vertical"), t("Horizontal"), t("Diagonal")], g.angle as usize, 66.0) {
+            g.angle = i as u8;
+            dirty = true;
+        }
+    }
+    dirty |= check_row(ui, &mut fence.texture, t("Acrylic texture"));
+    if let Some(i) = pick_row(ui, t("Accent border"), &[t("Off"), t("Always"), t("On hover")], fence.accent_border as usize, 60.0) {
+        fence.accent_border = i as u8;
+        dirty = true;
+    }
+    dirty |= check_row(ui, &mut fence.hover_lift, t("Lift on hover (border and drop shadow)"));
+    dirty
+}
+
+/// Personalize > Icons: density presets and the caption / hover options.
+fn icon_options(ui: &mut egui::Ui, fence: &mut Fence) -> bool {
+    let mut dirty = false;
+    // (icon size, spacing, caption size); Normal is the default look.
+    const DENSITY: [(u32, f32, f32); 3] = [(32, 56.0, 11.0), (48, 0.0, 12.0), (64, 104.0, 13.0)];
+    let cur = DENSITY.iter().position(|d| fence.icon_size == d.0 && (fence.icon_spacing - d.1).abs() < 0.5 && (fence.caption_size - d.2).abs() < 0.5);
+    if let Some(i) = pick_row(ui, t("Density"), &[t("Compact"), t("Normal"), t("Roomy")], cur.unwrap_or(usize::MAX), 66.0) {
+        let (s, sp, cs) = DENSITY[i];
+        fence.icon_size = s;
+        fence.icon_spacing = sp;
+        fence.caption_size = cs;
+        dirty = true;
+    }
+    dirty |= check_row(ui, &mut fence.name_backing, t("Soft backing behind the names"));
+    dirty |= check_row(ui, &mut fence.hover_zoom, t("Enlarge the icon under the mouse"));
+    dirty |= check_row(ui, &mut fence.calm_icons, t("Calm icons (full colour on hover)"));
+    dirty
+}
+
+/// Top of the Look tab: pick a built-in or saved look for this box, save the current one under a
+/// name, delete one of the person's own. Returns true if the box's look changed or presets changed.
+fn presets_row(ui: &mut egui::Ui, fence: &mut Fence, presets: &mut Vec<crate::model::LookPreset>) -> bool {
+    use crate::model::{builtin_look_presets, LookPreset, MAX_LOOK_PRESETS};
+    let mut dirty = false;
+    let builtin = builtin_look_presets();
+    let sel_id = egui::Id::new("preset-sel");
+    let save_id = egui::Id::new("preset-saving");
+    let name_id = egui::Id::new("preset-name");
+    let del_id = egui::Id::new("preset-confirm-del");
+    // Selected entry: 0.. built-in, then the person's own.
+    let mut sel: Option<usize> = ui.data(|d| d.get_temp(sel_id));
+    let mut saving: bool = ui.data(|d| d.get_temp(save_id)).unwrap_or(false);
+    let mut name: String = ui.data(|d| d.get_temp(name_id)).unwrap_or_default();
+    let mut confirm_del: bool = ui.data(|d| d.get_temp(del_id)).unwrap_or(false);
+    if sel.map(|s| s >= builtin.len() + presets.len()).unwrap_or(false) {
+        sel = None;
+    }
+    fn entry_name(presets: &[crate::model::LookPreset], i: usize) -> String {
+        match crate::model::BUILTIN_LOOK_NAMES.get(i) {
+            Some(n) => t(n).to_string(),
+            None => presets.get(i - crate::model::BUILTIN_LOOK_NAMES.len()).map(|p| p.name.clone()).unwrap_or_default(),
+        }
+    }
+    ui.horizontal(|ui| {
+        ui.add_space(12.0);
+        ui.label(egui::RichText::new(t("Presets")).size(14.0).color(crate::theme::text()));
+        let shown = sel.map(|i| entry_name(presets, i)).unwrap_or_else(|| t("Choose a look…").to_string());
+        let mut picked: Option<usize> = None;
+        egui::ComboBox::from_id_salt("look-presets").selected_text(shown).width(170.0).show_ui(ui, |ui| {
+            for i in 0..builtin.len() + presets.len() {
+                if i == builtin.len() && !presets.is_empty() {
+                    ui.separator();
+                }
+                if ui.selectable_label(sel == Some(i), entry_name(presets, i)).clicked() {
+                    picked = Some(i);
+                }
+            }
+        });
+        if let Some(i) = picked {
+            let look = if i < builtin.len() { &builtin[i].look } else { &presets[i - builtin.len()].look };
+            fence.copy_look_from(look);
+            sel = Some(i);
+            confirm_del = false;
+            dirty = true;
+        }
+        if ui.button(t("Save as preset…")).clicked() {
+            saving = true;
+            confirm_del = false;
+        }
+        let own = sel.filter(|s| *s >= builtin.len());
+        if ui.add_enabled(own.is_some(), egui::Button::new(if confirm_del { t("Really delete?") } else { t("Delete") })).clicked() {
+            if confirm_del {
+                if let Some(s) = own {
+                    presets.remove(s - builtin.len());
+                    sel = None;
+                    dirty = true;
+                }
+                confirm_del = false;
+            } else {
+                confirm_del = true;
+            }
+        }
+    });
+    if saving {
+        ui.horizontal(|ui| {
+            ui.add_space(12.0);
+            ui.add(egui::TextEdit::singleline(&mut name).desired_width(170.0).hint_text(t("Name of the preset")));
+            let clean = name.trim().to_string();
+            let known = presets.iter().any(|p| p.name.eq_ignore_ascii_case(&clean));
+            let room = known || presets.len() < MAX_LOOK_PRESETS;
+            if ui.add_enabled(!clean.is_empty() && room, egui::Button::new(t("Save"))).clicked() {
+                let p = LookPreset::from_fence(&clean, fence);
+                let at = match presets.iter().position(|q| q.name.eq_ignore_ascii_case(&clean)) {
+                    Some(i) => {
+                        presets[i] = p;
+                        i
+                    }
+                    None => {
+                        presets.push(p);
+                        presets.len() - 1
+                    }
+                };
+                sel = Some(builtin.len() + at);
+                saving = false;
+                name.clear();
+                dirty = true;
+            }
+            if ui.button(t("Cancel")).clicked() {
+                saving = false;
+                name.clear();
+            }
+        });
+    }
+    ui.data_mut(|d| {
+        match sel {
+            Some(s) => d.insert_temp(sel_id, s),
+            None => {
+                d.remove::<usize>(sel_id);
+            }
+        }
+        d.insert_temp(save_id, saving);
+        d.insert_temp(name_id, name);
+        d.insert_temp(del_id, confirm_del);
+    });
+    sep(ui);
+    dirty
+}
+
 /// Personalize window, left column: colour, glass and border. Returns true if the look changed.
 fn look_left(ui: &mut egui::Ui, fence: &mut Fence) -> bool {
     let mut dirty = false;
@@ -2758,6 +3069,8 @@ fn look_left(ui: &mut egui::Ui, fence: &mut Fence) -> bool {
                     fence.border_color = border.to_srgba_unmultiplied();
                     dirty = true;
                 }
+                sep(ui);
+                dirty |= group(ui, "look-effects", t("Effects"), |ui| effect_options(ui, fence));
     dirty
 }
 
@@ -2811,6 +3124,7 @@ fn look_right(ui: &mut egui::Ui, fence: &mut Fence, actions: &mut Vec<Act>) -> b
                     dirty |= slider_row(ui, t("Size"), is, &mut |ui| ui.add(egui::Slider::new(&mut fence.icon_size, 16..=128).step_by(4.0).show_value(false)).changed());
                     let sp = if fence.icon_spacing <= 0.0 { t("auto").to_string() } else { format!("{}", fence.icon_spacing.round()) };
                     dirty |= slider_row(ui, t("Spacing"), sp, &mut |ui| ui.add(egui::Slider::new(&mut fence.icon_spacing, 0.0..=200.0).step_by(2.0).show_value(false)).changed());
+                    dirty |= group(ui, "look-icon-extras", t("Icon extras"), |ui| icon_options(ui, fence));
                 }
                 sep(ui);
                 // Two-way switches for where the title and the tabs go.
@@ -2858,6 +3172,7 @@ fn look_right(ui: &mut egui::Ui, fence: &mut Fence, actions: &mut Vec<Act>) -> b
                     fence.tab_pos = if right { TabPos::Right } else { TabPos::Top };
                     dirty = true;
                 }
+                dirty |= group(ui, "look-header", t("Header"), |ui| header_options(ui, fence));
                 sep(ui);
                 if row(ui, icon::COLOR, t("Apply this look to all boxes"), None, true).clicked() {
                     actions.push(Act::ApplyLookToAll(fence.id));
@@ -5156,6 +5471,7 @@ impl DeskApp {
             let mut close = false;
             let mut dirty = false;
             let fences = &mut self.layout.fences;
+            let presets = &mut self.layout.look_presets;
             let actions = &mut self.actions;
             let mut tab = self.personalize_tab;
             let mut resize = false;
@@ -5199,6 +5515,7 @@ impl DeskApp {
                                 }
                             }
                             _ => {
+                                dirty |= presets_row(ui, fence, presets);
                                 ui.columns(2, |cols| {
                                     dirty |= look_left(&mut cols[0], fence);
                                     dirty |= look_right(&mut cols[1], fence, actions);

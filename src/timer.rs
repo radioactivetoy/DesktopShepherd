@@ -4,7 +4,7 @@
 //! redraws while running (once a second).
 
 use crate::i18n::{t, tf};
-use crate::widgets::{DeskWidget, WidgetOutput};
+use crate::widgets::{look_settings, text_scale, widget_accent, DeskWidget, WidgetOutput};
 use egui::{Color32, Pos2, Sense, Ui};
 use serde_json::{json, Value};
 use std::time::Duration;
@@ -36,6 +36,8 @@ pub struct Timer;
 impl DeskWidget for Timer {
     fn ui(&self, ui: &mut Ui, data: &mut Value) -> WidgetOutput {
         let mut out = WidgetOutput::default();
+        let sc = text_scale(data);
+        let accent = widget_accent(data, Color32::from_rgb(110, 190, 255));
         // Saved state: length (ms), end (epoch ms, 0 = stopped), left when paused (ms), done flag,
         // pomodoro on and which round.
         let len = data["len"].as_i64().unwrap_or(25 * 60_000).max(1000);
@@ -77,9 +79,9 @@ impl DeskWidget for Timer {
             t("Timer")
         };
         let p = ui.painter();
-        p.text(Pos2::new(full.center().x, full.min.y + 12.0), egui::Align2::CENTER_CENTER, label, egui::FontId::proportional(12.5), crate::ink::gray(200));
+        p.text(Pos2::new(full.center().x, full.min.y + 12.0), egui::Align2::CENTER_CENTER, label, egui::FontId::proportional(12.5 * sc), crate::ink::gray(200));
         let shown = if running { left } else if paused > 0 { paused } else { data["len"].as_i64().unwrap_or(len) };
-        let big = (full.height() * 0.32).clamp(22.0, 54.0);
+        let big = (full.height() * 0.32).clamp(22.0, 54.0) * sc;
         p.text(Pos2::new(full.center().x, full.min.y + 18.0 + big * 0.7), egui::Align2::CENTER_CENTER, mmss(shown), egui::FontId::proportional(big), crate::ink::strong());
         // Progress ring would be nice; a thin bar is lighter.
         let bar_y = full.min.y + 22.0 + big * 1.35;
@@ -88,9 +90,10 @@ impl DeskWidget for Timer {
         let total = data["len"].as_i64().unwrap_or(len).max(1) as f32;
         let mut fill = bar;
         fill.set_width(bar.width() * (1.0 - shown as f32 / total).clamp(0.0, 1.0));
-        p.rect_filled(fill, 1.5, Color32::from_rgb(110, 190, 255));
+        p.rect_filled(fill, 1.5, accent);
         // Buttons: start / pause, reset; presets below.
         let mut child = ui.new_child(egui::UiBuilder::new().max_rect(egui::Rect::from_min_max(Pos2::new(full.min.x, bar_y + 8.0), full.max)).layout(egui::Layout::top_down(egui::Align::Center)));
+        crate::widgets::scale_text_styles(&mut child, sc);
         child.horizontal(|ui| {
             let start_label = if running { t("Pause") } else if paused > 0 { t("Resume") } else { t("Start") };
             if ui.button(start_label).clicked() {
@@ -149,6 +152,7 @@ impl DeskWidget for Timer {
 
     fn settings(&self, ui: &mut Ui, data: &mut Value) -> bool {
         let mut changed = false;
+        changed |= look_settings(ui, data, true);
         let mut pomodoro = data["pomodoro"].as_bool().unwrap_or(false);
         if ui.checkbox(&mut pomodoro, t("Pomodoro: 25 minutes of work, 5 of rest, a longer rest every fourth time")).changed() {
             data["pomodoro"] = json!(pomodoro);

@@ -41,6 +41,9 @@ mod imp {
         seen: Option<(Key, std::time::Instant)>,
         /// Size key whose picture could not be drawn (not retried until the size changes).
         failed: Option<Key>,
+        /// Strength the picture is shown with (SourceConstantAlpha): 255 normally; with the box's
+        /// hover lift on, a bit less at rest and 255 while the mouse is over the box.
+        alpha: u8,
     }
 
     /// (box width, box height, corner radius bits, scale bits).
@@ -187,7 +190,7 @@ mod imp {
 
     /// Draws the shadow picture and gives it to the layered window. The bitmap and DCs are freed
     /// right away (Windows keeps its own copy).
-    fn render(hwnd: isize, bw: i32, bh: i32, m: i32, corner_px: f32, scale: f32, at: (i32, i32)) -> bool {
+    fn render(hwnd: isize, bw: i32, bh: i32, m: i32, corner_px: f32, scale: f32, at: (i32, i32), alpha: u8) -> bool {
         let (w, h) = (bw + 2 * m, bh + 2 * m);
         if w <= 0 || h <= 0 {
             return false;
@@ -236,7 +239,7 @@ mod imp {
                 let dst = POINT { x: at.0 - m, y: at.1 - m };
                 let size = SIZE { cx: w, cy: h };
                 let src = POINT { x: 0, y: 0 };
-                let blend = BLENDFUNCTION { BlendOp: AC_SRC_OVER as u8, BlendFlags: 0, SourceConstantAlpha: 255, AlphaFormat: AC_SRC_ALPHA as u8 };
+                let blend = BLENDFUNCTION { BlendOp: AC_SRC_OVER as u8, BlendFlags: 0, SourceConstantAlpha: alpha, AlphaFormat: AC_SRC_ALPHA as u8 };
                 ok = UpdateLayeredWindow(HWND(hwnd as *mut _), screen, Some(&dst), Some(&size), mem, Some(&src), COLORREF(0), Some(&blend), ULW_ALPHA).is_ok();
                 SelectObject(mem, old);
                 let _ = DeleteObject(HGDIOBJ(bmp.0));
@@ -316,6 +319,7 @@ mod imp {
                             waiting: false,
                             seen: None,
                             failed: None,
+                            alpha: 255,
                         },
                     ));
                 }
@@ -342,7 +346,7 @@ mod imp {
                         crate::runloop::wake_after(SETTLE + std::time::Duration::from_millis(10));
                         return;
                     }
-                    e.hwnd
+                    (e.hwnd, e.alpha)
                 } else {
                     if e.at != (wr.left, wr.top) {
                         let _ = SetWindowPos(HWND(e.hwnd as *mut _), None, wr.left - m, wr.top - m, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
@@ -358,7 +362,8 @@ mod imp {
                 }
             };
             // Step 2 (not locked): draw the picture and hand it to Windows.
-            let ok = render(hwnd, bw, bht, m, corner_px, scale, (wr.left, wr.top));
+            let (hwnd, alpha) = hwnd;
+            let ok = render(hwnd, bw, bht, m, corner_px, scale, (wr.left, wr.top), alpha);
             // Step 3 (locked): note the result.
             let Ok(mut all) = SHADOWS.lock() else { return };
             let Some(e) = find(&mut all, b) else { return };
@@ -378,6 +383,27 @@ mod imp {
                 log_once("could not draw the shadow");
                 e.failed = Some(key);
             }
+        }
+    }
+
+    /// Hover lift: with `on`, the shadow rests a bit lighter and becomes full strength while `hot`
+    /// (the mouse is over the box). Only the blend strength changes: Windows keeps the picture, so
+    /// nothing is redrawn. Cheap no-op when nothing changed.
+    pub fn set_lift(b: isize, on: bool, hot: bool) {
+        let want: u8 = if on && !hot { 170 } else { 255 };
+        let Ok(mut all) = SHADOWS.lock() else { return };
+        let Some(e) = find(&mut all, b) else { return };
+        if e.alpha == want {
+            return;
+        }
+        e.alpha = want;
+        if e.drawn.is_none() {
+            return; // the first picture will use the new strength
+        }
+        unsafe {
+            let blend = BLENDFUNCTION { BlendOp: AC_SRC_OVER as u8, BlendFlags: 0, SourceConstantAlpha: want, AlphaFormat: AC_SRC_ALPHA as u8 };
+            // No new picture, position or size: only the blend changes.
+            let _ = UpdateLayeredWindow(HWND(e.hwnd as *mut _), None, None, None, None, None, COLORREF(0), Some(&blend), ULW_ALPHA);
         }
     }
 
@@ -453,11 +479,12 @@ mod imp {
 }
 
 #[cfg(windows)]
-pub use imp::{destroy, follow, restack, set_faded, set_visible, sync, window_of};
+pub use imp::{destroy, follow, restack, set_faded, set_lift, set_visible, sync, window_of};
 
 #[cfg(not(windows))]
 mod stub {
     pub fn sync(_b: isize, _on: bool, _corner_pts: f32) {}
+    pub fn set_lift(_b: isize, _on: bool, _hot: bool) {}
     pub fn follow(_b: isize, _x: i32, _y: i32) {}
     pub fn restack(_b: isize) {}
     pub fn set_visible(_b: isize, _show: bool) {}

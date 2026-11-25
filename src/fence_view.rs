@@ -54,11 +54,14 @@ pub struct TextStyle {
     pub shadow: bool,
     pub captions: bool,
     pub size: f32,
+    pub backing: bool,
+    pub zoom: bool,
+    pub calm: bool,
 }
 
 pub fn text_style(fence: &Fence) -> TextStyle {
     let [r, g, b] = ink_rgb(fence.text_color);
-    TextStyle { family: family(fence), color: Color32::from_rgb(r, g, b), shadow: fence.text_shadow, captions: fence.show_captions, size: fence.caption_size }
+    TextStyle { family: family(fence), color: Color32::from_rgb(r, g, b), shadow: fence.text_shadow, captions: fence.show_captions, size: fence.caption_size, backing: fence.name_backing, zoom: fence.hover_zoom, calm: fence.calm_icons }
 }
 
 /// Everything about the desktop a box needs to draw itself.
@@ -239,13 +242,102 @@ pub fn areas_x(fence: &Fence, expanded: bool, rect: Rect, tab_count: usize, scal
 }
 
 pub fn paint_background(painter: &egui::Painter, fence: &Fence, rect: Rect, scale: f32) {
+    paint_background_h(painter, fence, rect, scale, false)
+}
+
+/// `paint_background` with the mouse-over state (for the accent border and the hover lift).
+pub fn paint_background_h(painter: &egui::Painter, fence: &Fence, rect: Rect, scale: f32, hover: bool) {
     let [r, g, b] = fence.color;
     let fill = Color32::from_rgba_unmultiplied(r, g, b, fence.alpha);
     let radius = CornerRadius::same((fence.corner * scale).round().clamp(0.0, 40.0) as u8);
-    painter.rect(rect, radius, fill, border_stroke(fence, scale), egui::StrokeKind::Inside);
+    painter.rect_filled(rect, radius, fill);
+    paint_body_overlays(painter, fence, rect, scale);
+    painter.rect_stroke(rect, radius, border_stroke_h(fence, scale, hover), egui::StrokeKind::Inside);
     if fence.raised {
         paint_raised(painter, rect.shrink(0.5 * scale), (fence.corner * scale).clamp(0.0, 40.0), scale);
     }
+}
+
+/// The optional colour fade and acrylic noise over the box body (on top of the glass tint).
+pub fn paint_body_overlays(painter: &egui::Painter, fence: &Fence, rect: Rect, scale: f32) {
+    if let Some(g) = &fence.gradient {
+        let pts = rounded_points(rect, (fence.corner * scale).clamp(0.0, 40.0), 8);
+        let t_at = |p: Pos2| {
+            let u = ((p.x - rect.min.x) / rect.width().max(1.0)).clamp(0.0, 1.0);
+            let v = ((p.y - rect.min.y) / rect.height().max(1.0)).clamp(0.0, 1.0);
+            match g.angle {
+                1 => u,
+                2 => (u + v) / 2.0,
+                _ => v,
+            }
+        };
+        let col = |p: Pos2| Color32::from_rgba_unmultiplied(g.color2[0], g.color2[1], g.color2[2], (g.alpha2 as f32 * t_at(p)).round().clamp(0.0, 255.0) as u8);
+        let mut mesh = egui::Mesh::default();
+        let c = rect.center();
+        mesh.colored_vertex(c, col(c));
+        for p in &pts {
+            mesh.colored_vertex(*p, col(*p));
+        }
+        let n = pts.len() as u32;
+        for i in 0..n {
+            mesh.add_triangle(0, 1 + i, 1 + (i + 1) % n);
+        }
+        painter.add(egui::Shape::mesh(mesh));
+    }
+    if fence.texture {
+        paint_noise(painter, rect.shrink(1.0 * scale));
+    }
+}
+
+/// Side of the noise tile in pixels.
+const NOISE: usize = 128;
+
+/// The noise picture: grey specks at about 4-6 % opacity, made once per drawing context.
+fn noise_texture(ctx: &egui::Context) -> egui::TextureHandle {
+    let id = egui::Id::new("acrylic-noise");
+    if let Some(h) = ctx.data(|d| d.get_temp::<egui::TextureHandle>(id)) {
+        return h;
+    }
+    let mut s: u32 = 0x9E37_79B9;
+    let mut next = || {
+        s ^= s << 13;
+        s ^= s >> 17;
+        s ^= s << 5;
+        s
+    };
+    let mut px = Vec::with_capacity(NOISE * NOISE);
+    for _ in 0..NOISE * NOISE {
+        let r = next();
+        let v = (r & 0xFF) as u8;
+        let a = 6 + ((r >> 8) & 0x7) as u8; // 6..13 of 255
+        px.push(Color32::from_rgba_unmultiplied(v, v, v, a));
+    }
+    let img = egui::ColorImage { size: [NOISE, NOISE], pixels: px };
+    let h = ctx.load_texture("acrylic-noise", img, egui::TextureOptions::LINEAR);
+    ctx.data_mut(|d| d.insert_temp(id, h.clone()));
+    h
+}
+
+/// Tiles the noise over `rect` (one texel per screen pixel). The renderer clamps texture
+/// coordinates, so each tile is its own quad; all tiles go into one mesh.
+fn paint_noise(painter: &egui::Painter, rect: Rect) {
+    let tex = noise_texture(painter.ctx());
+    let ppp = painter.ctx().pixels_per_point().max(0.5);
+    let tile = NOISE as f32 / ppp;
+    let mut mesh = egui::Mesh::with_texture(tex.id());
+    let mut y = rect.min.y;
+    while y < rect.max.y {
+        let h = tile.min(rect.max.y - y);
+        let mut x = rect.min.x;
+        while x < rect.max.x {
+            let w = tile.min(rect.max.x - x);
+            let uv = Rect::from_min_max(Pos2::ZERO, Pos2::new(w / tile, h / tile));
+            mesh.add_rect_with_uv(Rect::from_min_size(Pos2::new(x, y), Vec2::new(w, h)), uv, Color32::WHITE);
+            x += tile;
+        }
+        y += tile;
+    }
+    painter.add(egui::Shape::mesh(mesh));
 }
 
 /// The points of a rounded rectangle, clockwise from the start of the top-left corner; `n`
@@ -318,14 +410,21 @@ pub fn paint_raised(painter: &egui::Painter, rect: Rect, rad: f32, scale: f32) {
     painter.add(egui::Shape::line(top, Stroke::new((1.5 * scale).max(1.0), Color32::from_white_alpha(170))));
 }
 
-/// The box's border (its colour and thickness; none at thickness 0).
-pub fn border_stroke(fence: &Fence, scale: f32) -> Stroke {
+/// The box border (colour, thickness; none at thickness 0) with the optional accent colour and hover lift (brighter while the mouse is over).
+pub fn border_stroke_h(fence: &Fence, scale: f32, hover: bool) -> Stroke {
     let [br, bg, bb, ba] = fence.border_color;
-    if fence.border_width <= 0.0 {
-        Stroke::NONE
-    } else {
-        Stroke::new(fence.border_width * scale, Color32::from_rgba_unmultiplied(br, bg, bb, ba))
+    let accent = fence.accent_border == 1 || (fence.accent_border == 2 && hover);
+    if fence.border_width <= 0.0 && !accent {
+        return Stroke::NONE;
     }
+    let width = if accent { fence.border_width.max(1.0) } else { fence.border_width };
+    let mut c = if accent { crate::app::accent() } else { Color32::from_rgba_unmultiplied(br, bg, bb, ba) };
+    if hover && fence.hover_lift {
+        let [r, g, b, a] = c.to_srgba_unmultiplied();
+        let up = |v: u8| (v as f32 + (255.0 - v as f32) * 0.35).round() as u8;
+        c = Color32::from_rgba_unmultiplied(up(r), up(g), up(b), (a as u16 + 90).min(255) as u8);
+    }
+    Stroke::new(width * scale, c)
 }
 
 /// On a bright backdrop (dark ink) a light text colour turns dark; a dark or coloured choice stays.
@@ -353,20 +452,72 @@ fn text_color(fence: &Fence, f: f32) -> Color32 {
 /// (like the original's vertical titles and tabs).
 pub fn vertical_text(painter: &egui::Painter, strip: Rect, text: &str, font: FontId, color: Color32) {
     let galley = painter.layout_no_wrap(text.to_string(), font, color);
+    vertical_galley(painter, strip, galley, color, Vec2::ZERO);
+}
+
+fn vertical_galley(painter: &egui::Painter, strip: Rect, galley: std::sync::Arc<egui::Galley>, color: Color32, nudge: Vec2) {
     let w = galley.size().x.min(strip.height() - 6.0);
     let h = galley.size().y;
-    let pos = Pos2::new(strip.center().x + h / 2.0, strip.center().y - w / 2.0);
+    let pos = Pos2::new(strip.center().x + h / 2.0, strip.center().y - w / 2.0) + nudge;
     let clip = painter.with_clip_rect(strip);
     clip.add(egui::epaint::TextShape::new(pos, galley, color).with_angle(std::f32::consts::FRAC_PI_2));
 }
 
 pub fn paint_title(painter: &egui::Painter, fence: &Fence, title: Rect, scale: f32, hovered: bool) {
-    paint_title_x(painter, fence, fence.expanded, title, scale, hovered)
+    // (the layout preview has no mouse: a title that shows on hover is drawn)
+    paint_title_x(painter, fence, fence.expanded, title, scale, hovered, true, None)
 }
 
-/// `paint_title` with the open/rolled-up state given separately (see `areas_x`).
-pub fn paint_title_x(painter: &egui::Painter, fence: &Fence, expanded: bool, title: Rect, scale: f32, hovered: bool) {
-    let color = if hovered { text_color(fence, 1.0) } else { text_color(fence, 0.85) };
+/// The title's colour: the box's text colour (or the title's own), dimmed when not hovered
+/// and for the light weight.
+fn title_color(fence: &Fence, hovered: bool) -> Color32 {
+    let f = if hovered { 1.0 } else { 0.85 } * if fence.title_weight == 2 { 0.7 } else { 1.0 };
+    match fence.title_color {
+        Some([r, g, b]) => {
+            let m = |v: u8| (v as f32 * f).round().clamp(0.0, 255.0) as u8;
+            Color32::from_rgb(m(r), m(g), m(b))
+        }
+        None => text_color(fence, f),
+    }
+}
+
+/// The header band or line behind / under the title.
+fn paint_header(painter: &egui::Painter, fence: &Fence, title: Rect, scale: f32) {
+    match fence.header_style {
+        1 => {
+            let [r, g, b] = fence.color;
+            // A little stronger than the box tint; on a bright backdrop (dark ink) a light band.
+            let fill = if crate::ink::is_dark() { Color32::from_white_alpha(80) } else { Color32::from_rgba_unmultiplied(r, g, b, (fence.alpha as u16 + 45).min(255) as u8) };
+            let bw = fence.border_width.max(0.0) * scale;
+            let rad = ((fence.corner * scale).round().clamp(0.0, 40.0) - bw).max(0.0) as u8;
+            let cr = match fence.title_pos {
+                TitlePos::Left => CornerRadius { nw: rad, sw: rad, ne: 0, se: 0 },
+                TitlePos::Top => CornerRadius { nw: rad, ne: rad, sw: 0, se: 0 },
+                TitlePos::Bottom => CornerRadius { sw: rad, se: rad, nw: 0, ne: 0 },
+                TitlePos::Hidden => return,
+            };
+            painter.rect_filled(title.shrink(bw), cr, fill);
+        }
+        2 => {
+            let m = 8.0 * scale;
+            let (a, b) = match fence.title_pos {
+                TitlePos::Left => (Pos2::new(title.max.x, title.min.y + m), Pos2::new(title.max.x, title.max.y - m)),
+                TitlePos::Top => (Pos2::new(title.min.x + m, title.max.y), Pos2::new(title.max.x - m, title.max.y)),
+                TitlePos::Bottom => (Pos2::new(title.min.x + m, title.min.y), Pos2::new(title.max.x - m, title.min.y)),
+                TitlePos::Hidden => return,
+            };
+            painter.line_segment([a, b], Stroke::new(scale.max(1.0), crate::ink::white_alpha(50)));
+        }
+        _ => {}
+    }
+}
+
+/// `paint_title` with the open/rolled-up state given separately (see `areas_x`), whether the
+/// mouse is over the whole box (`box_hover`, for titles that only show on hover) and the number of
+/// items for the count badge (None = no badge).
+#[allow(clippy::too_many_arguments)]
+pub fn paint_title_x(painter: &egui::Painter, fence: &Fence, expanded: bool, title: Rect, scale: f32, hovered: bool, box_hover: bool, count: Option<usize>) {
+    let color = title_color(fence, hovered);
     if expanded && fence.title_pos == TitlePos::Hidden {
         // No title: only a faint handle while the mouse is over the strip.
         if hovered {
@@ -376,13 +527,65 @@ pub fn paint_title_x(painter: &egui::Painter, fence: &Fence, expanded: bool, tit
         }
         return;
     }
-    let font = FontId::new(fence.title_size * scale, family(fence));
-    if expanded && fence.title_pos == TitlePos::Left {
-        vertical_text(painter, title, &fence.name, font, color);
-    } else {
-        let galley = painter.layout_no_wrap(fence.name.clone(), font, color);
-        let pos = Pos2::new(title.center().x - galley.size().x / 2.0, title.center().y - galley.size().y / 2.0);
-        painter.with_clip_rect(title).galley(pos, galley, color);
+    if expanded {
+        paint_header(painter, fence, title, scale);
+    }
+    let show_text = !(fence.title_on_hover && expanded && !box_hover);
+    if show_text {
+        let font = FontId::new(fence.title_size * scale, family(fence));
+        let mut text = if fence.title_caps { fence.name.to_uppercase() } else { fence.name.clone() };
+        if !fence.title_icon.is_empty() {
+            text = format!("{}  {}", fence.title_icon, text);
+        }
+        let spacing = if fence.title_caps { 1.2 * scale } else { 0.0 };
+        let mut job = LayoutJob::default();
+        job.append(&text, 0.0, egui::TextFormat { font_id: font, color, extra_letter_spacing: spacing, ..Default::default() });
+        let galley = painter.layout_job(job);
+        // The count badge: a small rounded pill with the number.
+        let badge = count.filter(|_| fence.show_count && fence.widget.is_none()).map(|n| {
+            let g = painter.layout_no_wrap(n.to_string(), FontId::new((fence.title_size * 0.7).max(8.0) * scale, family(fence)), color);
+            let pill = Vec2::new((g.size().x + 8.0 * scale).max(g.size().y + 2.0 * scale), g.size().y + 2.0 * scale);
+            (g, pill)
+        });
+        let bold = fence.title_weight == 1;
+        let pill_at = |painter: &egui::Painter, rect: Rect, g: std::sync::Arc<egui::Galley>| {
+            painter.rect_filled(rect, rect.height() / 2.0, crate::ink::white_alpha(34));
+            painter.galley(rect.center() - g.size() / 2.0, g, color);
+        };
+        if expanded && fence.title_pos == TitlePos::Left {
+            let mut strip = title;
+            if let Some((g, pill)) = badge {
+                let pill = Vec2::new(pill.x.min(title.width() - 2.0), pill.y);
+                strip.max.y -= pill.y + 8.0 * scale;
+                let r = Rect::from_center_size(Pos2::new(title.center().x, title.max.y - pill.y / 2.0 - 4.0 * scale), pill);
+                pill_at(&painter.with_clip_rect(title), r, g);
+            }
+            if bold {
+                vertical_galley(painter, strip, galley.clone(), color, Vec2::new(0.0, 0.5 * scale));
+            }
+            vertical_galley(painter, strip, galley, color, Vec2::ZERO);
+        } else {
+            let gap = 6.0 * scale;
+            let total = galley.size().x + badge.as_ref().map(|(_, p)| gap + p.x).unwrap_or(0.0);
+            let lock_pad = if fence.locked { 14.0 * scale } else { 0.0 };
+            let x0 = match fence.title_align {
+                1 => title.min.x + 10.0 * scale,
+                2 => title.max.x - 10.0 * scale - lock_pad - total,
+                _ => title.center().x - total / 2.0,
+            }
+            .max(title.min.x + 2.0 * scale);
+            let clip = painter.with_clip_rect(title);
+            let pos = Pos2::new(x0, title.center().y - galley.size().y / 2.0);
+            if bold {
+                clip.galley(pos + Vec2::new(0.5 * scale, 0.0), galley.clone(), color);
+            }
+            let end = pos.x + galley.size().x;
+            clip.galley(pos, galley, color);
+            if let Some((g, pill)) = badge {
+                let r = Rect::from_min_size(Pos2::new(end + gap, title.center().y - pill.y / 2.0), pill);
+                pill_at(&clip, r, g);
+            }
+        }
     }
     if fence.locked {
         let p = Pos2::new(title.max.x - 9.0 * scale, title.min.y + 9.0 * scale);
@@ -449,21 +652,25 @@ pub fn caption_galley(painter: &egui::Painter, text: &str, width: f32, font: Fon
 
 /// Paints one icon cell (icon + caption). Returns nothing; interaction is done by the caller.
 #[allow(clippy::too_many_arguments)]
-pub fn paint_item(painter: &egui::Painter, icons: &mut IconCache, item: &DeskItem, cell: Rect, icon: f32, scale: f32, highlight: u8, style: &TextStyle) {
+pub fn paint_item(painter: &egui::Painter, icons: &mut IconCache, item: &DeskItem, cell: Rect, icon: f32, scale: f32, highlight: u8, style: &TextStyle, hot: bool, selected: bool) {
     if highlight > 0 {
         painter.rect_filled(cell.shrink(2.0 * scale), CornerRadius::same((4.0 * scale) as u8), if crate::ink::is_dark() { Color32::from_black_alpha(highlight) } else { Color32::from_white_alpha(highlight) });
     }
     let icon_rect = Rect::from_center_size(Pos2::new(cell.center().x, cell.min.y + 6.0 * scale + icon / 2.0), Vec2::splat(icon));
+    // Hover zoom: the icon under the mouse a little larger (the caption stays where it was).
+    let draw_rect = if style.zoom && hot { Rect::from_center_size(icon_rect.center(), icon_rect.size() * 1.08) } else { icon_rect };
+    // Calm icons: slightly dimmed until hovered or selected.
+    let tint = if style.calm && !hot && !selected { Color32::from_rgba_unmultiplied(200, 200, 200, 210) } else { Color32::WHITE };
     // In real pixels at the box's own size (the layout preview reuses the boxes' icons).
     let px = (icon / scale.max(0.01) * painter.ctx().pixels_per_point()).round() as u32;
     match icons.get(&item.path, px) {
         Some(tex) => {
-            painter.image(tex, icon_rect, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
+            painter.image(tex, draw_rect, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), tint);
         }
         None => {
             // Placeholder while the real icon loads.
             let c = if item.is_dir { Color32::from_rgb(232, 190, 80) } else { Color32::from_gray(120) };
-            painter.rect_filled(icon_rect.shrink(icon * 0.12), CornerRadius::same((3.0 * scale) as u8), c);
+            painter.rect_filled(draw_rect.shrink(icon * 0.12), CornerRadius::same((3.0 * scale) as u8), if tint == Color32::WHITE { c } else { c.gamma_multiply(0.85) });
         }
     }
     if !style.captions {
@@ -473,6 +680,11 @@ pub fn paint_item(painter: &egui::Painter, icons: &mut IconCache, item: &DeskIte
     let galley = caption_galley(painter, &item.name, cell.width() - 4.0 * scale, font);
     let pos = Pos2::new(cell.center().x, icon_rect.max.y + 4.0 * scale);
     let clip = painter.with_clip_rect(cell);
+    if style.backing {
+        // A soft rounded backing behind the caption: dark behind light text, light behind dark ink.
+        let r = galley.rect.translate(pos.to_vec2()).expand2(Vec2::new(4.0 * scale, 1.0 * scale));
+        clip.rect_filled(r, CornerRadius::same((5.0 * scale) as u8), if crate::ink::is_dark() { Color32::from_white_alpha(110) } else { Color32::from_black_alpha(110) });
+    }
     if style.shadow {
         clip.galley_with_override_text_color(pos + Vec2::splat(1.0 * scale.max(0.6)), galley.clone(), crate::ink::halo());
     }
@@ -513,7 +725,7 @@ pub fn paint_static(painter: &egui::Painter, icons: &mut IconCache, fence: &Fenc
             if min.y > a.content.max.y {
                 break;
             }
-            paint_item(&clip, icons, it, Rect::from_min_size(min, cell), fence.icon_size as f32 * scale, scale, 0, &style);
+            paint_item(&clip, icons, it, Rect::from_min_size(min, cell), fence.icon_size as f32 * scale, scale, 0, &style, false, false);
         }
     }
 }

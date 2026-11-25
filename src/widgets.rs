@@ -209,6 +209,7 @@ impl DeskWidget for Clock {
         let now = chrono::Local::now();
         let h24 = data.get("h24").and_then(|v| v.as_bool()).unwrap_or(true);
         let time = if h24 { now.format("%H:%M").to_string() } else { now.format("%I:%M %p").to_string() };
+        let sc = text_scale(data);
         let mut changed = false;
         let zones: Vec<(String, String)> = data
             .get("zones")
@@ -218,11 +219,11 @@ impl DeskWidget for Clock {
         let resp = ui
             .vertical_centered(|ui| {
                 ui.add_space(4.0);
-                crate::ink::halo_label(ui, time, 44.0, crate::ink::strong());
-                ui.label(egui::RichText::new(crate::i18n::long_date(now.date_naive())).size(14.0).color(crate::ink::gray(200)));
+                crate::ink::halo_label(ui, time, 44.0 * sc, crate::ink::strong());
+                ui.label(egui::RichText::new(crate::i18n::long_date(now.date_naive())).size(14.0 * sc).color(crate::ink::gray(200)));
                 if !zones.is_empty() {
                     ui.add_space(4.0);
-                    let row_h = 18.0;
+                    let row_h = 18.0 * sc;
                     let fit = ((ui.available_height() / row_h).floor() as usize).min(zones.len());
                     let utc = chrono::Utc::now();
                     let local = now.naive_local();
@@ -244,8 +245,8 @@ impl DeskWidget for Clock {
                         let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width().min(300.0), row_h), Sense::hover());
                         let p = ui.painter_at(rect);
                         let col = if night { crate::ink::gray(150) } else { crate::ink::gray(225) };
-                        let font = egui::FontId::proportional(13.0);
-                        let diff_r = p.text(Pos2::new(rect.max.x - 2.0, rect.center().y), egui::Align2::RIGHT_CENTER, zone_diff(diff), egui::FontId::proportional(12.0), crate::ink::gray(170));
+                        let font = egui::FontId::proportional(13.0 * sc);
+                        let diff_r = p.text(Pos2::new(rect.max.x - 2.0, rect.center().y), egui::Align2::RIGHT_CENTER, zone_diff(diff), egui::FontId::proportional(12.0 * sc), crate::ink::gray(170));
                         let time_r = p.text(Pos2::new(rect.max.x - 10.0 - diff_r.width().max(42.0), rect.center().y), egui::Align2::RIGHT_CENTER, text, font.clone(), col);
                         if night {
                             paint_moon(&p, Pos2::new(time_r.min.x - 9.0, rect.center().y), crate::ink::gray(170));
@@ -281,6 +282,7 @@ impl DeskWidget for Clock {
 
     fn settings(&self, ui: &mut Ui, data: &mut Value) -> bool {
         let mut changed = false;
+        changed |= look_settings(ui, data, false);
         let mut h24 = data_bool(data, "h24", true);
         if ui.checkbox(&mut h24, t("24-hour clock")).changed() {
             data["h24"] = json!(h24);
@@ -351,6 +353,134 @@ fn data_bool(data: &Value, key: &str, default: bool) -> bool {
     data.get(key).and_then(|v| v.as_bool()).unwrap_or(default)
 }
 
+// ---- Shared look options (accent colour, text size) ----------------------------------------------
+
+/// "#RRGGBB" to a colour.
+fn parse_hex(s: &str) -> Option<Color32> {
+    let h = s.strip_prefix('#')?;
+    if h.len() != 6 {
+        return None;
+    }
+    let v = u32::from_str_radix(h, 16).ok()?;
+    Some(Color32::from_rgb((v >> 16) as u8, (v >> 8) as u8, v as u8))
+}
+
+/// The widget's accent colour (`data["accent"]`, "#RRGGBB"), or `default` when none is chosen.
+pub fn widget_accent(data: &Value, default: Color32) -> Color32 {
+    data.get("accent").and_then(|v| v.as_str()).and_then(parse_hex).unwrap_or(default)
+}
+
+/// Whether the person picked an accent colour for this widget.
+pub fn has_accent(data: &Value) -> bool {
+    data.get("accent").and_then(|v| v.as_str()).and_then(parse_hex).is_some()
+}
+
+/// The widget's text scale (`data["text_scale"]`: 0.85, 1.0, 1.15 or 1.3; missing = 1.0).
+pub fn text_scale(data: &Value) -> f32 {
+    data.get("text_scale").and_then(|v| v.as_f64()).map(|v| (v as f32).clamp(0.5, 2.0)).unwrap_or(1.0)
+}
+
+/// Makes the labels and buttons made with the normal text styles inside `ui` follow the text
+/// scale (only when it isn't 1.0, so the default look costs nothing).
+pub(crate) fn scale_text_styles(ui: &mut Ui, scale: f32) {
+    if (scale - 1.0).abs() > f32::EPSILON {
+        for font in ui.style_mut().text_styles.values_mut() {
+            font.size *= scale;
+        }
+    }
+}
+
+/// Text on an accent-coloured fill: `normal` unless the accent is light, then dark.
+fn on_accent(accent: Color32, normal: Color32) -> Color32 {
+    let lum = 0.2126 * accent.r() as f32 + 0.7152 * accent.g() as f32 + 0.0722 * accent.b() as f32;
+    if lum > 150.0 {
+        Color32::from_gray(20)
+    } else {
+        normal
+    }
+}
+
+const ACCENT_SWATCHES: [[u8; 3]; 10] = [
+    [70, 140, 230],  // blue
+    [40, 190, 190],  // teal
+    [90, 200, 110],  // green
+    [170, 215, 70],  // lime
+    [255, 205, 60],  // yellow
+    [255, 150, 60],  // orange
+    [235, 80, 80],   // red
+    [240, 110, 170], // pink
+    [160, 110, 235], // purple
+    [245, 245, 245], // white
+];
+
+/// "Accent colour": Default, ten swatches and a colour picker. Returns true if `data` changed.
+pub fn accent_setting(ui: &mut Ui, data: &mut Value) -> bool {
+    let mut changed = false;
+    let current = data.get("accent").and_then(|v| v.as_str()).and_then(parse_hex);
+    ui.horizontal_wrapped(|ui| {
+        ui.label(t("Accent colour"));
+        if ui.selectable_label(current.is_none(), t("Default")).clicked() && current.is_some() {
+            if let Some(o) = data.as_object_mut() {
+                o.remove("accent");
+            }
+            changed = true;
+        }
+        for [r, g, b] in ACCENT_SWATCHES {
+            let c = Color32::from_rgb(r, g, b);
+            let (rect, resp) = ui.allocate_exact_size(egui::vec2(18.0, 18.0), Sense::click());
+            ui.painter().circle_filled(rect.center(), 7.5, c);
+            if current == Some(c) {
+                ui.painter().circle_stroke(rect.center(), 9.0, Stroke::new(1.5_f32, ui.visuals().text_color()));
+            }
+            if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                data["accent"] = json!(format!("#{r:02X}{g:02X}{b:02X}"));
+                changed = true;
+            }
+        }
+        let mut rgb = current.map(|c| [c.r(), c.g(), c.b()]).unwrap_or([70, 140, 230]);
+        if egui::color_picker::color_edit_button_srgb(ui, &mut rgb).changed() {
+            data["accent"] = json!(format!("#{:02X}{:02X}{:02X}", rgb[0], rgb[1], rgb[2]));
+            changed = true;
+        }
+    });
+    changed
+}
+
+/// "Text size": Small / Normal / Large / Extra large. Returns true if `data` changed.
+pub fn text_size_setting(ui: &mut Ui, data: &mut Value) -> bool {
+    let mut changed = false;
+    let cur = text_scale(data);
+    ui.horizontal_wrapped(|ui| {
+        ui.label(t("Text size"));
+        for (v, label) in [(0.85_f32, t("Small")), (1.0, t("Normal")), (1.15, t("Large")), (1.3, t("Extra large"))] {
+            if ui.selectable_label((cur - v).abs() < 0.01, label).clicked() && (cur - v).abs() >= 0.01 {
+                if (v - 1.0).abs() < 0.01 {
+                    if let Some(o) = data.as_object_mut() {
+                        o.remove("text_scale");
+                    }
+                } else {
+                    data["text_scale"] = json!(v);
+                }
+                changed = true;
+            }
+        }
+    });
+    changed
+}
+
+/// The "Look" block at the top of a widget's settings: accent colour (when the widget has
+/// highlight colours) and text size.
+pub fn look_settings(ui: &mut Ui, data: &mut Value, with_accent: bool) -> bool {
+    let mut changed = false;
+    ui.label(egui::RichText::new(t("Look")).strong());
+    if with_accent {
+        changed |= accent_setting(ui, data);
+    }
+    changed |= text_size_setting(ui, data);
+    ui.separator();
+    changed
+}
+
 // ---- Sticky note --------------------------------------------------------------------------
 
 struct Note;
@@ -358,11 +488,13 @@ struct Note;
 impl DeskWidget for Note {
     fn ui(&self, ui: &mut Ui, data: &mut Value) -> WidgetOutput {
         let mut text = data.get("text").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let sc = text_scale(data);
         let r = ui.add_sized(
             ui.available_size(),
             egui::TextEdit::multiline(&mut text)
                 .hint_text(t("Type a note…"))
                 .frame(false)
+                .font(egui::FontId::proportional(egui::TextStyle::Body.resolve(ui.style()).size * sc))
                 .text_color(crate::ink::gray(235)),
         );
         let mut out = WidgetOutput::default();
@@ -371,6 +503,14 @@ impl DeskWidget for Note {
             out.changed = true;
         }
         out
+    }
+
+    fn has_settings(&self) -> bool {
+        true
+    }
+
+    fn settings(&self, ui: &mut Ui, data: &mut Value) -> bool {
+        look_settings(ui, data, false)
     }
 }
 
@@ -706,6 +846,14 @@ fn level_color(f: f32) -> Color32 {
     crate::ink::adapt(level_color_raw(f))
 }
 
+/// Like `level_color`, but the calm colour (below 70 %) is `base` (the widget's accent when one is chosen).
+fn level_color_base(f: f32, base: Option<Color32>) -> Color32 {
+    match base {
+        Some(b) if f < 0.7 => b,
+        _ => level_color(f),
+    }
+}
+
 fn level_color_raw(f: f32) -> Color32 {
     if f >= 0.9 {
         Color32::from_rgb(255, 110, 100)
@@ -717,17 +865,17 @@ fn level_color_raw(f: f32) -> Color32 {
 }
 
 /// One line: label, a bar, and the text on the right.
-fn meter(ui: &mut Ui, label: &str, frac: f32, text: &str) {
+fn meter(ui: &mut Ui, label: &str, frac: f32, text: &str, sc: f32, base: Option<Color32>) {
     ui.horizontal(|ui| {
-        ui.add_sized([40.0, 18.0], egui::Label::new(egui::RichText::new(label).size(13.0).color(crate::ink::gray(210))));
-        let w = (ui.available_width() - 100.0).max(30.0);
+        ui.add_sized([40.0 * sc, 18.0 * sc], egui::Label::new(egui::RichText::new(label).size(13.0 * sc).color(crate::ink::gray(210))));
+        let w = (ui.available_width() - 100.0 * sc).max(30.0);
         let (r, _) = ui.allocate_exact_size(egui::vec2(w, 8.0), Sense::hover());
         let p = ui.painter();
         p.rect_filled(r, 4.0, crate::ink::white_alpha(28));
         let mut fill = r;
         fill.set_width(r.width() * frac.clamp(0.0, 1.0));
-        p.rect_filled(fill, 4.0, level_color(frac));
-        ui.label(egui::RichText::new(text).size(12.5).color(crate::ink::gray(225)));
+        p.rect_filled(fill, 4.0, level_color_base(frac, base));
+        ui.label(egui::RichText::new(text).size(12.5 * sc).color(crate::ink::gray(225)));
     });
 }
 
@@ -735,11 +883,13 @@ struct SysMon;
 
 impl DeskWidget for SysMon {
     fn ui(&self, ui: &mut Ui, data: &mut Value) -> WidgetOutput {
+        let sc = text_scale(data);
+        let base = has_accent(data).then(|| widget_accent(data, Color32::WHITE));
         let show_net = data_bool(data, "net", true);
         let bits = data_bool(data, "bits", false);
         let (cpu, hist, load, used, total, disks) = read_now(show_net);
         ui.add_space(2.0);
-        meter(ui, "CPU", cpu, &format!("{:.0} %", cpu * 100.0));
+        meter(ui, "CPU", cpu, &format!("{:.0} %", cpu * 100.0), sc, base);
         // The last two minutes of CPU use.
         let (r, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 34.0), Sense::hover());
         let p = ui.painter();
@@ -748,17 +898,17 @@ impl DeskWidget for SysMon {
             let step = r.width() / 59.0;
             let x0 = r.max.x - step * (hist.len() - 1) as f32;
             let pts: Vec<Pos2> = hist.iter().enumerate().map(|(i, v)| Pos2::new(x0 + i as f32 * step, r.max.y - 2.0 - v * (r.height() - 4.0))).collect();
-            p.add(egui::Shape::line(pts, Stroke::new(1.5_f32, Color32::from_rgb(110, 190, 255))));
+            p.add(egui::Shape::line(pts, Stroke::new(1.5_f32, base.unwrap_or_else(|| Color32::from_rgb(110, 190, 255)))));
         }
         ui.add_space(4.0);
-        meter(ui, "RAM", load, &format!("{used:.1}/{total:.0} GB"));
+        meter(ui, "RAM", load, &format!("{used:.1}/{total:.0} GB"), sc, base);
         if show_net {
-            net_rows(ui, bits);
+            net_rows(ui, bits, sc, base);
         }
         // Many drives: the list scrolls.
         egui::ScrollArea::vertical().id_salt("disks").auto_shrink([false, true]).show(ui, |ui| {
             for (name, frac, free) in disks.iter() {
-                meter(ui, name, *frac, &tf("{} GB free", &[&format!("{free:.0}")]));
+                meter(ui, name, *frac, &tf("{} GB free", &[&format!("{free:.0}")]), sc, base);
             }
         });
         WidgetOutput { changed: false, repaint_after: Some(SAMPLE_EVERY) }
@@ -770,6 +920,7 @@ impl DeskWidget for SysMon {
 
     fn settings(&self, ui: &mut Ui, data: &mut Value) -> bool {
         let mut changed = false;
+        changed |= look_settings(ui, data, true);
         let mut net = data_bool(data, "net", true);
         if ui.checkbox(&mut net, t("Show network speed")).changed() {
             data["net"] = json!(net);
@@ -801,7 +952,7 @@ fn speed_text(bytes_per_sec: f64, bits: bool) -> String {
 }
 
 /// The network line (download and upload speed) and the two-line history graph.
-fn net_rows(ui: &mut Ui, bits: bool) {
+fn net_rows(ui: &mut Ui, bits: bool, sc: f32, base: Option<Color32>) {
     let (down, up, hist) = match READINGS.lock() {
         Ok(g) => match g.as_ref() {
             Some(r) => (r.net_down, r.net_up, r.net_hist.iter().copied().collect::<Vec<_>>()),
@@ -809,13 +960,13 @@ fn net_rows(ui: &mut Ui, bits: bool) {
         },
         Err(_) => (0.0, 0.0, Vec::new()),
     };
-    let down_col = crate::ink::adapt(Color32::from_rgb(110, 190, 255));
+    let down_col = base.unwrap_or_else(|| crate::ink::adapt(Color32::from_rgb(110, 190, 255)));
     let up_col = crate::ink::adapt(Color32::from_rgb(255, 170, 90));
     ui.add_space(4.0);
     ui.horizontal(|ui| {
-        ui.add_sized([40.0, 18.0], egui::Label::new(egui::RichText::new(t("Network")).size(13.0).color(crate::ink::gray(210))));
-        ui.label(egui::RichText::new(format!("\u{2193} {}", speed_text(down, bits))).size(12.5).color(down_col));
-        ui.label(egui::RichText::new(format!("\u{2191} {}", speed_text(up, bits))).size(12.5).color(up_col));
+        ui.add_sized([40.0 * sc, 18.0 * sc], egui::Label::new(egui::RichText::new(t("Network")).size(13.0 * sc).color(crate::ink::gray(210))));
+        ui.label(egui::RichText::new(format!("\u{2193} {}", speed_text(down, bits))).size(12.5 * sc).color(down_col));
+        ui.label(egui::RichText::new(format!("\u{2191} {}", speed_text(up, bits))).size(12.5 * sc).color(up_col));
     });
     let (r, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 34.0), Sense::hover());
     let p = ui.painter();
@@ -835,8 +986,8 @@ fn net_rows(ui: &mut Ui, bits: bool) {
 
 // ---- Calendar -----------------------------------------------------------------------------
 
-fn arrow_button(ui: &mut Ui, glyph: &str) -> bool {
-    ui.add(egui::Button::new(egui::RichText::new(glyph).size(20.0).color(crate::ink::strong())).frame(false)).clicked()
+fn arrow_button(ui: &mut Ui, glyph: &str, sc: f32) -> bool {
+    ui.add(egui::Button::new(egui::RichText::new(glyph).size(20.0 * sc).color(crate::ink::strong())).frame(false)).clicked()
 }
 
 struct Calendar;
@@ -844,6 +995,8 @@ struct Calendar;
 impl DeskWidget for Calendar {
     fn ui(&self, ui: &mut Ui, data: &mut Value) -> WidgetOutput {
         use chrono::{Datelike, NaiveDate};
+        let sc = text_scale(data);
+        let accent = widget_accent(data, Color32::from_rgb(70, 140, 230));
         let mut out = WidgetOutput::default();
         let today = chrono::Local::now().date_naive();
         let sunday_first = data_bool(data, "sunday", false);
@@ -856,15 +1009,15 @@ impl DeskWidget for Calendar {
         let resp = ui
             .vertical(|ui| {
                 ui.horizontal(|ui| {
-                    if arrow_button(ui, "‹") {
+                    if arrow_button(ui, "‹", sc) {
                         shift -= 1;
                     }
-                    let title = egui::RichText::new(crate::i18n::month_year(first)).size(15.0).color(crate::ink::strong());
-                    let w = (ui.available_width() - 24.0).max(40.0);
-                    if ui.add_sized([w, 20.0], egui::Button::new(title).frame(false)).on_hover_text(t("Back to today")).clicked() {
+                    let title = egui::RichText::new(crate::i18n::month_year(first)).size(15.0 * sc).color(crate::ink::strong());
+                    let w = (ui.available_width() - 24.0 * sc).max(40.0);
+                    if ui.add_sized([w, 20.0 * sc], egui::Button::new(title).frame(false)).on_hover_text(t("Back to today")).clicked() {
                         shift = 0;
                     }
-                    if arrow_button(ui, "›") {
+                    if arrow_button(ui, "›", sc) {
                         shift += 1;
                     }
                 });
@@ -875,10 +1028,10 @@ impl DeskWidget for Calendar {
                 };
                 let cw = ui.available_width() / 7.0;
                 let ch = ((ui.available_height() - 20.0) / 6.0).clamp(14.0, 34.0);
-                let (head, _) = ui.allocate_exact_size(egui::vec2(cw * 7.0, 18.0), Sense::hover());
+                let (head, _) = ui.allocate_exact_size(egui::vec2(cw * 7.0, 18.0 * sc), Sense::hover());
                 for (i, n) in names.iter().enumerate() {
                     let c = Pos2::new(head.min.x + cw * (i as f32 + 0.5), head.center().y);
-                    ui.painter().text(c, egui::Align2::CENTER_CENTER, *n, egui::FontId::proportional(11.5), crate::ink::gray(215));
+                    ui.painter().text(c, egui::Align2::CENTER_CENTER, *n, egui::FontId::proportional(11.5 * sc), crate::ink::gray(215));
                 }
                 let lead = if sunday_first { first.weekday().num_days_from_sunday() } else { first.weekday().num_days_from_monday() } as i64;
                 let (grid, _) = ui.allocate_exact_size(egui::vec2(cw * 7.0, ch * 6.0), Sense::hover());
@@ -890,10 +1043,10 @@ impl DeskWidget for Calendar {
                         continue; // only this month's days
                     }
                     if day == today {
-                        ui.painter().circle_filled(c, (ch.min(cw) / 2.0 - 1.0).max(7.0), Color32::from_rgb(70, 140, 230));
+                        ui.painter().circle_filled(c, (ch.min(cw) / 2.0 - 1.0).max(7.0), accent);
                     }
-                    let col = if day == today { crate::ink::strong() } else { crate::ink::gray(230) };
-                    ui.painter().text(c, egui::Align2::CENTER_CENTER, day.day().to_string(), egui::FontId::proportional(13.0), col);
+                    let col = if day == today { on_accent(accent, crate::ink::strong()) } else { crate::ink::gray(230) };
+                    ui.painter().text(c, egui::Align2::CENTER_CENTER, day.day().to_string(), egui::FontId::proportional(13.0 * sc), col);
                 }
             })
             .response;
@@ -917,12 +1070,13 @@ impl DeskWidget for Calendar {
     }
 
     fn settings(&self, ui: &mut Ui, data: &mut Value) -> bool {
+        let mut changed = look_settings(ui, data, true);
         let mut sunday = data_bool(data, "sunday", false);
         if ui.checkbox(&mut sunday, t("Week starts on Sunday")).changed() {
             data["sunday"] = json!(sunday);
-            return true;
+            changed = true;
         }
-        false
+        changed
     }
 }
 
@@ -931,6 +1085,7 @@ impl DeskWidget for Calendar {
 struct Todo;
 impl DeskWidget for Todo {
     fn ui(&self, ui: &mut Ui, data: &mut Value) -> WidgetOutput {
+        let sc = text_scale(data);
         let mut out = WidgetOutput::default();
         if !data.get("items").map(|s| s.is_array()).unwrap_or(false) {
             data["items"] = json!([]);
@@ -955,7 +1110,7 @@ impl DeskWidget for Todo {
                     ui.add(
                         egui::TextEdit::singleline(&mut new)
                             .frame(false)
-                            .font(egui::FontId::proportional(13.0))
+                            .font(egui::FontId::proportional(13.0 * sc))
                             .text_color(crate::ink::text())
                             .hint_text(hint)
                             .desired_width(f32::INFINITY),
@@ -1006,17 +1161,16 @@ impl DeskWidget for Todo {
 
         let mut remove: Option<usize> = None;
         let mut toggle: Option<usize> = None;
-        let accent = crate::app::accent();
-        let lum = 0.2126 * accent.r() as f32 + 0.7152 * accent.g() as f32 + 0.0722 * accent.b() as f32;
-        let check_col = if lum > 150.0 { Color32::from_gray(20) } else { Color32::WHITE };
-        let list_h = (ui.available_height() - 30.0).max(20.0);
+        let accent = widget_accent(data, crate::app::accent());
+        let check_col = on_accent(accent, Color32::WHITE);
+        let list_h = (ui.available_height() - 30.0 * sc.max(1.0)).max(20.0);
         egui::ScrollArea::vertical().max_height(list_h).auto_shrink([false, false]).show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 2.0;
             let items = data["items"].as_array().map(|a| a.as_slice()).unwrap_or(&[]);
             for &i in &order {
                 let done = items[i]["d"].as_bool().unwrap_or(false);
                 let text = items[i]["t"].as_str().unwrap_or("");
-                let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 28.0), egui::Sense::click());
+                let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 28.0 * sc.max(1.0)), egui::Sense::click());
                 let x_rect = egui::Rect::from_center_size(egui::pos2(rect.right() - 14.0, rect.center().y), egui::vec2(22.0, 22.0));
                 let x_resp = ui.interact(x_rect, resp.id.with("x"), egui::Sense::click());
                 let hovered = ui.rect_contains_pointer(rect);
@@ -1037,7 +1191,7 @@ impl DeskWidget for Todo {
                 // Text.
                 let col = if done { crate::ink::soft() } else { crate::ink::text() };
                 let tw = (rect.width() - 34.0 - 28.0).max(20.0);
-                let mut job = egui::text::LayoutJob::simple_singleline(text.to_string(), egui::FontId::proportional(14.0), col);
+                let mut job = egui::text::LayoutJob::simple_singleline(text.to_string(), egui::FontId::proportional(14.0 * sc), col);
                 job.wrap.max_width = tw;
                 job.wrap.max_rows = 1;
                 job.wrap.break_anywhere = true;
@@ -1106,10 +1260,10 @@ impl DeskWidget for Todo {
                 adding = !adding;
                 focus_now = adding;
             }
-            ui.label(egui::RichText::new(crate::i18n::tf("{} left", &[&left])).size(12.0).color(crate::ink::faint()));
+            ui.label(egui::RichText::new(crate::i18n::tf("{} left", &[&left])).size(12.0 * sc).color(crate::ink::faint()));
             if done_count > 0 {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let r = ui.add(egui::Label::new(egui::RichText::new(t("Remove finished tasks")).size(12.0).color(crate::ink::soft())).sense(egui::Sense::click()));
+                    let r = ui.add(egui::Label::new(egui::RichText::new(t("Remove finished tasks")).size(12.0 * sc).color(crate::ink::soft())).sense(egui::Sense::click()));
                     if r.hovered() {
                         ui.output_mut(|o| o.cursor_icon = egui::CursorIcon::PointingHand);
                         let y = r.rect.bottom();
@@ -1135,6 +1289,14 @@ impl DeskWidget for Todo {
         }
         out
     }
+
+    fn has_settings(&self) -> bool {
+        true
+    }
+
+    fn settings(&self, ui: &mut Ui, data: &mut Value) -> bool {
+        look_settings(ui, data, true)
+    }
 }
 
 
@@ -1158,6 +1320,8 @@ fn agenda_urls(data: &Value) -> Vec<String> {
 
 impl DeskWidget for Agenda {
     fn ui(&self, ui: &mut Ui, data: &mut Value) -> WidgetOutput {
+        let sc = text_scale(data);
+        let acc = widget_accent(data, Color32::from_rgb(70, 140, 230));
         let mut out = WidgetOutput { changed: false, repaint_after: Some(Duration::from_secs(60)) };
         let urls = agenda_urls(data);
         let days = data.get("days").and_then(|v| v.as_u64()).unwrap_or(7).clamp(1, 14) as i64;
@@ -1169,11 +1333,11 @@ impl DeskWidget for Agenda {
         }
         if urls.is_empty() {
             ui.add_space(6.0);
-            ui.label(egui::RichText::new(t("Right-click here and choose \"Widget settings…\" to add a calendar link (iCal / .ics).")).size(13.0).color(crate::ink::gray(220)));
+            ui.label(egui::RichText::new(t("Right-click here and choose \"Widget settings…\" to add a calendar link (iCal / .ics).")).size( 13.0 * sc).color(crate::ink::gray(220)));
             ui.add_space(4.0);
             ui.label(
                 egui::RichText::new(t("Google Calendar: Settings > your calendar > \"Secret address in iCal format\". Outlook: Settings > Calendar > Shared calendars > Publish."))
-                    .size(11.5)
+                    .size(11.5 * sc)
                     .color(crate::ink::gray(170)),
             );
             return out;
@@ -1193,22 +1357,22 @@ impl DeskWidget for Agenda {
         let mut close_details = false;
         let mut child = ui.new_child(egui::UiBuilder::new().max_rect(content).layout(egui::Layout::top_down(egui::Align::Min)));
         match &details {
-            Some(d) => close_details = agenda_details(&mut child, d, &names),
+            Some(d) => close_details = agenda_details(&mut child, d, &names, sc),
             None => {
                 match view {
-                    0 => agenda_month(&mut child, &cals, &mut open),
-                    1 => agenda_week(&mut child, &cals, &mut open),
-                    _ => agenda_list(&mut child, &cals, days, &mut open),
+                    0 => agenda_month(&mut child, &cals, &mut open, sc, acc),
+                    1 => agenda_week(&mut child, &cals, &mut open, sc, acc),
+                    _ => agenda_list(&mut child, &cals, days, &mut open, sc),
                 }
                 let failed = cals.iter().filter(|c| c.error.is_some()).count();
                 if failed > 0 {
                     let first = cals.iter().find_map(|c| c.error.clone()).unwrap_or_default();
-                    child.label(egui::RichText::new(tf("⚠ {} calendar(s) not updated: {}", &[&failed, &first])).size(11.0).color(crate::ink::adapt(Color32::from_rgb(255, 190, 130)))).on_hover_text(first);
+                    child.label(egui::RichText::new(tf("⚠ {} calendar(s) not updated: {}", &[&failed, &first])).size(11.0 * sc).color(crate::ink::adapt(Color32::from_rgb(255, 190, 130)))).on_hover_text(first);
                 } else if cals.iter().any(|c| c.loading && c.events.is_empty()) {
-                    child.label(egui::RichText::new(t("Loading…")).size(11.5).color(crate::ink::gray(170)));
+                    child.label(egui::RichText::new(t("Loading…")).size(11.5 * sc).color(crate::ink::gray(170)));
                 }
                 if cals.iter().any(|c| c.truncated) {
-                    child.label(egui::RichText::new(t("The calendar is too large; only the first events are shown.")).size(11.0).color(crate::ink::gray(170)));
+                    child.label(egui::RichText::new(t("The calendar is too large; only the first events are shown.")).size(11.0 * sc).color(crate::ink::gray(170)));
                 }
             }
         }
@@ -1247,7 +1411,8 @@ impl DeskWidget for Agenda {
         let urls = agenda_urls(data);
         let days = data.get("days").and_then(|v| v.as_u64()).unwrap_or(7).clamp(1, 14) as i64;
         let cals = crate::agenda::view(&urls, false);
-        agenda_edit(ui, data, &urls, &cals, days)
+        let changed = look_settings(ui, data, true);
+        agenda_edit(ui, data, &urls, &cals, days) | changed
     }
 }
 
@@ -1546,17 +1711,17 @@ fn agenda_day_title(day: chrono::NaiveDate) -> String {
 
 /// A small "‹ title ›" header; returns -1 / 0 / +1 for the arrows (0 also for a click on the
 /// title, meaning "back to now", returned as Some(0)).
-fn agenda_nav(ui: &mut Ui, title: &str) -> Option<i32> {
+fn agenda_nav(ui: &mut Ui, title: &str, sc: f32) -> Option<i32> {
     let mut step = None;
     ui.horizontal(|ui| {
-        if ui.add(egui::Button::new(egui::RichText::new("‹").size(18.0).color(crate::ink::strong())).frame(false)).clicked() {
+        if ui.add(egui::Button::new(egui::RichText::new("‹").size(18.0 * sc).color(crate::ink::strong())).frame(false)).clicked() {
             step = Some(-1);
         }
-        let w = (ui.available_width() - 24.0).max(40.0);
-        if ui.add_sized([w, 20.0], egui::Button::new(egui::RichText::new(title).size(14.0).color(crate::ink::strong())).frame(false)).on_hover_text(t("Back to today")).clicked() {
+        let w = (ui.available_width() - 24.0 * sc).max(40.0);
+        if ui.add_sized([w, 20.0 * sc], egui::Button::new(egui::RichText::new(title).size(14.0 * sc).color(crate::ink::strong())).frame(false)).on_hover_text(t("Back to today")).clicked() {
             step = Some(0);
         }
-        if ui.add(egui::Button::new(egui::RichText::new("›").size(18.0).color(crate::ink::strong())).frame(false)).clicked() {
+        if ui.add(egui::Button::new(egui::RichText::new("›").size(18.0 * sc).color(crate::ink::strong())).frame(false)).clicked() {
             step = Some(1);
         }
     });
@@ -1565,7 +1730,7 @@ fn agenda_nav(ui: &mut Ui, title: &str) -> Option<i32> {
 
 /// Month view: the days of a month; dots under days with events (one per calendar, at most
 /// three); a click on a day shows its events.
-fn agenda_month(ui: &mut Ui, cals: &[crate::agenda::CalView], open: &mut Option<AgendaDetails>) {
+fn agenda_month(ui: &mut Ui, cals: &[crate::agenda::CalView], open: &mut Option<AgendaDetails>, sc: f32, acc: Color32) {
     use chrono::{Datelike, NaiveDate};
     let today = chrono::Local::now().date_naive();
     let sid = ui.make_persistent_id("agenda-month");
@@ -1573,7 +1738,7 @@ fn agenda_month(ui: &mut Ui, cals: &[crate::agenda::CalView], open: &mut Option<
     let months = today.year() * 12 + today.month0() as i32 + shift;
     let (y, m) = (months.div_euclid(12), months.rem_euclid(12) as u32 + 1);
     let Some(first) = NaiveDate::from_ymd_opt(y, m, 1) else { return };
-    match agenda_nav(ui, &crate::i18n::month_year(first)) {
+    match agenda_nav(ui, &crate::i18n::month_year(first), sc) {
         Some(0) => shift = 0,
         Some(s) => shift += s,
         None => {}
@@ -1581,9 +1746,9 @@ fn agenda_month(ui: &mut Ui, cals: &[crate::agenda::CalView], open: &mut Option<
     ui.ctx().data_mut(|d| d.insert_temp(sid, shift));
     let cw = ui.available_width() / 7.0;
     let ch = ((ui.available_height() - 40.0) / 6.0).clamp(18.0, 44.0);
-    let (head, _) = ui.allocate_exact_size(egui::vec2(cw * 7.0, 16.0), Sense::hover());
+    let (head, _) = ui.allocate_exact_size(egui::vec2(cw * 7.0, 16.0 * sc), Sense::hover());
     for (i, n) in [0, 1, 2, 3, 4, 5, 6].map(crate::i18n::weekday_short).iter().enumerate() {
-        ui.painter().text(Pos2::new(head.min.x + cw * (i as f32 + 0.5), head.center().y), egui::Align2::CENTER_CENTER, *n, egui::FontId::proportional(11.0), crate::ink::gray(200));
+        ui.painter().text(Pos2::new(head.min.x + cw * (i as f32 + 0.5), head.center().y), egui::Align2::CENTER_CENTER, *n, egui::FontId::proportional(11.0 * sc), crate::ink::gray(200));
     }
     let lead = first.weekday().num_days_from_monday() as i64;
     let (grid, _) = ui.allocate_exact_size(egui::vec2(cw * 7.0, ch * 6.0), Sense::hover());
@@ -1600,9 +1765,9 @@ fn agenda_month(ui: &mut Ui, cals: &[crate::agenda::CalView], open: &mut Option<
         }
         let num_c = Pos2::new(r.center().x, r.min.y + (ch * 0.42).min(14.0));
         if day == today {
-            ui.painter().circle_filled(num_c, 9.5, Color32::from_rgb(70, 140, 230));
+            ui.painter().circle_filled(num_c, 9.5, acc);
         }
-        ui.painter().text(num_c, egui::Align2::CENTER_CENTER, day.day().to_string(), egui::FontId::proportional(12.5), crate::ink::gray(if day == today { 255 } else { 230 }));
+        ui.painter().text(num_c, egui::Align2::CENTER_CENTER, day.day().to_string(), egui::FontId::proportional(12.5 * sc), if day == today { on_accent(acc, crate::ink::gray(255)) } else { crate::ink::gray(230) });
         // One dot per calendar with events that day (at most three).
         let mut seen: Vec<usize> = Vec::new();
         for (ci, _) in &evs {
@@ -1623,7 +1788,7 @@ fn agenda_month(ui: &mut Ui, cals: &[crate::agenda::CalView], open: &mut Option<
 
 /// Week view: seven columns, each day's events as small coloured chips; a click on a chip shows
 /// that event, a click on a day's name shows the whole day.
-fn agenda_week(ui: &mut Ui, cals: &[crate::agenda::CalView], open: &mut Option<AgendaDetails>) {
+fn agenda_week(ui: &mut Ui, cals: &[crate::agenda::CalView], open: &mut Option<AgendaDetails>, sc: f32, acc: Color32) {
     use chrono::Datelike;
     let today = chrono::Local::now().date_naive();
     let sid = ui.make_persistent_id("agenda-week");
@@ -1635,7 +1800,7 @@ fn agenda_week(ui: &mut Ui, cals: &[crate::agenda::CalView], open: &mut Option<A
     } else {
         format!("{} – {}", crate::i18n::short_date(monday), crate::i18n::short_date(sunday))
     };
-    match agenda_nav(ui, &title) {
+    match agenda_nav(ui, &title, sc) {
         Some(0) => shift = 0,
         Some(s) => shift += s as i64,
         None => {}
@@ -1645,7 +1810,7 @@ fn agenda_week(ui: &mut Ui, cals: &[crate::agenda::CalView], open: &mut Option<A
     let top = ui.cursor().min.y;
     let height = (ui.available_height() - 4.0).max(40.0);
     let (area, _) = ui.allocate_exact_size(egui::vec2(cw * 7.0, height), Sense::hover());
-    let chip_h = 17.0;
+    let chip_h = 17.0 * sc;
     for i in 0..7 {
         let day = monday + chrono::Duration::days(i);
         let col = egui::Rect::from_min_size(Pos2::new(area.min.x + cw * i as f32, top), egui::vec2(cw, height));
@@ -1657,12 +1822,12 @@ fn agenda_week(ui: &mut Ui, cals: &[crate::agenda::CalView], open: &mut Option<A
         let head = egui::Rect::from_min_size(col.min, egui::vec2(cw, 30.0));
         let hresp = ui.interact(head, ui.id().with(("agenda-wday", day)), Sense::click());
         if day == today {
-            ui.painter().rect_filled(head.shrink(2.0), 4.0, Color32::from_rgb(70, 140, 230).linear_multiply(0.6));
+            ui.painter().rect_filled(head.shrink(2.0), 4.0, acc.linear_multiply(0.6));
         } else if hresp.hovered() && !evs.is_empty() {
             ui.painter().rect_filled(head.shrink(2.0), 4.0, crate::ink::white_alpha(22));
         }
-        ui.painter().text(Pos2::new(head.center().x, head.min.y + 8.0), egui::Align2::CENTER_CENTER, wd_abbr(day), egui::FontId::proportional(10.5), crate::ink::gray(205));
-        ui.painter().text(Pos2::new(head.center().x, head.min.y + 21.0), egui::Align2::CENTER_CENTER, day.day().to_string(), egui::FontId::proportional(13.0), crate::ink::strong());
+        ui.painter().text(Pos2::new(head.center().x, head.min.y + 8.0), egui::Align2::CENTER_CENTER, wd_abbr(day), egui::FontId::proportional(10.5 * sc), crate::ink::gray(205));
+        ui.painter().text(Pos2::new(head.center().x, head.min.y + 21.0), egui::Align2::CENTER_CENTER, day.day().to_string(), egui::FontId::proportional(13.0 * sc), crate::ink::strong());
         if hresp.clicked() && !evs.is_empty() {
             *open = Some((agenda_day_title(day), evs.clone()));
         }
@@ -1675,7 +1840,7 @@ fn agenda_week(ui: &mut Ui, cals: &[crate::agenda::CalView], open: &mut Option<A
             let resp = ui.interact(r, ui.id().with(("agenda-chip", day, k)), Sense::click());
             ui.painter().rect_filled(r, 3.0, color.linear_multiply(if resp.hovered() { 0.75 } else { 0.5 }));
             let text = if e.all_day || e.start.date() != day { e.title.clone() } else { format!("{} {}", e.start.format("%H:%M"), e.title) };
-            let g = ui.painter().layout_no_wrap(text, egui::FontId::proportional(11.0), crate::ink::strong());
+            let g = ui.painter().layout_no_wrap(text, egui::FontId::proportional(11.0 * sc), crate::ink::strong());
             ui.painter().with_clip_rect(r.shrink(2.0)).galley(Pos2::new(r.min.x + 3.0, r.center().y - g.size().y / 2.0), g, crate::ink::strong());
             if resp.clicked() {
                 *open = Some((agenda_day_title(day), vec![(*ci, e.clone())]));
@@ -1685,7 +1850,7 @@ fn agenda_week(ui: &mut Ui, cals: &[crate::agenda::CalView], open: &mut Option<A
         if evs.len() > shown {
             let r = egui::Rect::from_min_size(Pos2::new(col.min.x + 2.0, col.min.y + 34.0 + shown as f32 * (chip_h + 2.0)), egui::vec2(cw - 4.0, chip_h));
             let resp = ui.interact(r, ui.id().with(("agenda-more", day)), Sense::click());
-            ui.painter().text(r.center(), egui::Align2::CENTER_CENTER, format!("+{}", evs.len() - shown), egui::FontId::proportional(11.5), crate::ink::gray(if resp.hovered() { 255 } else { 200 }));
+            ui.painter().text(r.center(), egui::Align2::CENTER_CENTER, format!("+{}", evs.len() - shown), egui::FontId::proportional(11.5 * sc), crate::ink::gray(if resp.hovered() { 255 } else { 200 }));
             if resp.clicked() {
                 *open = Some((agenda_day_title(day), evs.clone()));
             }
@@ -1694,7 +1859,7 @@ fn agenda_week(ui: &mut Ui, cals: &[crate::agenda::CalView], open: &mut Option<A
 }
 
 /// Agenda view: the coming days as a list, each day under its heading; a click on an event shows it.
-fn agenda_list(ui: &mut Ui, cals: &[crate::agenda::CalView], days: i64, open: &mut Option<AgendaDetails>) {
+fn agenda_list(ui: &mut Ui, cals: &[crate::agenda::CalView], days: i64, open: &mut Option<AgendaDetails>, sc: f32) {
     use chrono::{Duration as CDuration, NaiveTime};
     let today = chrono::Local::now().date_naive();
     let now = chrono::Local::now().naive_local();
@@ -1722,7 +1887,7 @@ fn agenda_list(ui: &mut Ui, cals: &[crate::agenda::CalView], days: i64, open: &m
     let status_h = if cals.iter().any(|c| c.error.is_some() || c.truncated || (c.loading && c.events.is_empty())) { 20.0 } else { 0.0 };
     egui::ScrollArea::vertical().max_height((ui.available_height() - status_h).max(30.0)).auto_shrink([false, true]).show(ui, |ui| {
         if rows.is_empty() && cals.iter().all(|c| !c.loading) {
-            ui.label(egui::RichText::new(tf("Nothing in the next {} days.", &[&days])).size(13.0).color(crate::ink::gray(190)));
+            ui.label(egui::RichText::new(tf("Nothing in the next {} days.", &[&days])).size(13.0 * sc).color(crate::ink::gray(190)));
         }
         let mut last_day = None;
         for (k, (day, ci, e)) in rows.iter().enumerate() {
@@ -1734,18 +1899,18 @@ fn agenda_list(ui: &mut Ui, cals: &[crate::agenda::CalView], days: i64, open: &m
                     _ => crate::i18n::long_date(*day),
                 };
                 ui.add_space(3.0);
-                ui.label(egui::RichText::new(label).size(12.0).strong().color(crate::ink::gray(200)));
+                ui.label(egui::RichText::new(label).size(12.0 * sc).strong().color(crate::ink::gray(200)));
             }
-            let (r, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 19.0), Sense::click());
+            let (r, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 19.0 * sc), Sense::click());
             let resp = ui.interact(r, ui.id().with(("agenda-row", k)), Sense::click()).union(resp);
             if resp.hovered() {
                 ui.painter().rect_filled(r, 3.0, crate::ink::white_alpha(22));
             }
             ui.painter().circle_filled(Pos2::new(r.min.x + 5.0, r.center().y), 3.5, CAL_COLORS[ci % CAL_COLORS.len()]);
             let when = if e.all_day { t("all day").to_string() } else { e.start.format("%H:%M").to_string() };
-            ui.painter().text(Pos2::new(r.min.x + 14.0, r.center().y), egui::Align2::LEFT_CENTER, when, egui::FontId::proportional(12.5), crate::ink::gray(185));
+            ui.painter().text(Pos2::new(r.min.x + 14.0, r.center().y), egui::Align2::LEFT_CENTER, when, egui::FontId::proportional(12.5 * sc), crate::ink::gray(185));
             let happening = !e.all_day && e.start <= now && now < e.end;
-            let g = ui.painter().layout_no_wrap(e.title.clone(), egui::FontId::proportional(13.0), if happening { crate::ink::strong() } else { crate::ink::gray(230) });
+            let g = ui.painter().layout_no_wrap(e.title.clone(), egui::FontId::proportional(13.0 * sc), if happening { crate::ink::strong() } else { crate::ink::gray(230) });
             let text_r = egui::Rect::from_min_max(Pos2::new(r.min.x + 62.0, r.min.y), r.max);
             ui.painter().with_clip_rect(text_r).galley(Pos2::new(text_r.min.x, r.center().y - g.size().y / 2.0), g, crate::ink::strong());
             if resp.clicked() {
@@ -1756,13 +1921,13 @@ fn agenda_list(ui: &mut Ui, cals: &[crate::agenda::CalView], days: i64, open: &m
 }
 
 /// The details of one or more events. Returns true when "‹ Back" was clicked.
-fn agenda_details(ui: &mut Ui, (heading, evs): &AgendaDetails, names: &[String]) -> bool {
+fn agenda_details(ui: &mut Ui, (heading, evs): &AgendaDetails, names: &[String], sc: f32) -> bool {
     let mut back = false;
     ui.horizontal(|ui| {
-        if ui.add(egui::Button::new(egui::RichText::new(t("‹ Back")).size(13.0).color(crate::ink::gray(220))).frame(false)).clicked() {
+        if ui.add(egui::Button::new(egui::RichText::new(t("‹ Back")).size(13.0 * sc).color(crate::ink::gray(220))).frame(false)).clicked() {
             back = true;
         }
-        ui.label(egui::RichText::new(heading).size(13.0).strong().color(crate::ink::strong()));
+        ui.label(egui::RichText::new(heading).size(13.0 * sc).strong().color(crate::ink::strong()));
     });
     ui.add_space(2.0);
     egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
@@ -1774,7 +1939,7 @@ fn agenda_details(ui: &mut Ui, (heading, evs): &AgendaDetails, names: &[String])
             ui.horizontal(|ui| {
                 let (r, _) = ui.allocate_exact_size(egui::vec2(10.0, 18.0), Sense::hover());
                 ui.painter().circle_filled(r.center(), 4.0, CAL_COLORS[ci % CAL_COLORS.len()]);
-                ui.add(egui::Label::new(egui::RichText::new(&e.title).size(14.5).strong().color(crate::ink::strong())).wrap());
+                ui.add(egui::Label::new(egui::RichText::new(&e.title).size(14.5 * sc).strong().color(crate::ink::strong())).wrap());
             });
             let when = if e.all_day {
                 let last = e.end.date() - chrono::Duration::days(1);
@@ -1793,16 +1958,16 @@ fn agenda_details(ui: &mut Ui, (heading, evs): &AgendaDetails, names: &[String])
             } else {
                 format!("{}, {}", wd_date(e.start.date()), e.start.format("%H:%M"))
             };
-            ui.label(egui::RichText::new(when).size(12.5).color(crate::ink::gray(215)));
+            ui.label(egui::RichText::new(when).size(12.5 * sc).color(crate::ink::gray(215)));
             if let Some(n) = names.get(*ci) {
-                ui.label(egui::RichText::new(n).size(11.5).color(crate::ink::gray(165)));
+                ui.label(egui::RichText::new(n).size(11.5 * sc).color(crate::ink::gray(165)));
             }
             if !e.location.is_empty() {
-                ui.add(egui::Label::new(egui::RichText::new(tf("Where: {}", &[&e.location])).size(12.5).color(crate::ink::gray(225))).wrap());
+                ui.add(egui::Label::new(egui::RichText::new(tf("Where: {}", &[&e.location])).size(12.5 * sc).color(crate::ink::gray(225))).wrap());
             }
             if !e.description.is_empty() {
                 ui.add_space(2.0);
-                ui.add(egui::Label::new(egui::RichText::new(&*e.description).size(12.5).color(crate::ink::gray(205))).wrap());
+                ui.add(egui::Label::new(egui::RichText::new(&*e.description).size(12.5 * sc).color(crate::ink::gray(205))).wrap());
             }
         }
     });
@@ -2011,13 +2176,13 @@ fn laptop_now() -> LaptopInfo {
 }
 
 /// One status line: icon, text, and a small detail on the right.
-fn status_line(ui: &mut Ui, icon: char, text: &str, detail: &str, color: Color32) {
+fn status_line(ui: &mut Ui, icon: char, text: &str, detail: &str, color: Color32, sc: f32) {
     ui.horizontal(|ui| {
-        ui.add_sized([24.0, 22.0], egui::Label::new(egui::RichText::new(icon.to_string()).size(17.0).color(crate::ink::adapt(color))));
-        ui.add(egui::Label::new(egui::RichText::new(text).size(13.5).color(crate::ink::gray(235))).truncate());
+        ui.add_sized([24.0 * sc, 22.0 * sc], egui::Label::new(egui::RichText::new(icon.to_string()).size(17.0 * sc).color(crate::ink::adapt(color))));
+        ui.add(egui::Label::new(egui::RichText::new(text).size(13.5 * sc).color(crate::ink::gray(235))).truncate());
         if !detail.is_empty() {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(egui::RichText::new(detail).size(12.0).color(crate::ink::gray(175)));
+                ui.label(egui::RichText::new(detail).size(12.0 * sc).color(crate::ink::gray(175)));
             });
         }
     });
@@ -2026,8 +2191,11 @@ fn status_line(ui: &mut Ui, icon: char, text: &str, detail: &str, color: Color32
 struct Laptop;
 
 impl DeskWidget for Laptop {
-    fn ui(&self, ui: &mut Ui, _data: &mut Value) -> WidgetOutput {
+    fn ui(&self, ui: &mut Ui, data: &mut Value) -> WidgetOutput {
         let info = laptop_now();
+        let sc = text_scale(data);
+        let base = has_accent(data).then(|| widget_accent(data, Color32::WHITE));
+        let blue = base.unwrap_or_else(|| Color32::from_rgb(110, 190, 255));
         ui.add_space(2.0);
         match info.battery {
             Some((pct, charging, left)) => {
@@ -2038,16 +2206,16 @@ impl DeskWidget for Laptop {
                     (false, Some(m)) => tf("{}h {}m left", &[&(m / 60), &format!("{:02}", m % 60)]),
                     (false, None) => String::new(),
                 };
-                status_line(ui, icon, &tf("Battery {} %", &[&pct]), &detail, level_color(1.0 - pct as f32 / 100.0));
+                status_line(ui, icon, &tf("Battery {} %", &[&pct]), &detail, level_color_base(1.0 - pct as f32 / 100.0, base), sc);
                 // The charge as a bar.
                 let (r, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 6.0), Sense::hover());
                 ui.painter().rect_filled(r, 3.0, crate::ink::white_alpha(28));
                 let mut fill = r;
                 fill.set_width(r.width() * pct as f32 / 100.0);
-                ui.painter().rect_filled(fill, 3.0, if pct <= 15 { Color32::from_rgb(255, 110, 100) } else { Color32::from_rgb(110, 210, 120) });
+                ui.painter().rect_filled(fill, 3.0, if pct <= 15 { Color32::from_rgb(255, 110, 100) } else { base.unwrap_or(Color32::from_rgb(110, 210, 120)) });
                 ui.add_space(4.0);
             }
-            None => status_line(ui, '\u{E83E}', t("No battery (plugged in)"), "", crate::ink::gray(170)),
+            None => status_line(ui, '\u{E83E}', t("No battery (plugged in)"), "", crate::ink::gray(170), sc),
         }
         match &info.wifi {
             Some(Some((name, q))) => {
@@ -2057,22 +2225,30 @@ impl DeskWidget for Laptop {
                     51..=75 => "▂▄▆",
                     _ => "▂▄▆█",
                 };
-                status_line(ui, '\u{E701}', name, &format!("{bars} {q} %"), Color32::from_rgb(110, 190, 255));
+                status_line(ui, '\u{E701}', name, &format!("{bars} {q} %"), blue, sc);
             }
-            Some(None) => status_line(ui, '\u{EB5E}', t("Wi-Fi: not connected"), "", crate::ink::gray(170)),
-            None => status_line(ui, '\u{EB5E}', t("No Wi-Fi"), "", crate::ink::gray(140)),
+            Some(None) => status_line(ui, '\u{EB5E}', t("Wi-Fi: not connected"), "", crate::ink::gray(170), sc),
+            None => status_line(ui, '\u{EB5E}', t("No Wi-Fi"), "", crate::ink::gray(140), sc),
         }
         match &info.bluetooth {
-            Some((true, names)) if !names.is_empty() => status_line(ui, '\u{E702}', &names.join(", "), t("connected"), Color32::from_rgb(110, 190, 255)),
-            Some((true, _)) => status_line(ui, '\u{E702}', t("Bluetooth on"), t("nothing connected"), Color32::from_rgb(110, 190, 255)),
-            Some((false, _)) => status_line(ui, '\u{E702}', t("Bluetooth off"), "", crate::ink::gray(150)),
-            None => status_line(ui, '\u{E702}', t("No Bluetooth"), "", crate::ink::gray(140)),
+            Some((true, names)) if !names.is_empty() => status_line(ui, '\u{E702}', &names.join(", "), t("connected"), blue, sc),
+            Some((true, _)) => status_line(ui, '\u{E702}', t("Bluetooth on"), t("nothing connected"), blue, sc),
+            Some((false, _)) => status_line(ui, '\u{E702}', t("Bluetooth off"), "", crate::ink::gray(150), sc),
+            None => status_line(ui, '\u{E702}', t("No Bluetooth"), "", crate::ink::gray(140), sc),
         }
         for (name, pct) in &info.bt_batteries {
-            let color = if *pct <= 20 { Color32::from_rgb(255, 110, 100) } else { Color32::from_rgb(110, 190, 255) };
-            status_line(ui, bt_device_icon(name), name, &format!("{pct} %"), color);
+            let color = if *pct <= 20 { Color32::from_rgb(255, 110, 100) } else { blue };
+            status_line(ui, bt_device_icon(name), name, &format!("{pct} %"), color, sc);
         }
         WidgetOutput { changed: false, repaint_after: Some(Duration::from_secs(5)) }
+    }
+
+    fn has_settings(&self) -> bool {
+        true
+    }
+
+    fn settings(&self, ui: &mut Ui, data: &mut Value) -> bool {
+        look_settings(ui, data, true)
     }
 }
 
@@ -2330,6 +2506,7 @@ impl DeskWidget for Media {
     fn settings(&self, ui: &mut Ui, data: &mut Value) -> bool {
         let mut app = data.get("volume_scope").and_then(|v| v.as_str()) != Some("system");
         let mut changed = false;
+        changed |= look_settings(ui, data, true);
         ui.label(t("Volume slider controls:"));
         changed |= ui.radio_value(&mut app, true, t("The playing app")).changed();
         changed |= ui.radio_value(&mut app, false, t("The whole PC")).changed();
@@ -2341,6 +2518,8 @@ impl DeskWidget for Media {
 
     fn ui(&self, ui: &mut Ui, data: &mut Value) -> WidgetOutput {
         refresh_media(false);
+        let sc = text_scale(data);
+        let fill_col = widget_accent(data, crate::ink::gray(230));
         let all: Vec<MediaInfo> = MEDIA.lock().ok().and_then(|g| g.as_ref().map(|(_, m)| m.clone())).unwrap_or_default();
         // Nothing playing: an empty box (it fills again when music starts).
         if all.is_empty() {
@@ -2401,20 +2580,20 @@ impl DeskWidget for Media {
         // Right side: app, title, artist, controls, progress; centred vertically.
         let x0 = art_rect.max.x + 14.0;
         let w = (full.max.x - x0 - 4.0).max(40.0);
-        let block_h = 15.0 + 22.0 + if m.artist.is_empty() { 0.0 } else { 19.0 } + 44.0 + if m.timeline.is_some() { 22.0 } else { 0.0 };
+        let block_h = 15.0 * sc + 22.0 * sc + if m.artist.is_empty() { 0.0 } else { 19.0 * sc } + 44.0 + if m.timeline.is_some() { 22.0 * sc.max(1.0) } else { 0.0 };
         let mut y = (full.center().y - block_h / 2.0).max(full.min.y);
         let p = ui.painter().with_clip_rect(egui::Rect::from_min_max(Pos2::new(x0, full.min.y), full.max));
         let line = |p: &egui::Painter, y: f32, text: &str, size: f32, color: Color32| {
             let g = p.layout_no_wrap(text.to_string(), egui::FontId::proportional(size), color);
             p.galley(Pos2::new(x0, y), g, color);
         };
-        line(&p, y, &app_label(&m.app).to_uppercase(), 10.5, crate::ink::gray(150));
-        y += 15.0;
-        line(&p, y, if m.title.is_empty() { t("(no title)") } else { &m.title }, 16.0, crate::ink::strong());
-        y += 22.0;
+        line(&p, y, &app_label(&m.app).to_uppercase(), 10.5 * sc, crate::ink::gray(150));
+        y += 15.0 * sc;
+        line(&p, y, if m.title.is_empty() { t("(no title)") } else { &m.title }, 16.0 * sc, crate::ink::strong());
+        y += 22.0 * sc;
         if !m.artist.is_empty() {
-            line(&p, y, &m.artist, 13.0, crate::ink::gray(200));
-            y += 19.0;
+            line(&p, y, &m.artist, 13.0 * sc, crate::ink::gray(200));
+            y += 19.0 * sc;
         }
         // Controls: previous, a round play/pause button, next.
         let cy = y + 22.0;
@@ -2479,12 +2658,12 @@ impl DeskWidget for Media {
             let mut done = bar;
             let frac = (shown / end).clamp(0.0, 1.0) as f32;
             done.set_width(bar.width() * frac);
-            pa.rect_filled(done, 2.0, crate::ink::gray(230));
+            pa.rect_filled(done, 2.0, fill_col);
             if resp.hovered() || resp.dragged() {
                 pa.circle_filled(Pos2::new(bar.min.x + bar.width() * frac, bar.center().y), 5.5, crate::ink::strong());
             }
-            pa.text(Pos2::new(x0, y + 10.0), egui::Align2::LEFT_TOP, mmss(shown), egui::FontId::proportional(10.5), crate::ink::gray(160));
-            pa.text(Pos2::new(x0 + w, y + 10.0), egui::Align2::RIGHT_TOP, mmss(end), egui::FontId::proportional(10.5), crate::ink::gray(160));
+            pa.text(Pos2::new(x0, y + 10.0), egui::Align2::LEFT_TOP, mmss(shown), egui::FontId::proportional(10.5 * sc), crate::ink::gray(160));
+            pa.text(Pos2::new(x0 + w, y + 10.0), egui::Align2::RIGHT_TOP, mmss(end), egui::FontId::proportional(10.5 * sc), crate::ink::gray(160));
             if m.playing {
                 repaint = Duration::from_secs(1); // the seconds move on
             }

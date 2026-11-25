@@ -255,11 +255,13 @@ pub struct Weather;
 
 impl DeskWidget for Weather {
     fn ui(&self, ui: &mut Ui, data: &mut Value) -> WidgetOutput {
+        let sc = crate::widgets::text_scale(data);
+        let bar_col = crate::widgets::widget_accent(data, Color32::from_rgb(255, 196, 90));
         let out = WidgetOutput { changed: false, repaint_after: Some(Duration::from_secs(if crate::leak_test("weather") { 60 } else { 600 })) };
         let list = places(data);
         if list.is_empty() {
             ui.add_space(6.0);
-            ui.label(egui::RichText::new(t("Right-click here and choose \"Widget settings…\" to pick a place.")).size(13.0).color(crate::ink::gray(220)));
+            ui.label(egui::RichText::new(t("Right-click here and choose \"Widget settings…\" to pick a place.")).size(13.0 * sc).color(crate::ink::gray(220)));
             return out;
         }
         // Several places: dots at the bottom switch between them.
@@ -295,7 +297,7 @@ impl DeskWidget for Weather {
                 Some(e) => (t("Weather: no connection, trying again in a few minutes.").to_string(), Some(e), Duration::from_secs(300)),
                 None => (t("Loading…").to_string(), None, Duration::from_secs(2)),
             };
-            let r = ui.label(egui::RichText::new(text).size(12.0).color(crate::ink::gray(170)));
+            let r = ui.label(egui::RichText::new(text).size(12.0 * sc).color(crate::ink::gray(170)));
             if let Some(tip) = tip {
                 r.on_hover_text(tip);
             }
@@ -313,7 +315,7 @@ impl DeskWidget for Weather {
         let faint = crate::ink::faint();
         let blue = Color32::from_rgb(130, 190, 255);
         let line = |y: f32| p.line_segment([Pos2::new(full.min.x + 4.0, y), Pos2::new(full.max.x - 4.0, y)], egui::Stroke::new(1.0_f32, crate::ink::line()));
-        let font = |s: f32| egui::FontId::proportional(s);
+        let font = |s: f32| egui::FontId::proportional(s * sc);
         let x0 = full.min.x;
         let y0 = full.min.y;
         let today = f.days.first();
@@ -444,7 +446,7 @@ impl DeskWidget for Weather {
                     let a = bar_l + ((d.min - lo) / span) as f32 * (bar_r - bar_l);
                     let b = bar_l + ((d.max - lo) / span) as f32 * (bar_r - bar_l);
                     let fill = egui::Rect::from_min_max(Pos2::new(a, cy - 2.0), Pos2::new(b.max(a + 4.0), cy + 2.0));
-                    p.rect_filled(fill, egui::CornerRadius::same(2), Color32::from_rgb(255, 196, 90));
+                    p.rect_filled(fill, egui::CornerRadius::same(2), bar_col);
                 }
             } else {
                 // Columns (a short box).
@@ -475,6 +477,8 @@ impl DeskWidget for Weather {
         let mut changed = false;
         // The look: picking one also gives the box a size that fits it.
         ui.label(egui::RichText::new(t("Look")).strong());
+        changed |= crate::widgets::accent_setting(ui, data);
+        changed |= crate::widgets::text_size_setting(ui, data);
         let view = data["view"].as_str().unwrap_or("").to_string();
         ui.horizontal_wrapped(|ui| {
             for (key, label, size) in [
