@@ -728,6 +728,7 @@ pub static ES: &[(&str, &str)] = &[
     ("Minimal", "Minimalista"),
     ("Light frost", "Escarchado claro"),
     ("Accent", "Acento"),
+    ("Undo the changes made in this window", "Deshacer los cambios hechos en esta ventana"),
 ];
 
 pub static CA: &[(&str, &str)] = &[
@@ -1176,6 +1177,7 @@ pub static CA: &[(&str, &str)] = &[
     ("Minimal", "Minimalista"),
     ("Light frost", "Gelat clar"),
     ("Accent", "Accent"),
+    ("Undo the changes made in this window", "Desfés els canvis fets en aquesta finestra"),
 ];
 
 pub static FR: &[(&str, &str)] = &[
@@ -1624,6 +1626,7 @@ pub static FR: &[(&str, &str)] = &[
     ("Minimal", "Minimal"),
     ("Light frost", "Givre clair"),
     ("Accent", "Accent"),
+    ("Undo the changes made in this window", "Annuler les modifications faites dans cette fenêtre"),
 ];
 
 pub static DE: &[(&str, &str)] = &[
@@ -2072,6 +2075,7 @@ pub static DE: &[(&str, &str)] = &[
     ("Minimal", "Minimal"),
     ("Light frost", "Helle Mattierung"),
     ("Accent", "Akzent"),
+    ("Undo the changes made in this window", "Die in diesem Fenster vorgenommenen Änderungen rückgängig machen"),
 ];
 
 pub static IT: &[(&str, &str)] = &[
@@ -2520,6 +2524,7 @@ pub static IT: &[(&str, &str)] = &[
     ("Minimal", "Minimale"),
     ("Light frost", "Gelo chiaro"),
     ("Accent", "Accento"),
+    ("Undo the changes made in this window", "Annulla le modifiche fatte in questa finestra"),
 ];
 
 pub static PT: &[(&str, &str)] = &[
@@ -2968,6 +2973,7 @@ pub static PT: &[(&str, &str)] = &[
     ("Minimal", "Minimalista"),
     ("Light frost", "Geada clara"),
     ("Accent", "Destaque"),
+    ("Undo the changes made in this window", "Anular as alterações feitas nesta janela"),
 ];
 
 #[cfg(test)]

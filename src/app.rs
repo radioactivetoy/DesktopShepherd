@@ -225,6 +225,8 @@ pub struct DeskApp {
     focus_personalize: bool,
     /// Which tab of that window: 0 = look, 1 = widget settings.
     personalize_tab: u8,
+    /// The box as it was when Personalize opened (Cancel puts it back).
+    personalize_before: Option<Fence>,
     /// Shared data changed (files, icons, layout, selection): every box draws on the next pass.
     /// Otherwise a DirectX box draws only for its own reasons (see `HostSystem::frame`).
     redraw_all: bool,
@@ -528,6 +530,7 @@ impl DeskApp {
             personalize: None,
             focus_personalize: false,
             personalize_tab: 0,
+            personalize_before: None,
             redraw_all: true,
             icon_sizes: Vec::new(),
             cfg_fp: None,
@@ -5461,6 +5464,7 @@ impl DeskApp {
         let Some(id) = self.personalize else { return };
         if !self.layout.fences.iter().any(|f| f.id == id) {
             self.personalize = None; // the box was deleted
+            self.personalize_before = None;
             return;
         }
         #[cfg(windows)]
@@ -5471,7 +5475,12 @@ impl DeskApp {
             let (x, y) = (((sw - w) / 2.0).max(0.0), ((sh - h) / 2.0).max(0.0));
             let rect_px = [(x * s) as i32, (y * s) as i32, (w * s) as i32, (h * s) as i32];
             let force = self.panel_force;
+            // Remember the box as it is when the window opens (or switches to another box).
+            if self.personalize_before.as_ref().map(|f| f.id != id).unwrap_or(true) {
+                self.personalize_before = self.layout.fences.iter().find(|f| f.id == id).cloned();
+            }
             let mut close = false;
+            let mut cancel = false;
             let mut dirty = false;
             let fences = &mut self.layout.fences;
             let presets = &mut self.layout.look_presets;
@@ -5479,8 +5488,12 @@ impl DeskApp {
             let mut tab = self.personalize_tab;
             let mut resize = false;
             hosts.panel(PERSONALIZE_PANEL, crate::host::PanelKind::Settings, "Personalize", rect_px, false, force, |pctx| {
-                if pctx.input(|i| i.viewport().close_requested() || i.key_pressed(egui::Key::Escape)) {
+                // The window's close button keeps the changes (like Done); Esc cancels them.
+                if pctx.input(|i| i.viewport().close_requested()) {
                     close = true;
+                }
+                if pctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+                    cancel = true;
                 }
                 let Some(fence) = fences.iter_mut().find(|f| f.id == id) else { return };
                 let widget_kind = fence.widget.as_ref().and_then(|w| widgets::find(&w.kind));
@@ -5498,6 +5511,9 @@ impl DeskApp {
                         ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
                             if ui.button(t("Done")).clicked() {
                                 close = true;
+                            }
+                            if ui.button(t("Cancel")).on_hover_text(t("Undo the changes made in this window")).clicked() {
+                                cancel = true;
                             }
                         });
                     });
@@ -5532,9 +5548,28 @@ impl DeskApp {
             if std::mem::take(&mut self.focus_personalize) {
                 hosts.apply(PERSONALIZE_PANEL, &ViewportCommand::Focus);
             }
+            if cancel {
+                // Put the box back as it was, keeping what isn't edited here (its icons, tabs,
+                // place, and whether it is rolled up).
+                if let (Some(before), Some(f)) = (self.personalize_before.clone(), self.layout.fences.iter_mut().find(|f| f.id == id)) {
+                    let (tabs, sel_tab, expanded, rect) = (std::mem::take(&mut f.tabs), f.sel_tab, f.expanded, f.rect);
+                    let size_changed = (before.rect[2] - rect[2]).abs() > 0.5 || (before.rect[3] - rect[3]).abs() > 0.5;
+                    *f = before;
+                    f.tabs = tabs;
+                    f.sel_tab = sel_tab;
+                    f.expanded = expanded;
+                    // Keep where the box is, but undo a size a widget look asked for.
+                    f.rect[0] = rect[0];
+                    f.rect[1] = rect[1];
+                    resize |= size_changed;
+                    dirty = true;
+                }
+                close = true;
+            }
             if close {
                 hosts.close_panel(PERSONALIZE_PANEL);
                 self.personalize = None;
+                self.personalize_before = None;
             }
             self.hosts = Some(hosts);
             if resize {
