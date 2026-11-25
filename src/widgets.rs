@@ -210,7 +210,7 @@ impl DeskWidget for Clock {
         let h24 = data.get("h24").and_then(|v| v.as_bool()).unwrap_or(true);
         let time = if h24 { now.format("%H:%M").to_string() } else { now.format("%I:%M %p").to_string() };
         let sc = text_scale(data);
-        let mut changed = false;
+        let changed = false;
         let zones: Vec<(String, String)> = data
             .get("zones")
             .and_then(|z| z.as_array())
@@ -264,13 +264,7 @@ impl DeskWidget for Clock {
                 }
             })
             .response;
-        resp.context_menu(|ui| {
-            if ui.checkbox(&mut data_bool(data, "h24", true), t("24-hour")).clicked() {
-                data["h24"] = json!(!h24);
-                changed = true;
-                ui.close_menu();
-            }
-        });
+        let _ = resp;
         // Wake up exactly when the minute changes; nothing in between.
         let secs_left = 60 - (now.timestamp() % 60) as u64;
         WidgetOutput { changed, repaint_after: Some(Duration::from_millis(secs_left * 1000 + 50)) }
@@ -1050,13 +1044,7 @@ impl DeskWidget for Calendar {
                 }
             })
             .response;
-        resp.context_menu(|ui| {
-            if ui.checkbox(&mut data_bool(data, "sunday", false), t("Week starts on Sunday")).clicked() {
-                data["sunday"] = json!(!sunday_first);
-                out.changed = true;
-                ui.close_menu();
-            }
-        });
+        let _ = resp;
         ui.ctx().data_mut(|d| d.insert_temp(mid, shift));
         // Next redraw: just after midnight (the day changes), nothing in between.
         let now = chrono::Local::now().naive_local();
@@ -1980,8 +1968,8 @@ fn agenda_details(ui: &mut Ui, (heading, evs): &AgendaDetails, names: &[String],
 struct LaptopInfo {
     /// Battery: percent, charging (plugged in), minutes left (if Windows knows). None = no battery.
     battery: Option<(u8, bool, Option<u32>)>,
-    /// Wi-Fi: Some(Some((network, signal 0-100))) connected, Some(None) not connected, None = no Wi-Fi.
-    wifi: Option<Option<(String, u32)>>,
+    /// Connection: Some((wired, link speed in bit/s)) when a network adapter is connected, None = not connected.
+    connection: Option<(bool, u64)>,
     /// Bluetooth: None = no Bluetooth, Some((on, connected device names)).
     bluetooth: Option<(bool, Vec<String>)>,
     /// Connected Bluetooth devices that report a battery: (name, percent). Read every 5 minutes.
@@ -2075,45 +2063,61 @@ fn read_battery() -> Option<(u8, bool, Option<u32>)> {
     None
 }
 
-/// Wi-Fi and Bluetooth: slower calls that can wake radios, so only every 30 s on a helper thread.
+/// The connected network adapter: (wired, link speed in bit/s). Wired wins when both are up. Read
+/// from the interface table only (no WLAN calls: those need location permission on Windows 11).
+#[cfg(windows)]
+fn read_connection() -> Option<(bool, u64)> {
+    use windows::Win32::NetworkManagement::IpHelper::{FreeMibTable, GetIfTable2, MIB_IF_TABLE2};
+    use windows::Win32::NetworkManagement::Ndis::IfOperStatusUp;
+    let mut table: *mut MIB_IF_TABLE2 = std::ptr::null_mut();
+    if unsafe { GetIfTable2(&mut table) }.0 != 0 || table.is_null() {
+        return None;
+    }
+    let mut wired: Option<u64> = None;
+    let mut wifi: Option<u64> = None;
+    unsafe {
+        let n = (*table).NumEntries as usize;
+        let rows = std::slice::from_raw_parts((*table).Table.as_ptr(), n);
+        for row in rows {
+            // Flag bits: 0 hardware interface, 7 end-point interface. MediaConnectState 1 = connected.
+            let flags = row.InterfaceAndOperStatusFlags._bitfield;
+            if row.OperStatus != IfOperStatusUp || row.MediaConnectState.0 != 1 || flags & 1 == 0 || flags & 0x80 != 0 {
+                continue;
+            }
+            let speed = row.ReceiveLinkSpeed;
+            let slot = match row.Type {
+                6 => &mut wired,
+                71 => &mut wifi,
+                _ => continue,
+            };
+            *slot = Some(slot.map_or(speed, |s| s.max(speed)));
+        }
+        FreeMibTable(table as *const core::ffi::c_void);
+    }
+    wired.map(|s| (true, s)).or(wifi.map(|s| (false, s)))
+}
+#[cfg(not(windows))]
+fn read_connection() -> Option<(bool, u64)> {
+    None
+}
+
+/// "1 Gb/s", "866 Mb/s"… for a link speed in bit/s.
+fn link_speed_text(bps: u64) -> String {
+    if bps == 0 || bps == u64::MAX {
+        String::new()
+    } else if bps >= 1_000_000_000 {
+        let g = bps as f64 / 1e9;
+        if (g - g.round()).abs() < 0.05 { format!("{} Gb/s", g.round() as u64) } else { format!("{g:.1} Gb/s") }
+    } else {
+        format!("{} Mb/s", bps / 1_000_000)
+    }
+}
+
+/// Bluetooth and the network connection: slower calls that can wake radios, so only every 30 s on a helper thread.
 #[cfg(windows)]
 fn read_laptop() -> LaptopInfo {
     let mut info = LaptopInfo::default();
-    unsafe {
-        use windows::Win32::Foundation::HANDLE;
-        use windows::Win32::NetworkManagement::WiFi::*;
-        let mut ver = 0u32;
-        let mut h = HANDLE::default();
-        if WlanOpenHandle(2, None, &mut ver, &mut h) == 0 {
-            let mut list: *mut WLAN_INTERFACE_INFO_LIST = std::ptr::null_mut();
-            if WlanEnumInterfaces(h, None, &mut list) == 0 && !list.is_null() {
-                let n = (*list).dwNumberOfItems as usize;
-                if n > 0 {
-                    info.wifi = Some(None);
-                    let first = (*list).InterfaceInfo.as_ptr();
-                    for i in 0..n {
-                        let iface = &*first.add(i);
-                        if iface.isState != wlan_interface_state_connected {
-                            continue;
-                        }
-                        let mut size = 0u32;
-                        let mut data: *mut core::ffi::c_void = std::ptr::null_mut();
-                        if WlanQueryInterface(h, &iface.InterfaceGuid, wlan_intf_opcode_current_connection, None, &mut size, &mut data, None) == 0 && !data.is_null() {
-                            let a = &*(data as *const WLAN_CONNECTION_ATTRIBUTES);
-                            let ssid = &a.wlanAssociationAttributes.dot11Ssid;
-                            let len = (ssid.uSSIDLength as usize).min(32);
-                            let name = String::from_utf8_lossy(&ssid.ucSSID[..len]).to_string();
-                            info.wifi = Some(Some((name, a.wlanAssociationAttributes.wlanSignalQuality.min(100))));
-                            WlanFreeMemory(data);
-                            break;
-                        }
-                    }
-                }
-                WlanFreeMemory(list as *const _);
-            }
-            let _ = WlanCloseHandle(h, None);
-        }
-    }
+    info.connection = read_connection();
     unsafe {
         use windows::Win32::Devices::Bluetooth::*;
         use windows::Win32::Foundation::{CloseHandle, BOOL, HANDLE};
@@ -2217,18 +2221,10 @@ impl DeskWidget for Laptop {
             }
             None => status_line(ui, '\u{E83E}', t("No battery (plugged in)"), "", crate::ink::gray(170), sc),
         }
-        match &info.wifi {
-            Some(Some((name, q))) => {
-                let bars = match q {
-                    0..=25 => "▂",
-                    26..=50 => "▂▄",
-                    51..=75 => "▂▄▆",
-                    _ => "▂▄▆█",
-                };
-                status_line(ui, '\u{E701}', name, &format!("{bars} {q} %"), blue, sc);
-            }
-            Some(None) => status_line(ui, '\u{EB5E}', t("Wi-Fi: not connected"), "", crate::ink::gray(170), sc),
-            None => status_line(ui, '\u{EB5E}', t("No Wi-Fi"), "", crate::ink::gray(140), sc),
+        match info.connection {
+            Some((true, speed)) => status_line(ui, '\u{E839}', t("Wired network"), &link_speed_text(speed), blue, sc),
+            Some((false, speed)) => status_line(ui, '\u{E701}', t("Wi-Fi"), &link_speed_text(speed), blue, sc),
+            None => status_line(ui, '\u{EB5E}', t("Not connected"), "", crate::ink::gray(170), sc),
         }
         match &info.bluetooth {
             Some((true, names)) if !names.is_empty() => status_line(ui, '\u{E702}', &names.join(", "), t("connected"), blue, sc),
