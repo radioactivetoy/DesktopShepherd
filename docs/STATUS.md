@@ -1,12 +1,19 @@
-# Status (1.0.2, 2026-11-25)
+# Status (1.0.3, 2026-11-25)
 
-Current version: **1.0.2** (1.0.0 was the first stable release; tags v0.2.0-beta.1..5, v1.0.0-rc.1..3 before it).
+Current version: **1.0.3** (1.0.0 was the first stable release; tags v0.2.0-beta.1..5, v1.0.0-rc.1..3 before it).
 v1.0.0-rc.1, rc.2 and rc.3. The workflow (read-only build job + separate publish job, actions
 pinned to SHAs, Rust 1.100.0) publishes the Setup exe, the Portable zip and `SHA256SUMS.txt`, and
 marks beta and rc tags as pre-releases. Release notes live in `docs/release-notes/<tag>.md`; after
 the workflow finishes they are put on the release page and the release is made "Latest" by hand so
 it shows on the repo main page:
 `gh release edit <tag> --title "DesktopShepherd 1.0 RC N" --notes-file docs/release-notes/<tag>.md --prerelease=false --latest`.
+
+1.0.3: auto-sort tab rules per box (`Fence.categories`, None = the Settings list, which is the
+default; Personalize > "Tabs by kind"); folder boxes can be split into tabs by kind
+(`Fence.kind_tabs`, `Fence::rule_tabs()`; old folder boxes with `auto_sort` convert on load,
+`normalize_kind_tabs`); rules reorder by dragging their handle (`rules_editor`), box tabs by
+dragging the tab (`fence_window`, `model::move_item` / `follow_index`); built-in tab names are
+translated when drawn (`i18n::tab_name`); test that presets keep every look option.
 
 Added since rc.1 (all in rc.2/rc.3): world clock (clock widget); network speed (system monitor,
 `GetIfTable2`, graph); Now playing volume slider + mute (hover), seek on the progress bar, and

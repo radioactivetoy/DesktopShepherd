@@ -126,6 +126,17 @@ pub fn t(s: &'static str) -> &'static str {
     }
 }
 
+/// A tab name as shown: the program's own tab names (the default rules, "Folders", "Other",
+/// "Desktop") in the chosen language; names the person typed stay as they are. Only for drawing:
+/// rules and tabs keep their saved names.
+pub fn tab_name(name: &str) -> String {
+    const BUILTIN: [&str; 7] = ["Apps", "Files", "Archives", "Pictures", "Folders", "Other", "Desktop"];
+    match BUILTIN.iter().find(|b| **b == name) {
+        Some(b) => t(b).to_string(),
+        None => name.to_string(),
+    }
+}
+
 /// `t` with `{}` placeholders filled in order: tf("{} items", &[&n]).
 pub fn tf(s: &'static str, args: &[&dyn std::fmt::Display]) -> String {
     let mut out = String::new();
@@ -742,6 +753,11 @@ pub static ES: &[(&str, &str)] = &[
     ("Sort into tabs by kind", "Ordenar en pestañas por tipo"),
     ("Splits this folder's items into tabs (Apps, Files, Pictures…) using the auto-sort tab rules", "Divide los elementos de esta carpeta en pestañas (Aplicaciones, Archivos, Imágenes…) con las reglas de las pestañas de orden automático"),
     ("Tabs by kind", "Pestañas por tipo"),
+    ("Files", "Archivos"),
+    ("Archives", "Comprimidos"),
+    ("Pictures", "Imágenes"),
+    ("Folders", "Carpetas"),
+    ("Other", "Otros"),
 ];
 
 pub static CA: &[(&str, &str)] = &[
@@ -1204,6 +1220,11 @@ pub static CA: &[(&str, &str)] = &[
     ("Sort into tabs by kind", "Ordenar en pestanyes per tipus"),
     ("Splits this folder's items into tabs (Apps, Files, Pictures…) using the auto-sort tab rules", "Divideix els elements d'aquesta carpeta en pestanyes (Aplicacions, Fitxers, Imatges…) amb les regles de les pestanyes d'ordre automàtic"),
     ("Tabs by kind", "Pestanyes per tipus"),
+    ("Files", "Fitxers"),
+    ("Archives", "Comprimits"),
+    ("Pictures", "Imatges"),
+    ("Folders", "Carpetes"),
+    ("Other", "Altres"),
 ];
 
 pub static FR: &[(&str, &str)] = &[
@@ -1666,6 +1687,11 @@ pub static FR: &[(&str, &str)] = &[
     ("Sort into tabs by kind", "Trier en onglets par type"),
     ("Splits this folder's items into tabs (Apps, Files, Pictures…) using the auto-sort tab rules", "Répartit les éléments de ce dossier en onglets (Applications, Fichiers, Images…) selon les règles des onglets du tri automatique"),
     ("Tabs by kind", "Onglets par type"),
+    ("Files", "Fichiers"),
+    ("Archives", "Archives"),
+    ("Pictures", "Images"),
+    ("Folders", "Dossiers"),
+    ("Other", "Autres"),
 ];
 
 pub static DE: &[(&str, &str)] = &[
@@ -2128,6 +2154,11 @@ pub static DE: &[(&str, &str)] = &[
     ("Sort into tabs by kind", "In Registerkarten nach Art sortieren"),
     ("Splits this folder's items into tabs (Apps, Files, Pictures…) using the auto-sort tab rules", "Teilt die Elemente dieses Ordners nach den Regeln der automatischen Sortierung in Registerkarten auf (Apps, Dateien, Bilder …)"),
     ("Tabs by kind", "Registerkarten nach Art"),
+    ("Files", "Dateien"),
+    ("Archives", "Archive"),
+    ("Pictures", "Bilder"),
+    ("Folders", "Ordner"),
+    ("Other", "Sonstige"),
 ];
 
 pub static IT: &[(&str, &str)] = &[
@@ -2590,6 +2621,11 @@ pub static IT: &[(&str, &str)] = &[
     ("Sort into tabs by kind", "Ordina in schede per tipo"),
     ("Splits this folder's items into tabs (Apps, Files, Pictures…) using the auto-sort tab rules", "Divide gli elementi di questa cartella in schede (App, File, Immagini…) con le regole delle schede dell'ordinamento automatico"),
     ("Tabs by kind", "Schede per tipo"),
+    ("Files", "File"),
+    ("Archives", "Archivi"),
+    ("Pictures", "Immagini"),
+    ("Folders", "Cartelle"),
+    ("Other", "Altro"),
 ];
 
 pub static PT: &[(&str, &str)] = &[
@@ -3052,6 +3088,11 @@ pub static PT: &[(&str, &str)] = &[
     ("Sort into tabs by kind", "Ordenar em separadores por tipo"),
     ("Splits this folder's items into tabs (Apps, Files, Pictures…) using the auto-sort tab rules", "Divide os itens desta pasta em separadores (Aplicações, Ficheiros, Imagens…) com as regras dos separadores da ordenação automática"),
     ("Tabs by kind", "Separadores por tipo"),
+    ("Files", "Ficheiros"),
+    ("Archives", "Arquivos"),
+    ("Pictures", "Imagens"),
+    ("Folders", "Pastas"),
+    ("Other", "Outros"),
 ];
 
 #[cfg(test)]

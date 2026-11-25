@@ -5,7 +5,7 @@
 **Tidy, frosted-glass boxes for your Windows 11 desktop icons. Light on resources, safe by design.**
 
 [Download the latest release](https://github.com/radioactivetoy/DesktopShepherd/releases/latest)
-(Setup or Portable) - current version: 1.0.2
+(Setup or Portable) - current version: 1.0.3
 
 <img src="docs/screenshots/overview.png" alt="DesktopShepherd boxes on a Windows 11 desktop" width="100%">
 
@@ -54,8 +54,12 @@ These rules decide what goes in and what stays out.
 - Roll up a box to its title bar, and open it again just by hovering.
 - Pages of boxes (dots show the page; Ctrl+Alt+PageDown / PageUp or the tray icon switch pages).
 - When icons do not fit: scroll, or "pages with dots".
-- **Folder boxes** show the live contents of a folder, for example Downloads.
+- **Folder boxes** show the live contents of a folder, for example Downloads, and can split it
+  into tabs by kind (Apps, Files, Pictures…).
 - **Auto-sort box** with your own category rules: by file type, name pattern (`*invoice*`) or age.
+  The rules in Settings are the default; any auto-sort or folder box can have its own
+  (Personalize > Tabs by kind).
+- **Drag to reorder:** drag a tab along the box, or a rule by its handle, to change the order.
 - **Snapping** to other boxes and screen edges, with an adjustable gap, and an optional grid.
   Hold Alt to place a box freely.
 - **Draw a box anywhere:** press Ctrl+Alt+B, drag a rectangle, choose Box, Folder box or a widget.

@@ -2189,7 +2189,9 @@ fn fence_window(
         let sel = fence.sel_tab.min(tabs.len().saturating_sub(1));
         if let Some(strip) = a.tabs {
             let names: Vec<String> = tabs.iter().map(|t| t.0.clone()).collect();
-            let rects = fv::paint_tabs(&painter, fence, strip, &names, sel, 1.0);
+            // The program's own tab names are drawn in the chosen language (`names` keeps the saved ones).
+            let shown: Vec<String> = if fence.rule_tabs() { names.iter().map(|n| crate::i18n::tab_name(n)).collect() } else { names.clone() };
+            let rects = fv::paint_tabs(&painter, fence, strip, &shown, sel, 1.0);
             // Tabs can be dragged to a new place (only boxes with several tabs, not widgets; folders only when split by kind).
             let can_reorder = rects.len() > 1 && fence.widget.is_none() && (fence.folder.is_none() || fence.rule_tabs());
             let mut dragging: Option<usize> = None;

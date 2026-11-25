@@ -131,6 +131,10 @@ is no smaller, so the debug build, which is opt-level 3, is fine for daily use.)
   `app.rs` (Personalize window, `show_personalize`).
 - Box look options (colour, border, fonts, text, icon size/spacing) → `Fence` fields in
   `model.rs`, drawing in `fence_view.rs`, Personalize window in `app.rs` (`show_personalize`, columns `look_left` / `look_right`).
+- Tabs by kind (auto-sort boxes and folder boxes with `kind_tabs`) → rules `CategoryRule` in
+  `model.rs` (`Fence.categories` per box, None = `Settings.categories`; `Fence::rule_tabs()`),
+  grouping in `fence_view::visible_tabs`, editor `rules_editor` in `app.rs`; built-in tab names are
+  translated only when drawn (`i18n::tab_name`), never in saved data.
 - Quick search → `src/search.rs` (ranking, unit tests) + `show_search` in `app.rs`; the shortcut
   is in `runloop.rs` (`SEARCH_HOTKEYS`, `take_search_request`).
 - Drop shadow -> `src/shadow.rs`: separate click-through layered window under each box, only exists when `Fence.shadow` is on (synced from the box pass in `app.rs`, restacked in `desktop::send_to_bottom`).
