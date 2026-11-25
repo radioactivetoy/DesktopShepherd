@@ -397,7 +397,14 @@ impl DeskApp {
         let initial = desktop::scan(&clean_paths(&layout));
         if first_run {
             crate::i18n::set_lang(layout.settings.language); // the first boxes get their names in this language
-            layout = default_layout(&initial);
+            // Read where Windows' icons sit before anything else (a short read-only shell call on
+            // its own thread, at most 3 s; None = keep the simple layout).
+            let icon_positions = desktop::desktop_icon_positions(Duration::from_secs(3));
+            storage::log_line(&format!(
+                "first run: {} icon position(s) read from Windows",
+                icon_positions.as_ref().map(|v| v.len() as i64).unwrap_or(-1)
+            ));
+            layout = default_layout(&initial, icon_positions.as_deref());
             // Just installed by the setup: start with Windows (the setup asked for it).
             if std::env::var_os("DESKTOPSHEPHERD_INSTALLED").is_some() {
                 layout.settings.start_with_windows = true;
@@ -4311,9 +4318,25 @@ impl DeskApp {
 // ============================================================================================
 
 /// First run: one box for shortcuts/apps, one auto-sort box for everything else, and a clock.
-fn default_layout(items: &HashMap<String, DeskItem>) -> Layout {
+/// `icons`: where Windows' own icons sit (see `desktop::desktop_icon_positions`); icons on other
+/// monitors than the main one get a box of their own there, so nothing seems to vanish.
+fn default_layout(items: &HashMap<String, DeskItem>, icons: Option<&[(String, i32, i32)]>) -> Layout {
     let mut layout = Layout { version: 1, next_id: 1, ..Default::default() };
-    let mut apps: Vec<&DeskItem> = items.values().filter(|i| i.on_desktop && i.category == Category::Apps).collect();
+    let monitors = desktop::monitors();
+    let scale = desktop::system_scale().max(0.5);
+    let extra = match icons {
+        Some(icons) if monitors.len() > 1 => {
+            let work: Vec<Rect> = monitors.iter().map(|m| desktop::work_area_at(m.rect.center(), scale)).collect();
+            let cell = fv::cell_size(&Fence::default(), (75.0, 0.0));
+            plan_monitor_boxes(&monitors, &work, icons, items, scale, cell)
+        }
+        _ => Vec::new(),
+    };
+    let moved: HashSet<String> = extra.iter().flat_map(|b| b.paths.iter().map(|p| p.to_lowercase())).collect();
+    let mut apps: Vec<&DeskItem> = items
+        .values()
+        .filter(|i| i.on_desktop && i.category == Category::Apps && !moved.contains(&i.path.to_lowercase()))
+        .collect();
     apps.sort_by_key(|i| i.name.to_lowercase());
     // Proportions follow the original's saved layout picture: wide boxes across the top,
     // a margin of about 2% around them.
@@ -4355,12 +4378,144 @@ fn default_layout(items: &HashMap<String, DeskItem>) -> Layout {
         widget: Some(WidgetConfig {
             kind: "note".into(),
             data: serde_json::json!({
-                "text": t("Welcome to DesktopShepherd!\n• Drag a box by its title, resize from its edges.\n• Double-click a title to roll the box up.\n• Right-click a box or an icon for options.")
+                "text": format!(
+                    "{}\n{}",
+                    t("Your desktop icons are now in these boxes. Nothing was moved or deleted: close DesktopShepherd and they're back as before."),
+                    t("Welcome to DesktopShepherd!\n• Drag a box by its title, resize from its edges.\n• Double-click a title to roll the box up.\n• Right-click a box or an icon for options.")
+                )
             }),
         }),
         ..Fence::default()
     });
+    // One box per other monitor, bound to it like any box created there.
+    for b in extra {
+        let id = layout.new_id();
+        let mut f = Fence {
+            id,
+            name: tf("Desktop {}", &[&(b.monitor + 1)]),
+            rect: b.rect,
+            tabs: vec![Tab { name: "Main".into(), items: b.paths }],
+            ..Fence::default()
+        };
+        bind_to_monitor(&mut f, &monitors);
+        layout.fences.push(f);
+    }
     layout
+}
+
+/// A box planned for a monitor other than the main one.
+#[derive(Debug, PartialEq)]
+struct MonitorBox {
+    /// Index in the monitor list (role): 1 = second monitor, ...
+    monitor: usize,
+    /// The icons' paths, in Windows' order (top to bottom, then left to right).
+    paths: Vec<String>,
+    /// x, y, width, height in points.
+    rect: [f32; 4],
+}
+
+/// Pure planning step of the first-run layout: which of Windows' desktop icons (`icons`: lowercase
+/// path, screen pixel x, y) sit on each non-main monitor, and where that monitor's box goes: at
+/// the top-left of the icons' area, sized to hold them (at least 300 x 200 points), inside the
+/// monitor's work area (`work`, same order as `monitors`). `cell`: one icon's cell in points. An icon counts as being on the monitor that holds the centre of its cell (the reported position is the cell's top-left).
+fn plan_monitor_boxes(
+    monitors: &[desktop::Monitor],
+    work: &[Rect],
+    icons: &[(String, i32, i32)],
+    items: &HashMap<String, DeskItem>,
+    scale: f32,
+    cell: Vec2,
+) -> Vec<MonitorBox> {
+    let mut out = Vec::new();
+    for (mi, m) in monitors.iter().enumerate() {
+        if m.primary {
+            continue;
+        }
+        let mut here: Vec<(i32, i32, &DeskItem)> = icons
+            .iter()
+            .filter(|(_, x, y)| m.rect.contains(Pos2::new(*x as f32 / scale + cell.x * 0.5, *y as f32 / scale + cell.y * 0.5)))
+            .filter_map(|(k, x, y)| items.get(k).filter(|i| i.on_desktop).map(|i| (*y, *x, i)))
+            .collect();
+        if here.is_empty() {
+            continue;
+        }
+        here.sort_by_key(|(y, x, _)| (*y, *x));
+        let (mut x0, mut y0, mut x1, mut y1) = (i32::MAX, i32::MAX, i32::MIN, i32::MIN);
+        for (y, x, _) in &here {
+            x0 = x0.min(*x);
+            y0 = y0.min(*y);
+            x1 = x1.max(*x);
+            y1 = y1.max(*y);
+        }
+        let (px0, py0) = (x0 as f32 / scale, y0 as f32 / scale);
+        let w = ((x1 - x0) as f32 / scale + cell.x + 24.0).max(300.0);
+        let h = ((y1 - y0) as f32 / scale + cell.y + 60.0).max(200.0);
+        let area = work.get(mi).copied().unwrap_or(m.rect);
+        let w = w.min(area.width());
+        let h = h.min(area.height());
+        let x = (px0 - 12.0).clamp(area.min.x, (area.max.x - w).max(area.min.x));
+        let y = (py0 - 40.0).clamp(area.min.y, (area.max.y - h).max(area.min.y));
+        out.push(MonitorBox { monitor: mi, paths: here.iter().map(|(_, _, i)| i.path.clone()).collect(), rect: [x, y, w, h] });
+    }
+    out
+}
+
+#[cfg(test)]
+mod first_run_tests {
+    use super::*;
+
+    fn mon(name: &str, primary: bool, x0: f32, y0: f32, x1: f32, y1: f32) -> desktop::Monitor {
+        desktop::Monitor { name: name.into(), primary, rect: Rect::from_min_max(Pos2::new(x0, y0), Pos2::new(x1, y1)) }
+    }
+
+    fn item(path: &str) -> DeskItem {
+        DeskItem {
+            path: path.into(),
+            name: path.into(),
+            ext: String::new(),
+            is_dir: false,
+            category: Category::Other,
+            on_desktop: true,
+            size: 0,
+            modified: 0,
+        }
+    }
+
+    #[test]
+    fn icons_on_second_monitor_get_their_own_box() {
+        // Scale 2: main 1000 x 600 points, second monitor to its right (points 1000..2000).
+        let monitors = vec![mon("a", true, 0.0, 0.0, 1000.0, 600.0), mon("b", false, 1000.0, 0.0, 2000.0, 600.0)];
+        let work = vec![monitors[0].rect, Rect::from_min_max(Pos2::new(1000.0, 0.0), Pos2::new(2000.0, 560.0))];
+        let mut items = HashMap::new();
+        for p in ["c:\\a", "c:\\b", "c:\\c", "c:\\d"] {
+            items.insert(p.to_string(), item(p));
+        }
+        let icons = vec![
+            ("c:\\a".to_string(), 100, 100),   // main monitor
+            ("c:\\b".to_string(), 2400, 300),  // second, lower
+            ("c:\\c".to_string(), 2200, 100),  // second, first
+            ("c:\\zz".to_string(), 2300, 100), // unknown file: ignored
+            ("c:\\d".to_string(), 2200, 300),  // second, same row as b but left
+        ];
+        let plan = plan_monitor_boxes(&monitors, &work, &icons, &items, 2.0, Vec2::new(75.0, 100.0));
+        assert_eq!(plan.len(), 1);
+        assert_eq!(plan[0].monitor, 1);
+        assert_eq!(plan[0].paths, vec!["c:\\c", "c:\\d", "c:\\b"]);
+        let r = plan[0].rect;
+        assert!(r[2] >= 300.0 && r[3] >= 200.0);
+        assert!(r[0] >= 1000.0 && r[0] + r[2] <= 2000.0 && r[1] >= 0.0 && r[1] + r[3] <= 560.0);
+        // Top-left of the icons' area: x = 2200 px / 2 = 1100 points, minus the margin.
+        assert!((r[0] - 1088.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn nothing_on_other_monitors_means_no_extra_box() {
+        let monitors = vec![mon("a", true, 0.0, 0.0, 1000.0, 600.0), mon("b", false, 1000.0, 0.0, 2000.0, 600.0)];
+        let mut items = HashMap::new();
+        items.insert("c:\\a".to_string(), item("c:\\a"));
+        let icons = vec![("c:\\a".to_string(), 100, 100)];
+        assert!(plan_monitor_boxes(&monitors, &[], &icons, &items, 1.0, Vec2::new(75.0, 100.0)).is_empty());
+    }
 }
 
 /// Records which monitor a box sits on (the one holding its centre, else the nearest) and its

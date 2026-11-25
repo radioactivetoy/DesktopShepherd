@@ -729,6 +729,8 @@ pub static ES: &[(&str, &str)] = &[
     ("Light frost", "Escarchado claro"),
     ("Accent", "Acento"),
     ("Undo the changes made in this window", "Deshacer los cambios hechos en esta ventana"),
+    ("Desktop {}", "Escritorio {}"),
+    ("Your desktop icons are now in these boxes. Nothing was moved or deleted: close DesktopShepherd and they're back as before.", "Los iconos de tu escritorio están ahora en estas cajas. No se ha movido ni borrado nada: cierra DesktopShepherd y vuelven a estar como antes."),
 ];
 
 pub static CA: &[(&str, &str)] = &[
@@ -1178,6 +1180,8 @@ pub static CA: &[(&str, &str)] = &[
     ("Light frost", "Gelat clar"),
     ("Accent", "Accent"),
     ("Undo the changes made in this window", "Desfés els canvis fets en aquesta finestra"),
+    ("Desktop {}", "Escriptori {}"),
+    ("Your desktop icons are now in these boxes. Nothing was moved or deleted: close DesktopShepherd and they're back as before.", "Les icones del teu escriptori ara són en aquestes caixes. No s'ha mogut ni esborrat res: tanca DesktopShepherd i tornen a estar com abans."),
 ];
 
 pub static FR: &[(&str, &str)] = &[
@@ -1627,6 +1631,8 @@ pub static FR: &[(&str, &str)] = &[
     ("Light frost", "Givre clair"),
     ("Accent", "Accent"),
     ("Undo the changes made in this window", "Annuler les modifications faites dans cette fenêtre"),
+    ("Desktop {}", "Bureau {}"),
+    ("Your desktop icons are now in these boxes. Nothing was moved or deleted: close DesktopShepherd and they're back as before.", "Les icônes de votre bureau sont maintenant dans ces boîtes. Rien n'a été déplacé ni supprimé : fermez DesktopShepherd et elles reviennent comme avant."),
 ];
 
 pub static DE: &[(&str, &str)] = &[
@@ -2076,6 +2082,8 @@ pub static DE: &[(&str, &str)] = &[
     ("Light frost", "Helle Mattierung"),
     ("Accent", "Akzent"),
     ("Undo the changes made in this window", "Die in diesem Fenster vorgenommenen Änderungen rückgängig machen"),
+    ("Desktop {}", "Desktop {}"),
+    ("Your desktop icons are now in these boxes. Nothing was moved or deleted: close DesktopShepherd and they're back as before.", "Ihre Desktopsymbole sind jetzt in diesen Boxen. Nichts wurde verschoben oder gelöscht: Schließen Sie DesktopShepherd, und alles ist wieder wie vorher."),
 ];
 
 pub static IT: &[(&str, &str)] = &[
@@ -2525,6 +2533,8 @@ pub static IT: &[(&str, &str)] = &[
     ("Light frost", "Gelo chiaro"),
     ("Accent", "Accento"),
     ("Undo the changes made in this window", "Annulla le modifiche fatte in questa finestra"),
+    ("Desktop {}", "Desktop {}"),
+    ("Your desktop icons are now in these boxes. Nothing was moved or deleted: close DesktopShepherd and they're back as before.", "Le icone del desktop sono ora in questi riquadri. Nulla è stato spostato o eliminato: chiudi DesktopShepherd e tornano come prima."),
 ];
 
 pub static PT: &[(&str, &str)] = &[
@@ -2974,6 +2984,8 @@ pub static PT: &[(&str, &str)] = &[
     ("Light frost", "Geada clara"),
     ("Accent", "Destaque"),
     ("Undo the changes made in this window", "Anular as alterações feitas nesta janela"),
+    ("Desktop {}", "Ambiente de trabalho {}"),
+    ("Your desktop icons are now in these boxes. Nothing was moved or deleted: close DesktopShepherd and they're back as before.", "Os ícones do seu ambiente de trabalho estão agora nestas caixas. Nada foi movido nem apagado: feche o DesktopShepherd e voltam a ficar como antes."),
 ];
 
 #[cfg(test)]

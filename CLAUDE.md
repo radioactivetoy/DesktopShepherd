@@ -102,6 +102,7 @@ is no smaller, so the debug build, which is opt-level 3, is fine for daily use.)
 - Icon boxes never take the focus (MA_NOACTIVATE); a left click in one calls
   `desktop::focus_desktop()` so the keyboard goes to the desktop (type to jump / quick search),
   not to whatever had it before (e.g. a sticky note). Keep that when changing box clicks.
+- First-run icon positions: `desktop::desktop_icon_positions` reads Windows' icon positions through the official shell API (IShellWindows -> IFolderView, read-only, own COM thread, 3 s timeout, None on any error); never replace it with list-view messages or reading Explorer's memory.
 - Desktop changes come from `desktop::watch_folders` (change notifications), not polling; the
   reader thread in `app.rs` re-reads only when woken (or once a minute).
 - Hotkey ids (`runloop.rs`): 1 search, 2 hide/show, 3/4 pages, 5 draw a box (Ctrl+Alt+B), 21..29 box shortcuts

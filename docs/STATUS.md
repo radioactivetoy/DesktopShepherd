@@ -295,6 +295,7 @@ egui font atlases, and the icon textures.
 - Code signing: the installer and program are not signed yet (SmartScreen warning).
 - Library updates are blocked on this PC's GNU toolchain (`docs/BUILDING.md`); MSVC Build Tools would lift it.
 - Dependabot glib alert: glib is not used on Windows.
+- First run with several monitors: `desktop::desktop_icon_positions` (official shell API, own thread, 3 s timeout) reads where Windows' icons sit; icons on a non-main monitor get their own "Desktop N" box there (`plan_monitor_boxes` in `app.rs`, unit-tested). Tested only with the dump test (`cargo test icon_positions_dump -- --ignored --nocapture`) on a PC whose icons were all on the main monitor: icons on a second monitor are untested.
 - `.cargo/config.toml` is no longer in the repo (personal path): copy `.cargo/config.example.toml` (see `docs/BUILDING.md`).
 
 ## Improvement ideas (ordered by value)

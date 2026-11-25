@@ -1542,3 +1542,113 @@ pub fn ping_worker(pid: u32) -> Option<bool> {
         None
     }
 }
+
+/// Where Windows' own desktop icons sit, read with the official shell API only (no injection, no
+/// list-view messages, nothing from Explorer's memory): the desktop's `IFolderView`, reached
+/// through `IShellWindows::FindWindowSW`. Returns (full path in lowercase, x, y) per icon, in
+/// screen pixels (the position is the icon's top-left corner in the desktop list view; the list
+/// view's own origin on screen is added, so it works whichever way Windows counts). Items of the
+/// Public desktop are included. The COM work runs on its own short-lived thread and this waits at
+/// most `timeout`; on a timeout or any error the result is None (a late thread ends harmlessly).
+pub fn desktop_icon_positions(timeout: std::time::Duration) -> Option<Vec<(String, i32, i32)>> {
+    #[cfg(windows)]
+    {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::Builder::new()
+            .name("icon-positions".into())
+            .spawn(move || {
+                let r = std::panic::catch_unwind(read_icon_positions_com).unwrap_or(None);
+                let _ = tx.send(r);
+            })
+            .ok()?;
+        rx.recv_timeout(timeout).ok().flatten()
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = timeout;
+        None
+    }
+}
+
+#[cfg(windows)]
+fn read_icon_positions_com() -> Option<Vec<(String, i32, i32)>> {
+    use windows::core::{Interface, PWSTR, VARIANT};
+    use windows::Win32::Foundation::POINT;
+    use windows::Win32::Graphics::Gdi::ClientToScreen;
+    use windows::Win32::System::Com::{
+        CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, IServiceProvider, CLSCTX_LOCAL_SERVER,
+        COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE,
+    };
+    use windows::Win32::UI::Shell::Common::{ITEMIDLIST, STRRET};
+    use windows::Win32::UI::Shell::{
+        IEnumIDList, IFolderView, IShellBrowser, IShellFolder, IShellWindows, ShellWindows, StrRetToStrW, CSIDL_DESKTOP,
+        SHGDN_FORPARSING, SID_STopLevelBrowser, SVGIO_ALLVIEW, SWC_DESKTOP, SWFO_NEEDDISPATCH,
+    };
+    unsafe {
+        let inited = CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE).is_ok();
+        let out = (|| -> Option<Vec<(String, i32, i32)>> {
+            let sw: IShellWindows = CoCreateInstance(&ShellWindows, None, CLSCTX_LOCAL_SERVER).ok()?;
+            let loc = VARIANT::from(CSIDL_DESKTOP as i32);
+            let root = VARIANT::default();
+            let mut hwnd = 0i32;
+            let disp = sw.FindWindowSW(&loc, &root, SWC_DESKTOP, &mut hwnd, SWFO_NEEDDISPATCH).ok()?;
+            let sp: IServiceProvider = disp.cast().ok()?;
+            let browser: IShellBrowser = sp.QueryService(&SID_STopLevelBrowser).ok()?;
+            let view = browser.QueryActiveShellView().ok()?;
+            // Origin of the desktop list view on screen.
+            let mut origin = POINT { x: 0, y: 0 };
+            if let Ok(w) = view.GetWindow() {
+                let _ = ClientToScreen(w, &mut origin);
+            }
+            let fv: IFolderView = view.cast().ok()?;
+            let folder: IShellFolder = fv.GetFolder().ok()?;
+            let list: IEnumIDList = fv.Items(SVGIO_ALLVIEW).ok()?;
+            let mut res = Vec::new();
+            loop {
+                let mut pidl: [*mut ITEMIDLIST; 1] = [std::ptr::null_mut()];
+                let mut got = 0u32;
+                let hr = list.Next(&mut pidl, Some(&mut got));
+                if hr.0 != 0 || got == 0 || pidl[0].is_null() {
+                    break;
+                }
+                let p = pidl[0];
+                let pos = fv.GetItemPosition(p);
+                let mut sr = STRRET::default();
+                let name = if folder.GetDisplayNameOf(p, SHGDN_FORPARSING, &mut sr).is_ok() {
+                    let mut ws = PWSTR::null();
+                    if StrRetToStrW(&mut sr, Some(p), &mut ws).is_ok() && !ws.is_null() {
+                        let s = ws.to_string().ok();
+                        CoTaskMemFree(Some(ws.0 as *const _));
+                        s
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                CoTaskMemFree(Some(p as *const _));
+                if let (Ok(pos), Some(name)) = (pos, name) {
+                    res.push((name.to_lowercase(), pos.x + origin.x, pos.y + origin.y));
+                }
+            }
+            Some(res)
+        })();
+        if inited {
+            CoUninitialize();
+        }
+        out
+    }
+}
+
+#[cfg(all(test, windows))]
+mod icon_position_tests {
+    /// Manual check (prints what Windows reports): cargo test icon_positions_dump -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn icon_positions_dump() {
+        unsafe { let _ = windows::Win32::UI::HiDpi::SetProcessDpiAwareness(windows::Win32::UI::HiDpi::PROCESS_PER_MONITOR_DPI_AWARE); }
+        let r = super::desktop_icon_positions(std::time::Duration::from_secs(3));
+        println!("scale {} monitors {:?}", super::system_scale(), super::monitors());
+        println!("{:?}", r);
+    }
+}
