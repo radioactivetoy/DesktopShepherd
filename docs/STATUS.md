@@ -1,6 +1,6 @@
-# Status (1.0.0-rc.3, 2026-11-25)
+# Status (1.0.0, 2026-11-25)
 
-Current version: **1.0.0-rc.3**, the Latest release. Releases so far: v0.2.0-beta.1 to beta.5,
+Current version: **1.0.0** (first stable release; tags v0.2.0-beta.1..5, v1.0.0-rc.1..3 before it).
 v1.0.0-rc.1, rc.2 and rc.3. The workflow (read-only build job + separate publish job, actions
 pinned to SHAs, Rust 1.100.0) publishes the Setup exe, the Portable zip and `SHA256SUMS.txt`, and
 marks beta and rc tags as pre-releases. Release notes live in `docs/release-notes/<tag>.md`; after

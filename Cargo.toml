@@ -1,6 +1,6 @@
 [package]
 name = "desktopshepherd"
-version = "1.0.0-rc.3"
+version = "1.0.0"
 edition = "2021"
 license = "GPL-3.0-or-later"
 description = "A lightweight desktop icon organizer: boxes (fences) on your desktop, plus widgets."
