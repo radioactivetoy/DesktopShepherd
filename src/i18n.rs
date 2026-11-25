@@ -455,7 +455,6 @@ pub static ES: &[(&str, &str)] = &[
     ("Moving a box to another monitor binds it there. Settings > Layout shows each monitor.", "Al mover una caja a otro monitor, queda vinculada allí. Configuración > Disposición muestra cada monitor."),
     ("{}: {} × {} ({}) — {} box(es)", "{}: {} × {} ({}) — {} caja(s)"),
     ("Auto-sort tabs", "Pestañas de clasificación automática"),
-    ("Each tab collects items by file type, name pattern (* and ?) and/or how recently they changed; the first matching rule wins. Folders and everything else get their own tabs.", "Cada pestaña reúne elementos por tipo de archivo, patrón de nombre (* y ?) y/o por lo recientemente que cambiaron; gana la primera regla que coincida. Las carpetas y todo lo demás tienen sus propias pestañas."),
     ("types: zip, rar, 7z", "tipos: zip, rar, 7z"),
     ("name: *invoice*", "nombre: *factura*"),
     ("changed in last", "cambiado en los últimos"),
@@ -734,6 +733,12 @@ pub static ES: &[(&str, &str)] = &[
     ("Wired network", "Red por cable"),
     ("Wi-Fi", "Wi-Fi"),
     ("Not connected", "Sin conexión"),
+    ("Drag to change the order", "Arrastra para cambiar el orden"),
+    ("Use the default tabs (set in Settings)", "Usar las pestañas predeterminadas (se definen en Ajustes)"),
+    ("Tabs just for this box", "Pestañas solo para este cuadro"),
+    ("Copy the default tabs", "Copiar las pestañas predeterminadas"),
+    ("These are the default tabs of auto-sort boxes (a box can have its own tabs in Personalize). Each tab collects items by file type, name pattern (* and ?) and/or how recently they changed; the first matching rule wins. Drag the handle to change the order of the tabs. Folders and everything else get their own tabs.", "Estas son las pestañas predeterminadas de los cuadros de orden automático (un cuadro puede tener las suyas en Personalizar). Cada pestaña reúne elementos por tipo de archivo, patrón de nombre (* y ?) y/o por lo recientemente que cambiaron; gana la primera regla que coincida. Arrastra el asa para cambiar el orden de las pestañas. Las carpetas y todo lo demás tienen sus propias pestañas."),
+    ("Each tab collects items by file type, name pattern (* and ?) and/or how recently they changed; the first matching rule wins. Drag the handle to change the order of the tabs. Folders and everything else get their own tabs.", "Cada pestaña reúne elementos por tipo de archivo, patrón de nombre (* y ?) y/o por lo recientemente que cambiaron; gana la primera regla que coincida. Arrastra el asa para cambiar el orden de las pestañas. Las carpetas y todo lo demás tienen sus propias pestañas."),
 ];
 
 pub static CA: &[(&str, &str)] = &[
@@ -909,7 +914,6 @@ pub static CA: &[(&str, &str)] = &[
     ("Moving a box to another monitor binds it there. Settings > Layout shows each monitor.", "En moure una caixa a un altre monitor, hi queda vinculada. Configuració > Disposició mostra cada monitor."),
     ("{}: {} × {} ({}) — {} box(es)", "{}: {} × {} ({}) — {} caixa/es"),
     ("Auto-sort tabs", "Pestanyes de classificació automàtica"),
-    ("Each tab collects items by file type, name pattern (* and ?) and/or how recently they changed; the first matching rule wins. Folders and everything else get their own tabs.", "Cada pestanya reuneix elements per tipus de fitxer, patró de nom (* i ?) i/o per com de recentment han canviat; guanya la primera regla que coincideix. Les carpetes i tota la resta tenen les seves pròpies pestanyes."),
     ("types: zip, rar, 7z", "tipus: zip, rar, 7z"),
     ("name: *invoice*", "nom: *factura*"),
     ("changed in last", "canviat en els últims"),
@@ -1188,6 +1192,12 @@ pub static CA: &[(&str, &str)] = &[
     ("Wired network", "Xarxa per cable"),
     ("Wi-Fi", "Wi-Fi"),
     ("Not connected", "Sense connexió"),
+    ("Drag to change the order", "Arrossega per canviar l'ordre"),
+    ("Use the default tabs (set in Settings)", "Fer servir les pestanyes predeterminades (es defineixen a Configuració)"),
+    ("Tabs just for this box", "Pestanyes només per a aquest quadre"),
+    ("Copy the default tabs", "Copiar les pestanyes predeterminades"),
+    ("These are the default tabs of auto-sort boxes (a box can have its own tabs in Personalize). Each tab collects items by file type, name pattern (* and ?) and/or how recently they changed; the first matching rule wins. Drag the handle to change the order of the tabs. Folders and everything else get their own tabs.", "Aquestes són les pestanyes predeterminades dels quadres d'ordre automàtic (un quadre pot tenir les seves a Personalitza). Cada pestanya reuneix elements per tipus de fitxer, patró de nom (* i ?) i/o per com de recentment han canviat; guanya la primera regla que coincideix. Arrossega la nansa per canviar l'ordre de les pestanyes. Les carpetes i tota la resta tenen les seves pròpies pestanyes."),
+    ("Each tab collects items by file type, name pattern (* and ?) and/or how recently they changed; the first matching rule wins. Drag the handle to change the order of the tabs. Folders and everything else get their own tabs.", "Cada pestanya reuneix elements per tipus de fitxer, patró de nom (* i ?) i/o per com de recentment han canviat; guanya la primera regla que coincideix. Arrossega la nansa per canviar l'ordre de les pestanyes. Les carpetes i tota la resta tenen les seves pròpies pestanyes."),
 ];
 
 pub static FR: &[(&str, &str)] = &[
@@ -1363,7 +1373,6 @@ pub static FR: &[(&str, &str)] = &[
     ("Moving a box to another monitor binds it there. Settings > Layout shows each monitor.", "Déplacer un cadre vers un autre écran l'y lie. Paramètres > Disposition montre chaque écran."),
     ("{}: {} × {} ({}) — {} box(es)", "{} : {} × {} ({}) — {} cadre(s)"),
     ("Auto-sort tabs", "Onglets à tri automatique"),
-    ("Each tab collects items by file type, name pattern (* and ?) and/or how recently they changed; the first matching rule wins. Folders and everything else get their own tabs.", "Chaque onglet rassemble les éléments par type de fichier, modèle de nom (* et ?) et/ou ancienneté de modification ; la première règle qui correspond l'emporte. Les dossiers et tout le reste ont leurs propres onglets."),
     ("types: zip, rar, 7z", "types : zip, rar, 7z"),
     ("name: *invoice*", "nom : *facture*"),
     ("changed in last", "modifié depuis"),
@@ -1642,6 +1651,12 @@ pub static FR: &[(&str, &str)] = &[
     ("Wired network", "Réseau filaire"),
     ("Wi-Fi", "Wi-Fi"),
     ("Not connected", "Non connecté"),
+    ("Drag to change the order", "Faites glisser pour changer l'ordre"),
+    ("Use the default tabs (set in Settings)", "Utiliser les onglets par défaut (réglés dans Paramètres)"),
+    ("Tabs just for this box", "Onglets propres à ce cadre"),
+    ("Copy the default tabs", "Copier les onglets par défaut"),
+    ("These are the default tabs of auto-sort boxes (a box can have its own tabs in Personalize). Each tab collects items by file type, name pattern (* and ?) and/or how recently they changed; the first matching rule wins. Drag the handle to change the order of the tabs. Folders and everything else get their own tabs.", "Ce sont les onglets par défaut des cadres à tri automatique (un cadre peut avoir les siens dans Personnaliser). Chaque onglet rassemble les éléments par type de fichier, modèle de nom (* et ?) et/ou ancienneté de modification ; la première règle qui correspond l'emporte. Faites glisser la poignée pour changer l'ordre des onglets. Les dossiers et tout le reste ont leurs propres onglets."),
+    ("Each tab collects items by file type, name pattern (* and ?) and/or how recently they changed; the first matching rule wins. Drag the handle to change the order of the tabs. Folders and everything else get their own tabs.", "Chaque onglet rassemble les éléments par type de fichier, modèle de nom (* et ?) et/ou ancienneté de modification ; la première règle qui correspond l'emporte. Faites glisser la poignée pour changer l'ordre des onglets. Les dossiers et tout le reste ont leurs propres onglets."),
 ];
 
 pub static DE: &[(&str, &str)] = &[
@@ -1817,7 +1832,6 @@ pub static DE: &[(&str, &str)] = &[
     ("Moving a box to another monitor binds it there. Settings > Layout shows each monitor.", "Eine Box auf einen anderen Monitor zu verschieben bindet sie dort. Einstellungen > Layout zeigt jeden Monitor."),
     ("{}: {} × {} ({}) — {} box(es)", "{}: {} × {} ({}) — {} Box(en)"),
     ("Auto-sort tabs", "Registerkarten mit Auto-Sortierung"),
-    ("Each tab collects items by file type, name pattern (* and ?) and/or how recently they changed; the first matching rule wins. Folders and everything else get their own tabs.", "Jede Registerkarte sammelt Elemente nach Dateityp, Namensmuster (* und ?) und/oder danach, wie kürzlich sie geändert wurden; die erste passende Regel gilt. Ordner und alles andere bekommen eigene Registerkarten."),
     ("types: zip, rar, 7z", "Typen: zip, rar, 7z"),
     ("name: *invoice*", "Name: *Rechnung*"),
     ("changed in last", "geändert in den letzten"),
@@ -2096,6 +2110,12 @@ pub static DE: &[(&str, &str)] = &[
     ("Wired network", "Kabelnetzwerk"),
     ("Wi-Fi", "WLAN"),
     ("Not connected", "Nicht verbunden"),
+    ("Drag to change the order", "Ziehen, um die Reihenfolge zu ändern"),
+    ("Use the default tabs (set in Settings)", "Standard-Registerkarten verwenden (in den Einstellungen festgelegt)"),
+    ("Tabs just for this box", "Eigene Registerkarten nur für diese Box"),
+    ("Copy the default tabs", "Standard-Registerkarten kopieren"),
+    ("These are the default tabs of auto-sort boxes (a box can have its own tabs in Personalize). Each tab collects items by file type, name pattern (* and ?) and/or how recently they changed; the first matching rule wins. Drag the handle to change the order of the tabs. Folders and everything else get their own tabs.", "Das sind die Standard-Registerkarten der automatisch sortierenden Boxen (eine Box kann unter Anpassen eigene haben). Jede Registerkarte sammelt Elemente nach Dateityp, Namensmuster (* und ?) und/oder danach, wie kürzlich sie geändert wurden; die erste passende Regel gilt. Ziehen Sie den Griff, um die Reihenfolge der Registerkarten zu ändern. Ordner und alles andere bekommen eigene Registerkarten."),
+    ("Each tab collects items by file type, name pattern (* and ?) and/or how recently they changed; the first matching rule wins. Drag the handle to change the order of the tabs. Folders and everything else get their own tabs.", "Jede Registerkarte sammelt Elemente nach Dateityp, Namensmuster (* und ?) und/oder danach, wie kürzlich sie geändert wurden; die erste passende Regel gilt. Ziehen Sie den Griff, um die Reihenfolge der Registerkarten zu ändern. Ordner und alles andere bekommen eigene Registerkarten."),
 ];
 
 pub static IT: &[(&str, &str)] = &[
@@ -2271,7 +2291,6 @@ pub static IT: &[(&str, &str)] = &[
     ("Moving a box to another monitor binds it there. Settings > Layout shows each monitor.", "Spostare un riquadro su un altro monitor lo associa a quello. Impostazioni > Layout mostra ogni monitor."),
     ("{}: {} × {} ({}) — {} box(es)", "{}: {} × {} ({}) — {} riquadro/i"),
     ("Auto-sort tabs", "Schede a ordinamento automatico"),
-    ("Each tab collects items by file type, name pattern (* and ?) and/or how recently they changed; the first matching rule wins. Folders and everything else get their own tabs.", "Ogni scheda raccoglie gli elementi per tipo di file, schema del nome (* e ?) e/o da quanto tempo sono stati modificati; vince la prima regola corrispondente. Le cartelle e tutto il resto hanno le proprie schede."),
     ("types: zip, rar, 7z", "tipi: zip, rar, 7z"),
     ("name: *invoice*", "nome: *fattura*"),
     ("changed in last", "modificati negli ultimi"),
@@ -2550,6 +2569,12 @@ pub static IT: &[(&str, &str)] = &[
     ("Wired network", "Rete cablata"),
     ("Wi-Fi", "Wi-Fi"),
     ("Not connected", "Non connesso"),
+    ("Drag to change the order", "Trascina per cambiare l'ordine"),
+    ("Use the default tabs (set in Settings)", "Usa le schede predefinite (impostate in Impostazioni)"),
+    ("Tabs just for this box", "Schede solo per questo riquadro"),
+    ("Copy the default tabs", "Copia le schede predefinite"),
+    ("These are the default tabs of auto-sort boxes (a box can have its own tabs in Personalize). Each tab collects items by file type, name pattern (* and ?) and/or how recently they changed; the first matching rule wins. Drag the handle to change the order of the tabs. Folders and everything else get their own tabs.", "Queste sono le schede predefinite dei riquadri a ordinamento automatico (un riquadro può avere le proprie in Personalizza). Ogni scheda raccoglie gli elementi per tipo di file, schema del nome (* e ?) e/o da quanto tempo sono stati modificati; vince la prima regola corrispondente. Trascina la maniglia per cambiare l'ordine delle schede. Le cartelle e tutto il resto hanno le proprie schede."),
+    ("Each tab collects items by file type, name pattern (* and ?) and/or how recently they changed; the first matching rule wins. Drag the handle to change the order of the tabs. Folders and everything else get their own tabs.", "Ogni scheda raccoglie gli elementi per tipo di file, schema del nome (* e ?) e/o da quanto tempo sono stati modificati; vince la prima regola corrispondente. Trascina la maniglia per cambiare l'ordine delle schede. Le cartelle e tutto il resto hanno le proprie schede."),
 ];
 
 pub static PT: &[(&str, &str)] = &[
@@ -2725,7 +2750,6 @@ pub static PT: &[(&str, &str)] = &[
     ("Moving a box to another monitor binds it there. Settings > Layout shows each monitor.", "Mover uma caixa para outro monitor associa-a a esse monitor. Definições > Disposição mostra cada monitor."),
     ("{}: {} × {} ({}) — {} box(es)", "{}: {} × {} ({}) — {} caixa(s)"),
     ("Auto-sort tabs", "Separadores de ordenação automática"),
-    ("Each tab collects items by file type, name pattern (* and ?) and/or how recently they changed; the first matching rule wins. Folders and everything else get their own tabs.", "Cada separador reúne itens por tipo de ficheiro, padrão de nome (* e ?) e/ou há quanto tempo foram alterados; a primeira regra que corresponder prevalece. As pastas e tudo o resto têm os seus próprios separadores."),
     ("types: zip, rar, 7z", "tipos: zip, rar, 7z"),
     ("name: *invoice*", "nome: *fatura*"),
     ("changed in last", "alterados nos últimos"),
@@ -3004,6 +3028,12 @@ pub static PT: &[(&str, &str)] = &[
     ("Wired network", "Rede por cabo"),
     ("Wi-Fi", "Wi-Fi"),
     ("Not connected", "Sem ligação"),
+    ("Drag to change the order", "Arraste para mudar a ordem"),
+    ("Use the default tabs (set in Settings)", "Usar os separadores predefinidos (definidos nas Definições)"),
+    ("Tabs just for this box", "Separadores só para esta caixa"),
+    ("Copy the default tabs", "Copiar os separadores predefinidos"),
+    ("These are the default tabs of auto-sort boxes (a box can have its own tabs in Personalize). Each tab collects items by file type, name pattern (* and ?) and/or how recently they changed; the first matching rule wins. Drag the handle to change the order of the tabs. Folders and everything else get their own tabs.", "Estes são os separadores predefinidos das caixas de ordenação automática (uma caixa pode ter os seus em Personalizar). Cada separador reúne itens por tipo de ficheiro, padrão de nome (* e ?) e/ou há quanto tempo foram alterados; a primeira regra que corresponder prevalece. Arraste a pega para mudar a ordem dos separadores. As pastas e tudo o resto têm os seus próprios separadores."),
+    ("Each tab collects items by file type, name pattern (* and ?) and/or how recently they changed; the first matching rule wins. Drag the handle to change the order of the tabs. Folders and everything else get their own tabs.", "Cada separador reúne itens por tipo de ficheiro, padrão de nome (* e ?) e/ou há quanto tempo foram alterados; a primeira regra que corresponder prevalece. Arraste a pega para mudar a ordem dos separadores. As pastas e tudo o resto têm os seus próprios separadores."),
 ];
 
 #[cfg(test)]

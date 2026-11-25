@@ -113,6 +113,12 @@ pub fn tabs_key(fence: &Fence, desk: &DeskState) -> u64 {
         for t in &fence.tabs {
             (&t.name, &t.items).hash(&mut h);
         }
+    } else if fence.auto_sort {
+        if let Some(rs) = &fence.categories {
+            for r in rs {
+                (&r.name, &r.exts, &r.pattern, r.days).hash(&mut h);
+            }
+        }
     }
     h.finish()
 }
@@ -134,13 +140,14 @@ pub fn visible_tabs(fence: &Fence, desk: &DeskState) -> Vec<(String, Vec<DeskIte
         return vec![(name, v)];
     }
     if fence.auto_sort {
+        let rules = fence.rules(desk.rules);
         let mut by_tab: HashMap<String, Vec<DeskItem>> = HashMap::new();
         for (key, it) in desk.items.iter() {
             if !desk.claimed.contains(key) && it.on_desktop {
-                by_tab.entry(tab_name_for(it, desk.rules)).or_default().push(it.clone());
+                by_tab.entry(tab_name_for(it, rules)).or_default().push(it.clone());
             }
         }
-        let mut order: Vec<String> = desk.rules.iter().map(|r| r.name.clone()).collect();
+        let mut order: Vec<String> = rules.iter().map(|r| r.name.clone()).collect();
         order.push("Folders".into());
         order.push("Other".into());
         let mut tabs = Vec::new();

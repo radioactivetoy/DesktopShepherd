@@ -350,11 +350,16 @@ fn layout_fingerprint(layout: &Layout) -> (u64, bool) {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     for f in &layout.fences {
         (f.id, f.auto_sort, f.widget.is_some(), &f.name, &f.folder).hash(&mut h);
+        if let Some(rs) = &f.categories {
+            for r in rs {
+                (&r.name, &r.exts, &r.pattern, r.days).hash(&mut h);
+            }
+        }
         for t in &f.tabs {
             (&t.name, &t.items).hash(&mut h);
         }
     }
-    (h.finish(), layout.settings.categories.iter().any(|r| r.days > 0))
+    (h.finish(), layout.settings.categories.iter().any(|r| r.days > 0) || layout.fences.iter().any(|f| f.categories.as_ref().is_some_and(|rs| rs.iter().any(|r| r.days > 0))))
 }
 
 /// A fingerprint of the box settings that shortcuts, icon sizes and fonts come from.
@@ -2185,8 +2190,12 @@ fn fence_window(
         if let Some(strip) = a.tabs {
             let names: Vec<String> = tabs.iter().map(|t| t.0.clone()).collect();
             let rects = fv::paint_tabs(&painter, fence, strip, &names, sel, 1.0);
+            // Tabs can be dragged to a new place (only boxes with several tabs, not widgets or folders).
+            let can_reorder = rects.len() > 1 && fence.widget.is_none() && fence.folder.is_none();
+            let mut dragging: Option<usize> = None;
+            let mut dropped: Option<usize> = None;
             for (i, r) in rects.iter().enumerate() {
-                let resp = ui.interact(*r, ui.id().with(("tab", i)), Sense::click());
+                let resp = ui.interact(*r, ui.id().with(("tab", i)), if can_reorder { Sense::click_and_drag() } else { Sense::click() });
                 if resp.clicked() && fence.sel_tab != i {
                     fence.sel_tab = i;
                     dirty = true;
@@ -2194,6 +2203,65 @@ fn fence_window(
                 if resp.secondary_clicked() {
                     let t = if fence.auto_sort { MenuTarget::Fence(fence.id) } else { MenuTarget::Tab(fence.id, i) };
                     open_menu(ctx, st, t);
+                }
+                if can_reorder {
+                    if resp.dragged() {
+                        dragging = Some(i);
+                    }
+                    if resp.drag_stopped() {
+                        dropped = Some(i);
+                    }
+                }
+            }
+            if let Some(from) = dragging.or(dropped) {
+                let target = ctx.pointer_interact_pos().and_then(|p| rects.iter().position(|r| r.contains(p)));
+                // Where the dragged tab would land: Folders / Other (not rules) always stay last.
+                let target = target.map(|t| {
+                    if !fence.auto_sort {
+                        return t;
+                    }
+                    let rule_names: Vec<&str> = fence.rules(desk.rules).iter().map(|r| r.name.as_str()).collect();
+                    let is_rule = |n: &String| rule_names.contains(&n.as_str());
+                    if is_rule(&names[t]) { t } else { names.iter().rposition(is_rule).unwrap_or(t) }
+                });
+                let movable = !fence.auto_sort || {
+                    let rule_names: Vec<&str> = fence.rules(desk.rules).iter().map(|r| r.name.as_str()).collect();
+                    rule_names.contains(&names[from].as_str())
+                };
+                if let (Some(to), true) = (target, movable) {
+                    if to != from {
+                        if dragging.is_some() {
+                            // Insertion marker on the side the tab would go to.
+                            let r = rects[to];
+                            let (a1, a2) = match (fence.tab_pos, to > from) {
+                                (TabPos::Right, false) => (r.left_top(), r.right_top()),
+                                (TabPos::Right, true) => (r.left_bottom(), r.right_bottom()),
+                                (TabPos::Top, false) => (r.left_top(), r.left_bottom()),
+                                (TabPos::Top, true) => (r.right_top(), r.right_bottom()),
+                            };
+                            painter.line_segment([a1, a2], egui::Stroke::new(2.5_f32, accent()));
+                        } else {
+                            let done = if fence.auto_sort {
+                                let mut rules = fence.rules(desk.rules).to_vec();
+                                let pos = |n: &str| rules.iter().position(|r| r.name == n);
+                                match (pos(&names[from]), pos(&names[to])) {
+                                    (Some(rf), Some(rt)) => {
+                                        crate::model::move_item(&mut rules, rf, rt);
+                                        // Only this box changes: it gets its own list.
+                                        fence.categories = Some(rules);
+                                        true
+                                    }
+                                    _ => false,
+                                }
+                            } else {
+                                crate::model::move_item(&mut fence.tabs, from, to)
+                            };
+                            if done {
+                                fence.sel_tab = crate::model::follow_index(sel, from, to);
+                                dirty = true;
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -4169,38 +4237,11 @@ impl DeskApp {
         ui.add_space(10.0);
         ui.heading(t("Auto-sort tabs"));
         ui.label(
-            egui::RichText::new(t("Each tab collects items by file type, name pattern (* and ?) and/or how recently they changed; the first matching rule wins. Folders and everything else get their own tabs."))
+            egui::RichText::new(t("These are the default tabs of auto-sort boxes (a box can have its own tabs in Personalize). Each tab collects items by file type, name pattern (* and ?) and/or how recently they changed; the first matching rule wins. Drag the handle to change the order of the tabs. Folders and everything else get their own tabs."))
                 .color(crate::theme::faint())
                 .size(12.0),
         );
-        let mut remove = None;
-        egui::Grid::new("cats").num_columns(5).spacing([10.0, 6.0]).show(ui, |ui| {
-            for (i, r) in s.categories.iter_mut().enumerate() {
-                dirty |= ui.add_sized([120.0, 26.0], egui::TextEdit::singleline(&mut r.name)).changed();
-                let mut exts = r.exts.join(", ");
-                if ui.add_sized([300.0, 26.0], egui::TextEdit::singleline(&mut exts).hint_text(t("types: zip, rar, 7z"))).changed() {
-                    r.exts = exts
-                        .split([',', ' ', ';'])
-                        .map(|e| e.trim().trim_start_matches('.').to_lowercase())
-                        .filter(|e| !e.is_empty())
-                        .collect();
-                    dirty = true;
-                }
-                dirty |= ui.add_sized([150.0, 26.0], egui::TextEdit::singleline(&mut r.pattern).hint_text(t("name: *invoice*"))).changed();
-                ui.horizontal(|ui| {
-                    ui.label(t("changed in last"));
-                    dirty |= ui.add(egui::DragValue::new(&mut r.days).range(0..=3650).suffix(t(" days"))).on_hover_text(t("0 = any age")).changed();
-                });
-                if ui.small_button(t("Remove")).clicked() {
-                    remove = Some(i);
-                }
-                ui.end_row();
-            }
-        });
-        if let Some(i) = remove {
-            s.categories.remove(i);
-            dirty = true;
-        }
+        dirty |= rules_editor(ui, "cats", &mut s.categories);
         ui.horizontal(|ui| {
             if ui.button(t("Add tab rule")).clicked() {
                 s.categories.push(crate::model::CategoryRule { name: t("New tab").into(), ..Default::default() });
@@ -4808,6 +4849,75 @@ fn setup_style(ctx: &egui::Context, extra_fonts: &[String]) {
 #[allow(dead_code)]
 fn ic(icon: char, text: &str) -> String {
     format!("{icon}    {text}")
+}
+
+/// Drag payload of one tab-rule row (which rule, and which editor it belongs to).
+struct RuleDrag(usize, egui::Id);
+
+/// The list of auto-sort tab rules: one row per rule with a drag handle (change the order), name,
+/// file types, name pattern, age and Remove. Returns true when anything changed.
+fn rules_editor(ui: &mut egui::Ui, salt: &str, rules: &mut Vec<crate::model::CategoryRule>) -> bool {
+    let mut dirty = false;
+    let mut remove = None;
+    let editor_id = egui::Id::new(("rules-editor", salt));
+    let mut rects: Vec<egui::Rect> = Vec::with_capacity(rules.len());
+    for (i, r) in rules.iter_mut().enumerate() {
+        let row = ui.horizontal(|ui| {
+            let id = editor_id.with(i);
+            ui.dnd_drag_source(id, RuleDrag(i, editor_id), |ui| {
+                let (rect, _) = ui.allocate_exact_size(egui::vec2(18.0, 26.0), egui::Sense::hover());
+                let c = crate::theme::soft();
+                for k in 0..3 {
+                    let y = rect.center().y + (k as f32 - 1.0) * 4.0;
+                    ui.painter().line_segment([egui::pos2(rect.left() + 3.0, y), egui::pos2(rect.right() - 3.0, y)], egui::Stroke::new(1.5_f32, c));
+                }
+            })
+            .response
+            .on_hover_text(t("Drag to change the order"));
+            dirty |= ui.add_sized([120.0, 26.0], egui::TextEdit::singleline(&mut r.name)).changed();
+            let mut exts = r.exts.join(", ");
+            if ui.add_sized([240.0, 26.0], egui::TextEdit::singleline(&mut exts).hint_text(t("types: zip, rar, 7z"))).changed() {
+                r.exts = exts
+                    .split([',', ' ', ';'])
+                    .map(|e| e.trim().trim_start_matches('.').to_lowercase())
+                    .filter(|e| !e.is_empty())
+                    .collect();
+                dirty = true;
+            }
+            dirty |= ui.add_sized([140.0, 26.0], egui::TextEdit::singleline(&mut r.pattern).hint_text(t("name: *invoice*"))).changed();
+            ui.label(t("changed in last"));
+            dirty |= ui.add(egui::DragValue::new(&mut r.days).range(0..=3650).suffix(t(" days"))).on_hover_text(t("0 = any age")).changed();
+            if ui.small_button(t("Remove")).clicked() {
+                remove = Some(i);
+            }
+        });
+        rects.push(row.response.rect);
+    }
+    // Drag and drop: where would the rule go, show a line there, move it on release.
+    let ctx = ui.ctx().clone();
+    if let (Some(p), Some(pos)) = (egui::DragAndDrop::payload::<RuleDrag>(&ctx), ctx.pointer_interact_pos()) {
+        if p.1 == editor_id && !rects.is_empty() {
+            let area = rects.iter().skip(1).fold(rects[0], |a, r| a.union(*r)).expand2(egui::vec2(60.0, 24.0));
+            if area.contains(pos) {
+                let at = rects.iter().filter(|r| r.center().y < pos.y).count();
+                let (x0, x1) = (rects[0].left(), rects[0].right().max(rects[rects.len() - 1].right()));
+                let y = if at < rects.len() { rects[at].top() - 3.0 } else { rects[rects.len() - 1].bottom() + 3.0 };
+                ui.painter().line_segment([egui::pos2(x0, y), egui::pos2(x1, y)], egui::Stroke::new(2.0_f32, ui.visuals().selection.stroke.color));
+                if ctx.input(|i| i.pointer.any_released()) {
+                    let to = if at > p.0 { at - 1 } else { at };
+                    if crate::model::move_item(rules, p.0, to) {
+                        dirty = true;
+                    }
+                    egui::DragAndDrop::clear_payload(&ctx);
+                }
+            }
+        }
+    }
+    if let Some(i) = remove {
+        rules.remove(i);
+        dirty = true;
+    }
+    dirty
 }
 
 /// Icons from Segoe Fluent Icons / Segoe MDL2 Assets.
@@ -5642,6 +5752,7 @@ impl DeskApp {
             let actions = &mut self.actions;
             let mut tab = self.personalize_tab;
             let mut resize = false;
+            let default_rules = self.layout.settings.categories.clone();
             hosts.panel(PERSONALIZE_PANEL, crate::host::PanelKind::Settings, "Personalize", rect_px, false, force, |pctx| {
                 // The window's close button keeps the changes (like Done); Esc cancels them.
                 if pctx.input(|i| i.viewport().close_requested()) {
@@ -5660,6 +5771,13 @@ impl DeskApp {
                             ui.add_space(24.0);
                             ui.selectable_value(&mut tab, 0, egui::RichText::new(t("Look")).size(14.0));
                             ui.selectable_value(&mut tab, 1, egui::RichText::new(t("Widget settings")).size(14.0));
+                        } else if fence.auto_sort {
+                            ui.add_space(24.0);
+                            ui.selectable_value(&mut tab, 0, egui::RichText::new(t("Look")).size(14.0));
+                            ui.selectable_value(&mut tab, 2, egui::RichText::new(t("Auto-sort tabs")).size(14.0));
+                            if tab == 1 {
+                                tab = 0;
+                            }
                         } else {
                             tab = 0;
                         }
@@ -5686,6 +5804,33 @@ impl DeskApp {
                                         fence.rect[3] = h as f32;
                                         resize = true;
                                     }
+                                }
+                            }
+                            (2, _, _) if fence.auto_sort => {
+                                ui.spacing_mut().item_spacing.y = 8.0;
+                                ui.label(egui::RichText::new(t("Each tab collects items by file type, name pattern (* and ?) and/or how recently they changed; the first matching rule wins. Drag the handle to change the order of the tabs. Folders and everything else get their own tabs.")).color(crate::theme::faint()).size(12.0));
+                                let own = fence.categories.is_some();
+                                if ui.radio(!own, t("Use the default tabs (set in Settings)")).clicked() && own {
+                                    fence.categories = None;
+                                    dirty = true;
+                                }
+                                if ui.radio(own, t("Tabs just for this box")).clicked() && !own {
+                                    fence.categories = Some(default_rules.clone());
+                                    dirty = true;
+                                }
+                                if let Some(rules) = fence.categories.as_mut() {
+                                    ui.add_space(4.0);
+                                    dirty |= rules_editor(ui, "box-rules", rules);
+                                    ui.horizontal(|ui| {
+                                        if ui.button(t("Add tab rule")).clicked() {
+                                            rules.push(crate::model::CategoryRule { name: t("New tab").into(), ..Default::default() });
+                                            dirty = true;
+                                        }
+                                        if ui.button(t("Copy the default tabs")).clicked() {
+                                            *rules = default_rules.clone();
+                                            dirty = true;
+                                        }
+                                    });
                                 }
                             }
                             _ => {

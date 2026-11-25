@@ -144,6 +144,31 @@ pub struct Fence {
     pub hover_zoom: bool,
     /// Icons slightly dimmed until hovered or selected.
     pub calm_icons: bool,
+    /// This box's own auto-sort tab rules (None = follow the default list in Settings).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub categories: Option<Vec<CategoryRule>>,
+}
+
+impl Fence {
+    /// The auto-sort rules this box uses: its own list, or `default` (the app setting).
+    pub fn rules<'a>(&'a self, default: &'a [CategoryRule]) -> &'a [CategoryRule] {
+        self.categories.as_deref().unwrap_or(default)
+    }
+}
+
+/// Moves the element at `from` so it ends up at index `to` (both indices of the list as it is now
+/// before the move; `to` is clamped). Returns false when nothing moved.
+pub fn move_item<T>(v: &mut Vec<T>, from: usize, to: usize) -> bool {
+    if from >= v.len() {
+        return false;
+    }
+    let to = to.min(v.len() - 1);
+    if from == to {
+        return false;
+    }
+    let x = v.remove(from);
+    v.insert(to, x);
+    true
 }
 
 /// A fade from clear (at the top / left) to `color2` with opacity `alpha2` (at the bottom / right).
@@ -219,6 +244,7 @@ impl Default for Fence {
             name_backing: false,
             hover_zoom: false,
             calm_icons: false,
+            categories: None,
         }
     }
 }
@@ -692,4 +718,54 @@ pub enum MonitorMode {
     Role,
     /// Boxes stay on their physical monitor, whatever its role.
     Fixed,
+}
+/// Where the entry that was at `sel` ends up after `move_item(v, from, to)`.
+pub fn follow_index(sel: usize, from: usize, to: usize) -> usize {
+    if sel == from {
+        to
+    } else if from < sel && sel <= to {
+        sel - 1
+    } else if to <= sel && sel < from {
+        sel + 1
+    } else {
+        sel
+    }
+}
+
+#[cfg(test)]
+mod move_tests {
+    use super::*;
+
+    #[test]
+    fn moves_and_follows() {
+        let mut v = vec!['a', 'b', 'c', 'd'];
+        assert!(move_item(&mut v, 0, 2));
+        assert_eq!(v, vec!['b', 'c', 'a', 'd']);
+        assert!(move_item(&mut v, 3, 0));
+        assert_eq!(v, vec!['d', 'b', 'c', 'a']);
+        assert!(!move_item(&mut v, 1, 1));
+        assert!(!move_item(&mut v, 9, 0));
+        assert!(move_item(&mut v, 0, 99));
+        assert_eq!(v, vec!['b', 'c', 'a', 'd']);
+        // The selected entry keeps pointing at the same tab.
+        for from in 0..4 {
+            for to in 0..4 {
+                for sel in 0..4 {
+                    let names = ['a', 'b', 'c', 'd'];
+                    let mut w = names.to_vec();
+                    move_item(&mut w, from, to);
+                    assert_eq!(w[follow_index(sel, from, to)], names[sel]);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn box_without_own_rules_deserializes_to_none() {
+        let f: Fence = serde_json::from_str(r#"{"id": 3, "name": "x"}"#).unwrap();
+        assert!(f.categories.is_none());
+        let def = default_categories();
+        assert_eq!(f.rules(&def).len(), def.len());
+        assert!(!serde_json::to_string(&f).unwrap().contains("categories"));
+    }
 }
