@@ -2619,8 +2619,8 @@ fn row(ui: &mut egui::Ui, icon_char: char, text: &str, mark: Option<char>, enabl
 
 /// "OUT 1-4 (BEHRINGER UMC 204HD 192k)": the part in brackets is the device's own name; cut to 32 characters.
 /// "OUT 1-2 (BEHRINGER UMC 204HD 192k)" -> the device name in brackets ("BEHRINGER UMC 204HD 192k"),
-/// or, when other outputs share it (several channels of one audio interface), the name and its
-/// own part: "BEHRINGER UMC 204HD 192k · OUT 1-2". `all` = every output's full name.
+/// or, when other outputs share it (several channels of one audio interface), its own part first
+/// and then the name: "OUT 1-2 · BEHRINGER UMC 204HD 192k". `all` = every output's full name.
 fn short_device_name(full: &str, all: &[String]) -> String {
     fn split(s: &str) -> (String, String) {
         match (s.find('('), s.rfind(')')) {
@@ -2630,8 +2630,9 @@ fn short_device_name(full: &str, all: &[String]) -> String {
     }
     let (own, dev) = split(full);
     let shared = all.iter().filter(|o| split(o).1 == dev).count() > 1;
-    let n = if shared && !own.is_empty() { format!("{dev} · {own}") } else { dev };
-    if n.chars().count() > 44 { format!("{}…", n.chars().take(43).collect::<String>()) } else { n }
+    // Own part first ("OUT 1-2 · BEHRINGER…"), so a cut never hides what tells them apart.
+    let n = if shared && !own.is_empty() { format!("{own} · {dev}") } else { dev };
+    if n.chars().count() > 30 { format!("{}…", n.chars().take(29).collect::<String>()) } else { n }
 }
 
 fn sub(ui: &mut egui::Ui, icon_char: char, text: &str) -> bool {

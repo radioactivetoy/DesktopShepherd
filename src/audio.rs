@@ -173,7 +173,8 @@ mod imp {
         name: String,
         devices: Vec<(String, String)>,
         /// Session manager of the default device (kept; asked for again when the device changes).
-        mgr: Option<IAudioSessionManager2>,
+        /// One session manager per active output (an app may play on a device that isn't the default).
+        mgrs: Vec<(String, IAudioSessionManager2)>,
         /// The player followed, its matched sessions, and when they were looked for.
         app_target: String,
         app_vols: Vec<ISimpleAudioVolume>,
@@ -307,7 +308,7 @@ mod imp {
             unsafe {
                 if k.is_none() {
                     let en: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).ok()?;
-                    *k = Some(Kept { enumerator: en, id: String::new(), vol: None, name: String::new(), devices: Vec::new(), mgr: None, app_target: String::new(), app_vols: Vec::new(), app_at: None });
+                    *k = Some(Kept { enumerator: en, id: String::new(), vol: None, name: String::new(), devices: Vec::new(), mgrs: Vec::new(), app_target: String::new(), app_vols: Vec::new(), app_at: None });
                 }
                 let kept = k.as_mut()?;
                 // A device picked in the menu becomes the default (all roles).
@@ -334,7 +335,6 @@ mod imp {
                 if kept.vol.is_none() || id != kept.id {
                     kept.vol = dev.Activate::<IAudioEndpointVolume>(CLSCTX_ALL, None).ok();
                     kept.name = friendly_name(&dev);
-                    kept.mgr = None;
                     kept.app_vols.clear();
                     kept.app_at = None;
                     kept.id = id;
@@ -371,13 +371,23 @@ mod imp {
                         let wait = if kept.app_vols.is_empty() { 3 } else { 10 };
                         let stale = kept.app_at.map(|a| a.elapsed() >= std::time::Duration::from_secs(wait)).unwrap_or(true);
                         if t != kept.app_target || stale {
-                            if kept.mgr.is_none() {
-                                kept.mgr = dev.Activate::<IAudioSessionManager2>(CLSCTX_ALL, None).ok();
+                            // A session manager for every active output, kept while the output exists.
+                            let ids: Vec<String> = kept.devices.iter().map(|d| d.0.clone()).collect();
+                            kept.mgrs.retain(|(id, _)| ids.contains(id));
+                            for id in &ids {
+                                if !kept.mgrs.iter().any(|(i, _)| i == id) {
+                                    if let Ok(d) = kept.enumerator.GetDevice(&windows::core::HSTRING::from(id.as_str())) {
+                                        if let Ok(m) = d.Activate::<IAudioSessionManager2>(CLSCTX_ALL, None) {
+                                            kept.mgrs.push((id.clone(), m));
+                                        }
+                                    }
+                                }
                             }
-                            kept.app_vols = match &kept.mgr {
-                                Some(m) => find_sessions(m, &t),
-                                None => Vec::new(),
-                            };
+                            let found: Vec<ISimpleAudioVolume> = kept.mgrs.iter().flat_map(|(_, m)| find_sessions(m, &t)).collect();
+                            if t != kept.app_target {
+                                crate::storage::log_line(&format!("app volume: {t} -> {} audio session(s) on {} output(s)", found.len(), kept.mgrs.len()));
+                            }
+                            kept.app_vols = found;
                             kept.app_target = t;
                             kept.app_at = Some(std::time::Instant::now());
                         }
