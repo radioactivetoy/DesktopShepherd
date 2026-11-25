@@ -308,8 +308,9 @@ fn noise_texture(ctx: &egui::Context) -> egui::TextureHandle {
     let mut px = Vec::with_capacity(NOISE * NOISE);
     for _ in 0..NOISE * NOISE {
         let r = next();
-        let v = (r & 0xFF) as u8;
-        let a = 6 + ((r >> 8) & 0x7) as u8; // 6..13 of 255
+        // Mid greys only (no black or white specks) and very faint: a hint of grain, not sandpaper.
+        let v = 112 + (r & 0x1F) as u8; // 112..143
+        let a = 3 + ((r >> 8) & 0x3) as u8; // 3..6 of 255
         px.push(Color32::from_rgba_unmultiplied(v, v, v, a));
     }
     let img = egui::ColorImage { size: [NOISE, NOISE], pixels: px };
@@ -485,9 +486,11 @@ fn title_color(fence: &Fence, hovered: bool) -> Color32 {
 fn paint_header(painter: &egui::Painter, fence: &Fence, title: Rect, scale: f32) {
     match fence.header_style {
         1 => {
-            let [r, g, b] = fence.color;
-            // A little stronger than the box tint; on a bright backdrop (dark ink) a light band.
-            let fill = if crate::ink::is_dark() { Color32::from_white_alpha(80) } else { Color32::from_rgba_unmultiplied(r, g, b, (fence.alpha as u16 + 45).min(255) as u8) };
+            // The band always contrasts with the title: darker behind light text, lighter behind
+            // dark text (adaptive ink, or a dark title colour chosen in Personalize).
+            let tc = fence.title_color.unwrap_or(fence.text_color);
+            let dark_text = crate::ink::is_dark() || (tc[0] as u32 + tc[1] as u32 + tc[2] as u32) < 300;
+            let fill = if dark_text { Color32::from_white_alpha(90) } else { Color32::from_black_alpha(70) };
             let bw = fence.border_width.max(0.0) * scale;
             let rad = ((fence.corner * scale).round().clamp(0.0, 40.0) - bw).max(0.0) as u8;
             let cr = match fence.title_pos {
@@ -549,7 +552,10 @@ pub fn paint_title_x(painter: &egui::Painter, fence: &Fence, expanded: bool, tit
         });
         let bold = fence.title_weight == 1;
         let pill_at = |painter: &egui::Painter, rect: Rect, g: std::sync::Arc<egui::Galley>| {
-            painter.rect_filled(rect, rect.height() / 2.0, crate::ink::white_alpha(34));
+            // Contrasting pill: dark behind light text, light behind dark text.
+            let light_text = color.r() as u32 + color.g() as u32 + color.b() as u32 > 380;
+            let fill = if light_text { Color32::from_black_alpha(110) } else { Color32::from_white_alpha(150) };
+            painter.rect_filled(rect, rect.height() / 2.0, fill);
             painter.galley(rect.center() - g.size() / 2.0, g, color);
         };
         if expanded && fence.title_pos == TitlePos::Left {
