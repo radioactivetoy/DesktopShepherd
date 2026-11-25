@@ -2724,13 +2724,16 @@ fn pick_row(ui: &mut egui::Ui, label: &str, options: &[&str], current: usize, wi
     let mut pick = None;
     ui.horizontal(|ui| {
         ui.add_space(14.0);
-        let (lr, _) = ui.allocate_exact_size(Vec2::new(70.0, 30.0), Sense::hover());
-        ui.painter().text(Pos2::new(lr.min.x, lr.center().y), egui::Align2::LEFT_CENTER, label, FontId::proportional(14.0), crate::theme::text());
+        // The label gets the room it needs (at least 70 px), so long labels never touch the buttons.
+        let g = ui.painter().layout_no_wrap(label.to_string(), FontId::proportional(14.0), crate::theme::text());
+        let (lr, _) = ui.allocate_exact_size(Vec2::new((g.size().x + 12.0).max(70.0), 30.0), Sense::hover());
+        ui.painter().galley(Pos2::new(lr.min.x, lr.center().y - g.size().y / 2.0), g, crate::theme::text());
         ui.spacing_mut().item_spacing.x = 4.0;
         for (i, text) in options.iter().enumerate() {
             let on = i == current;
             let fill = if on { accent().linear_multiply(0.35) } else { crate::theme::hover() };
-            let b = egui::Button::new(egui::RichText::new(*text).size(13.0).color(if on { crate::theme::strong() } else { crate::theme::soft() }))
+            // Unchosen options in normal text (pale text looked switched off).
+            let b = egui::Button::new(egui::RichText::new(*text).size(13.0).color(if on { crate::theme::strong() } else { crate::theme::text() }))
                 .fill(fill)
                 .corner_radius(egui::CornerRadius::same(4))
                 .min_size(Vec2::new(width, 26.0));
