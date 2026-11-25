@@ -18,6 +18,11 @@ pub struct Volume {
     pub device_id: String,
     /// Every active output device: (id, friendly name), refreshed when the menu asks (`want_devices`).
     pub devices: Vec<(String, String)>,
+    /// The playing app's own volume (its Windows audio session), when one was matched to the
+    /// target set with `set_target`: level 0..1, mute.
+    pub app_matched: bool,
+    pub app_level: f32,
+    pub app_mute: bool,
 }
 
 static STATE: Mutex<Option<Volume>> = Mutex::new(None);
@@ -49,6 +54,50 @@ pub fn set_mute(muted: bool) {
         }
     }
     if let Ok(mut p) = PENDING.lock() {
+        p.1 = Some(muted);
+    }
+}
+
+/// App volume commands waiting for the helper (applied to every matched session).
+static APP_PENDING: Mutex<(Option<f32>, Option<bool>)> = Mutex::new((None, None));
+/// The player whose own volume is wanted (Windows' id for it, e.g. "Spotify.exe"); None = only
+/// the whole PC's volume is wanted.
+static TARGET: Mutex<Option<String>> = Mutex::new(None);
+
+/// Tell the helper which app's volume to follow (None: none). True when it changed.
+pub fn set_target(app: Option<&str>) -> bool {
+    match TARGET.lock() {
+        Ok(mut t) => {
+            if t.as_deref() == app {
+                false
+            } else {
+                *t = app.map(|a| a.to_string());
+                true
+            }
+        }
+        Err(_) => false,
+    }
+}
+
+pub fn set_app_level(level: f32) {
+    let level = level.clamp(0.0, 1.0);
+    if let Ok(mut s) = STATE.lock() {
+        if let Some(v) = s.as_mut() {
+            v.app_level = level;
+        }
+    }
+    if let Ok(mut p) = APP_PENDING.lock() {
+        p.0 = Some(level);
+    }
+}
+
+pub fn set_app_mute(muted: bool) {
+    if let Ok(mut s) = STATE.lock() {
+        if let Some(v) = s.as_mut() {
+            v.app_mute = muted;
+        }
+    }
+    if let Ok(mut p) = APP_PENDING.lock() {
         p.1 = Some(muted);
     }
 }
@@ -98,7 +147,7 @@ mod imp {
     use std::cell::RefCell;
     use windows::core::{Interface, IUnknown, IUnknown_Vtbl, GUID, HRESULT, PCWSTR};
     use windows::Win32::Media::Audio::Endpoints::IAudioEndpointVolume;
-    use windows::Win32::Media::Audio::{eCommunications, eConsole, eMultimedia, eRender, ERole, IMMDevice, IMMDeviceEnumerator, MMDeviceEnumerator, DEVICE_STATE_ACTIVE};
+    use windows::Win32::Media::Audio::{AudioSessionStateExpired, IAudioSessionControl2, IAudioSessionManager2, ISimpleAudioVolume, eCommunications, eConsole, eMultimedia, eRender, ERole, IMMDevice, IMMDeviceEnumerator, MMDeviceEnumerator, DEVICE_STATE_ACTIVE};
     use windows::Win32::System::Com::StructuredStorage::PropVariantToStringAlloc;
     use windows::Win32::System::Com::{CoCreateInstance, CoTaskMemFree, CLSCTX_ALL, STGM_READ};
 
@@ -123,6 +172,12 @@ mod imp {
         vol: Option<IAudioEndpointVolume>,
         name: String,
         devices: Vec<(String, String)>,
+        /// Session manager of the default device (kept; asked for again when the device changes).
+        mgr: Option<IAudioSessionManager2>,
+        /// The player followed, its matched sessions, and when they were looked for.
+        app_target: String,
+        app_vols: Vec<ISimpleAudioVolume>,
+        app_at: Option<std::time::Instant>,
     }
 
     thread_local! {
@@ -184,6 +239,67 @@ mod imp {
         ok
     }
 
+    /// Does the process `pid` belong to the player Windows calls `target`? A packaged app's id
+    /// ("Publisher.App_hash!Entry") is compared with the process' package family name; otherwise
+    /// the id is an exe name ("Spotify.exe", "chrome") compared with the process' exe name.
+    unsafe fn process_matches(pid: u32, target: &str) -> bool {
+        use windows::core::PWSTR;
+        use windows::Win32::Foundation::{CloseHandle, ERROR_SUCCESS};
+        use windows::Win32::Storage::Packaging::Appx::GetPackageFamilyName;
+        use windows::Win32::System::Threading::{OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_FORMAT, PROCESS_QUERY_LIMITED_INFORMATION};
+        if pid == 0 || target.is_empty() {
+            return false;
+        }
+        let Ok(h) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else { return false };
+        let result = (|| {
+            if let Some((family, _)) = target.split_once('!') {
+                let mut len = 256u32;
+                let mut buf = [0u16; 256];
+                if GetPackageFamilyName(h, &mut len, PWSTR(buf.as_mut_ptr())) != ERROR_SUCCESS || len == 0 {
+                    return false;
+                }
+                let have = String::from_utf16_lossy(&buf[..(len as usize).saturating_sub(1).min(255)]);
+                return have.eq_ignore_ascii_case(family);
+            }
+            let mut len = 520u32;
+            let mut buf = [0u16; 520];
+            if QueryFullProcessImageNameW(h, PROCESS_NAME_FORMAT(0), PWSTR(buf.as_mut_ptr()), &mut len).is_err() {
+                return false;
+            }
+            let path = String::from_utf16_lossy(&buf[..(len as usize).min(519)]);
+            let exe = path.rsplit(['\\', '/']).next().unwrap_or("");
+            let strip = |s: &str| -> String {
+                let l = s.to_lowercase();
+                l.strip_suffix(".exe").map(|x| x.to_string()).unwrap_or(l)
+            };
+            let t = target.rsplit(['\\', '/']).next().unwrap_or(target);
+            !strip(exe).is_empty() && strip(exe) == strip(t)
+        })();
+        let _ = CloseHandle(h);
+        result
+    }
+
+    /// Finds the audio sessions of the target player (a browser may have several).
+    unsafe fn find_sessions(mgr: &IAudioSessionManager2, target: &str) -> Vec<ISimpleAudioVolume> {
+        let mut out = Vec::new();
+        let Ok(en) = mgr.GetSessionEnumerator() else { return out };
+        let n = en.GetCount().unwrap_or(0).clamp(0, 64);
+        for i in 0..n {
+            let Ok(ctl) = en.GetSession(i) else { continue };
+            if ctl.GetState().map(|s| s == AudioSessionStateExpired).unwrap_or(true) {
+                continue;
+            }
+            let Ok(c2) = ctl.cast::<IAudioSessionControl2>() else { continue };
+            let Ok(pid) = c2.GetProcessId() else { continue };
+            if process_matches(pid, target) {
+                if let Ok(v) = ctl.cast::<ISimpleAudioVolume>() {
+                    out.push(v);
+                }
+            }
+        }
+        out
+    }
+
     /// One reading (and the pending commands). Returns true when the shown state changed.
     pub fn tick() -> bool {
         let new_state: Option<Volume> = KEPT.with(|k| {
@@ -191,7 +307,7 @@ mod imp {
             unsafe {
                 if k.is_none() {
                     let en: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).ok()?;
-                    *k = Some(Kept { enumerator: en, id: String::new(), vol: None, name: String::new(), devices: Vec::new() });
+                    *k = Some(Kept { enumerator: en, id: String::new(), vol: None, name: String::new(), devices: Vec::new(), mgr: None, app_target: String::new(), app_vols: Vec::new(), app_at: None });
                 }
                 let kept = k.as_mut()?;
                 // A device picked in the menu becomes the default (all roles).
@@ -218,6 +334,9 @@ mod imp {
                 if kept.vol.is_none() || id != kept.id {
                     kept.vol = dev.Activate::<IAudioEndpointVolume>(CLSCTX_ALL, None).ok();
                     kept.name = friendly_name(&dev);
+                    kept.mgr = None;
+                    kept.app_vols.clear();
+                    kept.app_at = None;
                     kept.id = id;
                     relist = true;
                 }
@@ -236,8 +355,61 @@ mod imp {
                 if let Some(m) = mute {
                     let _ = vol.SetMute(m, none);
                 }
+                // The target player's own volume (only when the widget wants it).
+                let target = TARGET.lock().ok().and_then(|t| t.clone());
+                let (app_cmd_l, app_cmd_m) = APP_PENDING.lock().map(|mut p| std::mem::take(&mut *p)).unwrap_or((None, None));
+                let (mut app_matched, mut app_level, mut app_mute) = (false, 0.0f32, false);
+                match target {
+                    None => {
+                        kept.app_vols.clear();
+                        kept.app_target.clear();
+                        kept.app_at = None;
+                    }
+                    Some(t) => {
+                        // Look for the sessions again when the player changed, or every 10 s
+                        // (3 s while none was found yet).
+                        let wait = if kept.app_vols.is_empty() { 3 } else { 10 };
+                        let stale = kept.app_at.map(|a| a.elapsed() >= std::time::Duration::from_secs(wait)).unwrap_or(true);
+                        if t != kept.app_target || stale {
+                            if kept.mgr.is_none() {
+                                kept.mgr = dev.Activate::<IAudioSessionManager2>(CLSCTX_ALL, None).ok();
+                            }
+                            kept.app_vols = match &kept.mgr {
+                                Some(m) => find_sessions(m, &t),
+                                None => Vec::new(),
+                            };
+                            kept.app_target = t;
+                            kept.app_at = Some(std::time::Instant::now());
+                        }
+                        let mut gone = false;
+                        for v in &kept.app_vols {
+                            if let Some(l) = app_cmd_l {
+                                let _ = v.SetMasterVolume(l, none);
+                            }
+                            if let Some(m) = app_cmd_m {
+                                let _ = v.SetMute(m, none);
+                            }
+                            match (v.GetMasterVolume(), v.GetMute()) {
+                                (Ok(l), Ok(m)) => {
+                                    if !app_matched || l > app_level {
+                                        app_level = l;
+                                    }
+                                    if !app_matched {
+                                        app_mute = m.as_bool();
+                                    }
+                                    app_matched = true;
+                                }
+                                _ => gone = true,
+                            }
+                        }
+                        if gone {
+                            kept.app_vols.clear();
+                            kept.app_at = None; // look again at the next reading
+                        }
+                    }
+                }
                 match (vol.GetMasterVolumeLevelScalar(), vol.GetMute()) {
-                    (Ok(level), Ok(muted)) => Some(Volume { level, muted: muted.as_bool(), device: kept.name.clone(), device_id: kept.id.clone(), devices: kept.devices.clone() }),
+                    (Ok(level), Ok(muted)) => Some(Volume { level, muted: muted.as_bool(), device: kept.name.clone(), device_id: kept.id.clone(), devices: kept.devices.clone(), app_matched, app_level, app_mute }),
                     _ => {
                         kept.vol = None; // device went away: ask again next time
                         None

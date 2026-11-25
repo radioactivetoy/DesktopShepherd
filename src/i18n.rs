@@ -671,6 +671,10 @@ pub static ES: &[(&str, &str)] = &[
     ("Volume {} %", "Volumen {} %"),
     ("Sound output", "Salida de sonido"),
     ("Sound settings…", "Configuración de sonido…"),
+    ("Volume slider controls:", "El control de volumen ajusta:"),
+    ("The playing app", "La aplicación que suena"),
+    ("The whole PC", "Todo el PC"),
+    ("{} volume {} %", "Volumen de {}: {} %"),
 ];
 
 pub static CA: &[(&str, &str)] = &[
@@ -1062,6 +1066,10 @@ pub static CA: &[(&str, &str)] = &[
     ("Volume {} %", "Volum {} %"),
     ("Sound output", "Sortida de so"),
     ("Sound settings…", "Configuració del so…"),
+    ("Volume slider controls:", "El control de volum ajusta:"),
+    ("The playing app", "L'aplicació que sona"),
+    ("The whole PC", "Tot el PC"),
+    ("{} volume {} %", "Volum de {}: {} %"),
 ];
 
 pub static FR: &[(&str, &str)] = &[
@@ -1453,6 +1461,10 @@ pub static FR: &[(&str, &str)] = &[
     ("Volume {} %", "Volume {} %"),
     ("Sound output", "Sortie audio"),
     ("Sound settings…", "Paramètres audio…"),
+    ("Volume slider controls:", "Le curseur de volume règle :"),
+    ("The playing app", "L'application en lecture"),
+    ("The whole PC", "Tout l'ordinateur"),
+    ("{} volume {} %", "Volume de {} : {} %"),
 ];
 
 pub static DE: &[(&str, &str)] = &[
@@ -1844,6 +1856,10 @@ pub static DE: &[(&str, &str)] = &[
     ("Volume {} %", "Lautstärke {} %"),
     ("Sound output", "Audioausgabe"),
     ("Sound settings…", "Soundeinstellungen…"),
+    ("Volume slider controls:", "Der Lautstärkeregler steuert:"),
+    ("The playing app", "Die spielende App"),
+    ("The whole PC", "Den ganzen PC"),
+    ("{} volume {} %", "{}-Lautstärke {} %"),
 ];
 
 pub static IT: &[(&str, &str)] = &[
@@ -2235,6 +2251,10 @@ pub static IT: &[(&str, &str)] = &[
     ("Volume {} %", "Volume {} %"),
     ("Sound output", "Uscita audio"),
     ("Sound settings…", "Impostazioni audio…"),
+    ("Volume slider controls:", "Il cursore del volume regola:"),
+    ("The playing app", "L'app in riproduzione"),
+    ("The whole PC", "Tutto il PC"),
+    ("{} volume {} %", "Volume di {}: {} %"),
 ];
 
 pub static PT: &[(&str, &str)] = &[
@@ -2626,6 +2646,10 @@ pub static PT: &[(&str, &str)] = &[
     ("Volume {} %", "Volume {} %"),
     ("Sound output", "Saída de som"),
     ("Sound settings…", "Definições de som…"),
+    ("Volume slider controls:", "O controlo de volume ajusta:"),
+    ("The playing app", "A aplicação que está a tocar"),
+    ("The whole PC", "Todo o PC"),
+    ("{} volume {} %", "Volume de {}: {} %"),
 ];
 
 #[cfg(test)]

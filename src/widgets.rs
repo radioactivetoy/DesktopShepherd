@@ -2323,7 +2323,23 @@ fn mmss(secs: f64) -> String {
 struct Media;
 
 impl DeskWidget for Media {
-    fn ui(&self, ui: &mut Ui, _data: &mut Value) -> WidgetOutput {
+    fn has_settings(&self) -> bool {
+        true
+    }
+
+    fn settings(&self, ui: &mut Ui, data: &mut Value) -> bool {
+        let mut app = data.get("volume_scope").and_then(|v| v.as_str()) != Some("system");
+        let mut changed = false;
+        ui.label(t("Volume slider controls:"));
+        changed |= ui.radio_value(&mut app, true, t("The playing app")).changed();
+        changed |= ui.radio_value(&mut app, false, t("The whole PC")).changed();
+        if changed {
+            data["volume_scope"] = json!(if app { "app" } else { "system" });
+        }
+        changed
+    }
+
+    fn ui(&self, ui: &mut Ui, data: &mut Value) -> WidgetOutput {
         refresh_media(false);
         let all: Vec<MediaInfo> = MEDIA.lock().ok().and_then(|g| g.as_ref().map(|(_, m)| m.clone())).unwrap_or_default();
         // Nothing playing: an empty box (it fills again when music starts).
@@ -2335,6 +2351,11 @@ impl DeskWidget for Media {
         let chosen: Option<String> = ui.ctx().data(|d| d.get_temp(sid));
         let idx = chosen.and_then(|c| all.iter().position(|m| m.app == c)).unwrap_or(0);
         let m = all[idx].clone();
+        // Volume slider: the playing app's own volume (default) or the whole PC's.
+        let app_scope = data.get("volume_scope").and_then(|v| v.as_str()) != Some("system");
+        if crate::audio::set_target(app_scope.then_some(m.app.as_str())) {
+            media_wake();
+        }
         let mut full = ui.max_rect();
         if all.len() > 1 {
             // The dots, one per player, at the bottom.
@@ -2424,7 +2445,7 @@ impl DeskWidget for Media {
         // Volume (right end of the buttons row), only while the mouse is over the widget.
         if ui.rect_contains_pointer(ui.max_rect()) {
             if let Some(vol) = crate::audio::current() {
-                media_volume_controls(ui, cy, mid.x + 44.0 + 15.0 + 18.0, x0 + w, &vol);
+                media_volume_controls(ui, cy, mid.x + 44.0 + 15.0 + 18.0, x0 + w, &vol, app_scope.then(|| app_label(&m.app)));
                 repaint = Duration::from_secs(1);
             }
         }
@@ -2606,7 +2627,10 @@ fn media_seek(app: String, secs: f64) {
 /// Speaker (click = mute) and a short slider (drag/click, wheel +-2 %) at the right end of the
 /// buttons row, between `x_min` and `x_max`. Too narrow: only the speaker. No percentage text
 /// (tooltip). COM work happens on the media helper; this only reads and leaves commands.
-fn media_volume_controls(ui: &mut Ui, cy: f32, x_min: f32, x_max: f32, vol: &crate::audio::Volume) {
+fn media_volume_controls(ui: &mut Ui, cy: f32, x_min: f32, x_max: f32, vol: &crate::audio::Volume, app_name: Option<String>) {
+    // Own volume of the playing app when it was found among the audio sessions, else the PC's.
+    let use_app = app_name.is_some() && vol.app_matched;
+    let (cur_level, cur_mute) = if use_app { (vol.app_level, vol.app_mute) } else { (vol.level, vol.muted) };
     let room = x_max - x_min;
     if room < 22.0 {
         return;
@@ -2617,9 +2641,13 @@ fn media_volume_controls(ui: &mut Ui, cy: f32, x_min: f32, x_max: f32, vol: &cra
     let spk_c = if with_slider { Pos2::new(x_max - slider_w - 6.0 - 11.0, cy) } else { Pos2::new(x_max - 11.0, cy) };
     let spk = egui::Rect::from_center_size(spk_c, egui::vec2(22.0, 22.0));
     let track = egui::Rect::from_min_max(Pos2::new(x_max - slider_w, cy - 8.0), Pos2::new(x_max, cy + 8.0));
-    let tip = tf("Volume {} %", &[&((vol.level * 100.0).round() as u32)]);
-    let spk_resp = ui.interact(spk, ui.id().with("media-mute"), Sense::click()).on_hover_text(if vol.muted { t("Unmute") } else { t("Mute") });
-    let mut level = vol.level;
+    let pct = (cur_level * 100.0).round() as u32;
+    let tip = match (&app_name, use_app) {
+        (Some(n), true) => tf("{} volume {} %", &[n, &pct]),
+        _ => tf("Volume {} %", &[&pct]),
+    };
+    let spk_resp = ui.interact(spk, ui.id().with("media-mute"), Sense::click()).on_hover_text(if cur_mute { t("Unmute") } else { t("Mute") });
+    let mut level = cur_level;
     let scroll = ui.input(|i| i.raw_scroll_delta.y);
     let step = |hover: bool, level: &mut f32| {
         if hover && scroll != 0.0 {
@@ -2628,9 +2656,9 @@ fn media_volume_controls(ui: &mut Ui, cy: f32, x_min: f32, x_max: f32, vol: &cra
     };
     step(spk_resp.hovered(), &mut level);
     let spk_col = if spk_resp.hovered() { crate::ink::strong() } else { crate::ink::gray(215) };
-    ui.painter().text(spk.center(), egui::Align2::CENTER_CENTER, if vol.muted || vol.level <= 0.0 { "\u{E74F}" } else { "\u{E767}" }, egui::FontId::proportional(15.0), spk_col);
+    ui.painter().text(spk.center(), egui::Align2::CENTER_CENTER, if cur_mute || cur_level <= 0.0 { "\u{E74F}" } else { "\u{E767}" }, egui::FontId::proportional(15.0), spk_col);
     if spk_resp.clicked() {
-        crate::audio::set_mute(!vol.muted);
+        if use_app { crate::audio::set_app_mute(!cur_mute); } else { crate::audio::set_mute(!cur_mute); }
         media_wake();
     }
     if with_slider {
@@ -2646,15 +2674,22 @@ fn media_volume_controls(ui: &mut Ui, cy: f32, x_min: f32, x_max: f32, vol: &cra
         p.rect_filled(bar, 2.0, crate::ink::white_alpha(40));
         let mut done = bar;
         done.set_width(bar.width() * level);
-        p.rect_filled(done, 2.0, if vol.muted { crate::ink::gray(120) } else { crate::ink::gray(230) });
+        p.rect_filled(done, 2.0, if cur_mute { crate::ink::gray(120) } else { crate::ink::gray(230) });
         p.circle_filled(Pos2::new(bar.min.x + bar.width() * level, bar.center().y), if resp.hovered() || resp.dragged() { 6.0 } else { 5.0 }, crate::ink::strong());
     } else {
         spk_resp.on_hover_text(tip);
     }
-    if (level - vol.level).abs() > 0.0005 {
-        crate::audio::set_level(level);
-        if vol.muted && level > vol.level {
-            crate::audio::set_mute(false);
+    if (level - cur_level).abs() > 0.0005 {
+        if use_app {
+            crate::audio::set_app_level(level);
+            if cur_mute && level > cur_level {
+                crate::audio::set_app_mute(false);
+            }
+        } else {
+            crate::audio::set_level(level);
+            if cur_mute && level > cur_level {
+                crate::audio::set_mute(false);
+            }
         }
         media_wake();
     }
