@@ -98,7 +98,7 @@ pub fn sort_items(v: &mut [DeskItem], sort: SortKind, open_counts: &HashMap<Stri
 pub fn tabs_key(fence: &Fence, desk: &DeskState) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
-    (desk.rev, std::mem::discriminant(&fence.sort), fence.auto_sort, &fence.folder).hash(&mut h);
+    (desk.rev, std::mem::discriminant(&fence.sort), fence.auto_sort, fence.kind_tabs, &fence.folder).hash(&mut h);
     if fence.sort == SortKind::OpenCount {
         // Order-independent sum over the counts.
         let mut sum: u64 = 0;
@@ -113,7 +113,7 @@ pub fn tabs_key(fence: &Fence, desk: &DeskState) -> u64 {
         for t in &fence.tabs {
             (&t.name, &t.items).hash(&mut h);
         }
-    } else if fence.auto_sort {
+    } else if fence.rule_tabs() {
         if let Some(rs) = &fence.categories {
             for r in rs {
                 (&r.name, &r.exts, &r.pattern, r.days).hash(&mut h);
@@ -121,6 +121,31 @@ pub fn tabs_key(fence: &Fence, desk: &DeskState) -> u64 {
         }
     }
     h.finish()
+}
+
+/// Splits `items` into tabs by the box's tab rules (rules in order, then Folders, then Other),
+/// each sorted with the box's sort (Manual counts as Name). No items: one empty tab `empty_name`.
+fn group_by_rules(fence: &Fence, desk: &DeskState, items: Vec<DeskItem>, empty_name: String) -> Vec<(String, Vec<DeskItem>)> {
+    let rules = fence.rules(desk.rules);
+    let mut by_tab: HashMap<String, Vec<DeskItem>> = HashMap::new();
+    for it in items {
+        by_tab.entry(tab_name_for(&it, rules)).or_default().push(it);
+    }
+    let mut order: Vec<String> = rules.iter().map(|r| r.name.clone()).collect();
+    order.push("Folders".into());
+    order.push("Other".into());
+    let sort = if fence.sort == SortKind::Manual { SortKind::Name } else { fence.sort };
+    let mut tabs = Vec::new();
+    for name in order {
+        if let Some(mut v) = by_tab.remove(&name) {
+            sort_items(&mut v, sort, desk.open_counts);
+            tabs.push((name, v));
+        }
+    }
+    if tabs.is_empty() {
+        tabs.push((empty_name, vec![]));
+    }
+    tabs
 }
 
 /// The tabs as shown: names and the items in each, already filtered and sorted.
@@ -134,34 +159,17 @@ pub fn visible_tabs(fence: &Fence, desk: &DeskState) -> Vec<(String, Vec<DeskIte
             .filter(|it| std::path::Path::new(&it.path).parent().map(|p| p.to_string_lossy().to_lowercase() == dir_l).unwrap_or(false))
             .cloned()
             .collect();
+        let name = std::path::Path::new(dir).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| dir.clone());
+        if fence.kind_tabs {
+            return group_by_rules(fence, desk, v, name);
+        }
         let sort = if fence.sort == SortKind::Manual { SortKind::Name } else { fence.sort };
         sort_items(&mut v, sort, desk.open_counts);
-        let name = std::path::Path::new(dir).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| dir.clone());
         return vec![(name, v)];
     }
     if fence.auto_sort {
-        let rules = fence.rules(desk.rules);
-        let mut by_tab: HashMap<String, Vec<DeskItem>> = HashMap::new();
-        for (key, it) in desk.items.iter() {
-            if !desk.claimed.contains(key) && it.on_desktop {
-                by_tab.entry(tab_name_for(it, rules)).or_default().push(it.clone());
-            }
-        }
-        let mut order: Vec<String> = rules.iter().map(|r| r.name.clone()).collect();
-        order.push("Folders".into());
-        order.push("Other".into());
-        let mut tabs = Vec::new();
-        for name in order {
-            if let Some(mut v) = by_tab.remove(&name) {
-                let sort = if fence.sort == SortKind::Manual { SortKind::Name } else { fence.sort };
-                sort_items(&mut v, sort, desk.open_counts);
-                tabs.push((name, v));
-            }
-        }
-        if tabs.is_empty() {
-            tabs.push(("Desktop".to_string(), vec![]));
-        }
-        return tabs;
+        let v: Vec<DeskItem> = desk.items.iter().filter(|(key, it)| !desk.claimed.contains(*key) && it.on_desktop).map(|(_, it)| it.clone()).collect();
+        return group_by_rules(fence, desk, v, "Desktop".to_string());
     }
     fence
         .tabs
@@ -756,4 +764,42 @@ pub fn installed_fonts() -> &'static [&'static str] {
         let dir = fonts_dir();
         FONTS.iter().filter(|(n, f)| *n == "Segoe UI" || dir.join(f).exists()).map(|(n, _)| *n).collect()
     })
+}
+
+#[cfg(test)]
+mod kind_tab_tests {
+    use super::*;
+    use crate::model::Category;
+
+    fn item(dir: &str, name: &str, ext: &str) -> (String, DeskItem) {
+        let path = format!("{dir}\\{name}.{ext}");
+        (path.to_lowercase(), DeskItem { path, name: name.into(), ext: ext.into(), is_dir: false, category: Category::Other, on_desktop: false, size: 0, modified: 0 })
+    }
+
+    #[test]
+    fn kind_tabs_folder_box_splits_by_rules() {
+        let items: HashMap<String, DeskItem> = [
+            item("C:\\Dl", "b", "png"),
+            item("C:\\Dl", "a", "png"),
+            item("C:\\Dl", "notes", "zzz"),
+            item("C:\\Other", "elsewhere", "png"),
+        ]
+        .into_iter()
+        .collect();
+        let claimed = std::collections::HashSet::new();
+        let rules = vec![crate::model::CategoryRule { name: "Pictures".into(), exts: vec!["png".into()], ..Default::default() }];
+        let counts = HashMap::new();
+        let desk = DeskState { items: &items, claimed: &claimed, spacing: (75.0, 100.0), rules: &rules, open_counts: &counts, rev: 0 };
+        let mut f = Fence { folder: Some("C:\\Dl".into()), ..Fence::default() };
+        let plain = visible_tabs(&f, &desk);
+        assert_eq!(plain.len(), 1);
+        assert_eq!(plain[0].1.len(), 3);
+        let k0 = tabs_key(&f, &desk);
+        f.kind_tabs = true;
+        assert_ne!(k0, tabs_key(&f, &desk));
+        let tabs = visible_tabs(&f, &desk);
+        let names: Vec<&str> = tabs.iter().map(|t| t.0.as_str()).collect();
+        assert_eq!(names, ["Pictures", "Other"]);
+        assert_eq!(tabs[0].1.iter().map(|i| i.name.as_str()).collect::<Vec<_>>(), ["a", "b"]);
+    }
 }

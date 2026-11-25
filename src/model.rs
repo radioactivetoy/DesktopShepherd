@@ -147,9 +147,27 @@ pub struct Fence {
     /// This box's own auto-sort tab rules (None = follow the default list in Settings).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub categories: Option<Vec<CategoryRule>>,
+    /// A folder box split into tabs by kind (using the auto-sort tab rules). Folder boxes only.
+    #[serde(default)]
+    pub kind_tabs: bool,
 }
 
 impl Fence {
+    /// True when this box's tabs come from the tab rules: an auto-sort box, or a folder box
+    /// split by kind.
+    pub fn rule_tabs(&self) -> bool {
+        self.auto_sort || (self.folder.is_some() && self.kind_tabs)
+    }
+
+    /// A folder box can't also be a collector: older layouts that had both become "by kind".
+    pub fn normalize_kind_tabs(&mut self) {
+        if self.folder.is_some() && self.auto_sort {
+            self.auto_sort = false;
+            self.kind_tabs = true;
+        }
+    }
+
+
     /// The auto-sort rules this box uses: its own list, or `default` (the app setting).
     pub fn rules<'a>(&'a self, default: &'a [CategoryRule]) -> &'a [CategoryRule] {
         self.categories.as_deref().unwrap_or(default)
@@ -245,6 +263,7 @@ impl Default for Fence {
             hover_zoom: false,
             calm_icons: false,
             categories: None,
+            kind_tabs: false,
         }
     }
 }
@@ -736,6 +755,74 @@ pub fn follow_index(sel: usize, from: usize, to: usize) -> usize {
 mod move_tests {
     use super::*;
 
+    /// A saved look, written to the layout file and read back, gives a box every look option
+    /// of the box it was saved from (corners, border, glass, text, effects…).
+    #[test]
+    fn preset_keeps_every_look_option() {
+        let mut src = Fence::default();
+        src.color = [10, 20, 30];
+        src.alpha = 77;
+        src.border_color = [1, 2, 3, 4];
+        src.border_width = 2.5;
+        src.corner = 13.0;
+        src.blur = 33;
+        src.text_color = [40, 50, 60];
+        src.text_shadow = !src.text_shadow;
+        src.font = "Bahnschrift".into();
+        src.title_size = 21.0;
+        src.caption_size = 9.5;
+        src.show_captions = !src.show_captions;
+        src.icon_size = 72;
+        src.icon_spacing = 101.0;
+        src.title_pos = TitlePos::Bottom;
+        src.tab_pos = TabPos::Top;
+        src.overflow = 1;
+        src.shadow = !src.shadow;
+        src.raised = !src.raised;
+        src.header_style = 2;
+        src.title_align = 1;
+        src.title_icon = "★".into();
+        src.title_color = Some([7, 8, 9]);
+        src.title_weight = 1;
+        src.show_count = !src.show_count;
+        src.title_on_hover = !src.title_on_hover;
+        src.title_caps = !src.title_caps;
+        src.gradient = Some(Gradient { color2: [9, 9, 9], alpha2: 99, angle: 2 });
+        src.texture = !src.texture;
+        src.hover_lift = !src.hover_lift;
+        src.accent_border = 2;
+        src.name_backing = !src.name_backing;
+        src.hover_zoom = !src.hover_zoom;
+        src.calm_icons = !src.calm_icons;
+
+        let saved = serde_json::to_string(&LookPreset::from_fence("Mine", &src)).expect("save");
+        let preset: LookPreset = serde_json::from_str(&saved).expect("load");
+        let mut dst = Fence::default();
+        dst.copy_look_from(&preset.look);
+
+        // Everything that isn't part of the look is taken from the source too, so any look
+        // option that the preset forgets shows up as a difference.
+        dst.id = src.id;
+        dst.name = src.name.clone();
+        dst.rect = src.rect;
+        dst.expanded = src.expanded;
+        dst.locked = src.locked;
+        dst.auto_sort = src.auto_sort;
+        dst.tabs = src.tabs.clone();
+        dst.sel_tab = src.sel_tab;
+        dst.sort = src.sort;
+        dst.widget = src.widget.clone();
+        dst.monitor_role = src.monitor_role;
+        dst.monitor_name = src.monitor_name.clone();
+        dst.monitor_offset = src.monitor_offset;
+        dst.folder = src.folder.clone();
+        dst.page = src.page;
+        dst.hotkey = src.hotkey;
+        dst.categories = src.categories.clone();
+        dst.kind_tabs = src.kind_tabs;
+        assert_eq!(serde_json::to_value(&dst).expect("dst"), serde_json::to_value(&src).expect("src"));
+    }
+
     #[test]
     fn moves_and_follows() {
         let mut v = vec!['a', 'b', 'c', 'd'];
@@ -767,5 +854,17 @@ mod move_tests {
         let def = default_categories();
         assert_eq!(f.rules(&def).len(), def.len());
         assert!(!serde_json::to_string(&f).unwrap().contains("categories"));
+    }
+
+    #[test]
+    fn folder_box_with_auto_sort_becomes_kind_tabs() {
+        let mut f = Fence { folder: Some("C://x".into()), auto_sort: true, ..Fence::default() };
+        f.normalize_kind_tabs();
+        assert!(!f.auto_sort && f.kind_tabs && f.rule_tabs());
+        let mut c = Fence { auto_sort: true, ..Fence::default() };
+        c.normalize_kind_tabs();
+        assert!(c.auto_sort && !c.kind_tabs && c.rule_tabs());
+        let g: Fence = serde_json::from_str(r#"{"id": 3}"#).unwrap();
+        assert!(!g.kind_tabs && !g.rule_tabs());
     }
 }

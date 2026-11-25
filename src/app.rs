@@ -349,7 +349,7 @@ fn layout_fingerprint(layout: &Layout) -> (u64, bool) {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
     for f in &layout.fences {
-        (f.id, f.auto_sort, f.widget.is_some(), &f.name, &f.folder).hash(&mut h);
+        (f.id, f.auto_sort, f.kind_tabs, f.widget.is_some(), &f.name, &f.folder).hash(&mut h);
         if let Some(rs) = &f.categories {
             for r in rs {
                 (&r.name, &r.exts, &r.pattern, r.days).hash(&mut h);
@@ -359,7 +359,7 @@ fn layout_fingerprint(layout: &Layout) -> (u64, bool) {
             (&t.name, &t.items).hash(&mut h);
         }
     }
-    (h.finish(), layout.settings.categories.iter().any(|r| r.days > 0) || layout.fences.iter().any(|f| f.categories.as_ref().is_some_and(|rs| rs.iter().any(|r| r.days > 0))))
+    (h.finish(), layout.settings.categories.iter().any(|r| r.days > 0) || layout.fences.iter().any(|f| (f.auto_sort || f.kind_tabs) && f.categories.as_ref().is_some_and(|rs| rs.iter().any(|r| r.days > 0))))
 }
 
 /// A fingerprint of the box settings that shortcuts, icon sizes and fonts come from.
@@ -2190,8 +2190,8 @@ fn fence_window(
         if let Some(strip) = a.tabs {
             let names: Vec<String> = tabs.iter().map(|t| t.0.clone()).collect();
             let rects = fv::paint_tabs(&painter, fence, strip, &names, sel, 1.0);
-            // Tabs can be dragged to a new place (only boxes with several tabs, not widgets or folders).
-            let can_reorder = rects.len() > 1 && fence.widget.is_none() && fence.folder.is_none();
+            // Tabs can be dragged to a new place (only boxes with several tabs, not widgets; folders only when split by kind).
+            let can_reorder = rects.len() > 1 && fence.widget.is_none() && (fence.folder.is_none() || fence.rule_tabs());
             let mut dragging: Option<usize> = None;
             let mut dropped: Option<usize> = None;
             for (i, r) in rects.iter().enumerate() {
@@ -2201,7 +2201,7 @@ fn fence_window(
                     dirty = true;
                 }
                 if resp.secondary_clicked() {
-                    let t = if fence.auto_sort { MenuTarget::Fence(fence.id) } else { MenuTarget::Tab(fence.id, i) };
+                    let t = if fence.rule_tabs() { MenuTarget::Fence(fence.id) } else { MenuTarget::Tab(fence.id, i) };
                     open_menu(ctx, st, t);
                 }
                 if can_reorder {
@@ -2217,14 +2217,14 @@ fn fence_window(
                 let target = ctx.pointer_interact_pos().and_then(|p| rects.iter().position(|r| r.contains(p)));
                 // Where the dragged tab would land: Folders / Other (not rules) always stay last.
                 let target = target.map(|t| {
-                    if !fence.auto_sort {
+                    if !fence.rule_tabs() {
                         return t;
                     }
                     let rule_names: Vec<&str> = fence.rules(desk.rules).iter().map(|r| r.name.as_str()).collect();
                     let is_rule = |n: &String| rule_names.contains(&n.as_str());
                     if is_rule(&names[t]) { t } else { names.iter().rposition(is_rule).unwrap_or(t) }
                 });
-                let movable = !fence.auto_sort || {
+                let movable = !fence.rule_tabs() || {
                     let rule_names: Vec<&str> = fence.rules(desk.rules).iter().map(|r| r.name.as_str()).collect();
                     rule_names.contains(&names[from].as_str())
                 };
@@ -2241,7 +2241,7 @@ fn fence_window(
                             };
                             painter.line_segment([a1, a2], egui::Stroke::new(2.5_f32, accent()));
                         } else {
-                            let done = if fence.auto_sort {
+                            let done = if fence.rule_tabs() {
                                 let mut rules = fence.rules(desk.rules).to_vec();
                                 let pos = |n: &str| rules.iter().position(|r| r.name == n);
                                 match (pos(&names[from]), pos(&names[to])) {
@@ -3341,14 +3341,24 @@ fn fence_menu(ui: &mut egui::Ui, fence: &mut Fence, st: &mut UiState, page: &mut
                 if sub(ui, icon::SORT, t("Sort by")) {
                     *page = MenuPage::Sort;
                 }
-                if !fence.auto_sort && row(ui, icon::TAB, t("New tab"), None, true).clicked() {
+                if !fence.rule_tabs() && row(ui, icon::TAB, t("New tab"), None, true).clicked() {
                     let n = fence.tabs.len() + 1;
                     fence.tabs.push(Tab { name: tf("Tab {}", &[&n]), items: vec![] });
                     fence.sel_tab = fence.tabs.len() - 1;
                     dirty = true;
                     close = true;
                 }
-                if row(ui, icon::AUTO, t("Collect other desktop items"), fence.auto_sort.then_some(icon::CHECK), true)
+                if fence.folder.is_some() {
+                    if row(ui, icon::AUTO, t("Sort into tabs by kind"), fence.kind_tabs.then_some(icon::CHECK), true)
+                        .on_hover_text(t("Splits this folder's items into tabs (Apps, Files, Pictures…) using the auto-sort tab rules"))
+                        .clicked()
+                    {
+                        fence.kind_tabs = !fence.kind_tabs;
+                        fence.sel_tab = 0;
+                        dirty = true;
+                        close = true;
+                    }
+                } else if row(ui, icon::AUTO, t("Collect other desktop items"), fence.auto_sort.then_some(icon::CHECK), true)
                     .on_hover_text(t("Shows every desktop item no other box holds, sorted into tabs by kind"))
                     .clicked()
                 {
@@ -4656,6 +4666,10 @@ fn dedupe_items(layout: &mut Layout) {
 }
 
 fn sanitize(layout: &mut Layout) {
+    // A folder box can't also collect desktop items; older files with both split it by kind.
+    for f in &mut layout.fences {
+        f.normalize_kind_tabs();
+    }
     // Version 2: boxes still on the first build's guessed look (opacity 170, 6 px corners)
     // move to the defaults read from the original (opacity 50, see model.rs).
     if layout.version < 2 {
@@ -5771,10 +5785,10 @@ impl DeskApp {
                             ui.add_space(24.0);
                             ui.selectable_value(&mut tab, 0, egui::RichText::new(t("Look")).size(14.0));
                             ui.selectable_value(&mut tab, 1, egui::RichText::new(t("Widget settings")).size(14.0));
-                        } else if fence.auto_sort {
+                        } else if fence.rule_tabs() || fence.folder.is_some() {
                             ui.add_space(24.0);
                             ui.selectable_value(&mut tab, 0, egui::RichText::new(t("Look")).size(14.0));
-                            ui.selectable_value(&mut tab, 2, egui::RichText::new(t("Auto-sort tabs")).size(14.0));
+                            ui.selectable_value(&mut tab, 2, egui::RichText::new(t("Tabs by kind")).size(14.0));
                             if tab == 1 {
                                 tab = 0;
                             }
@@ -5793,6 +5807,7 @@ impl DeskApp {
                 });
                 egui::CentralPanel::default().frame(egui::Frame::new().fill(crate::theme::bg()).inner_margin(10.0)).show(pctx, |ui| {
                     ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                        let kind_tab_ok = fence.rule_tabs() || fence.folder.is_some();
                         match (tab, widget_kind, fence.widget.as_mut()) {
                             (1, Some(kind), Some(wc)) => {
                                 ui.spacing_mut().item_spacing.y = 8.0;
@@ -5806,8 +5821,17 @@ impl DeskApp {
                                     }
                                 }
                             }
-                            (2, _, _) if fence.auto_sort => {
+                            (2, _, _) if kind_tab_ok => {
                                 ui.spacing_mut().item_spacing.y = 8.0;
+                                if fence.folder.is_some() {
+                                    let mut on = fence.kind_tabs;
+                                    if ui.checkbox(&mut on, t("Sort into tabs by kind")).on_hover_text(t("Splits this folder's items into tabs (Apps, Files, Pictures…) using the auto-sort tab rules")).changed() {
+                                        fence.kind_tabs = on;
+                                        fence.sel_tab = 0;
+                                        dirty = true;
+                                    }
+                                }
+                                if fence.rule_tabs() {
                                 ui.label(egui::RichText::new(t("Each tab collects items by file type, name pattern (* and ?) and/or how recently they changed; the first matching rule wins. Drag the handle to change the order of the tabs. Folders and everything else get their own tabs.")).color(crate::theme::faint()).size(12.0));
                                 let own = fence.categories.is_some();
                                 if ui.radio(!own, t("Use the default tabs (set in Settings)")).clicked() && own {
@@ -5831,6 +5855,7 @@ impl DeskApp {
                                             dirty = true;
                                         }
                                     });
+                                }
                                 }
                             }
                             _ => {

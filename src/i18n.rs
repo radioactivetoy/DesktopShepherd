@@ -739,6 +739,9 @@ pub static ES: &[(&str, &str)] = &[
     ("Copy the default tabs", "Copiar las pestañas predeterminadas"),
     ("These are the default tabs of auto-sort boxes (a box can have its own tabs in Personalize). Each tab collects items by file type, name pattern (* and ?) and/or how recently they changed; the first matching rule wins. Drag the handle to change the order of the tabs. Folders and everything else get their own tabs.", "Estas son las pestañas predeterminadas de los cuadros de orden automático (un cuadro puede tener las suyas en Personalizar). Cada pestaña reúne elementos por tipo de archivo, patrón de nombre (* y ?) y/o por lo recientemente que cambiaron; gana la primera regla que coincida. Arrastra el asa para cambiar el orden de las pestañas. Las carpetas y todo lo demás tienen sus propias pestañas."),
     ("Each tab collects items by file type, name pattern (* and ?) and/or how recently they changed; the first matching rule wins. Drag the handle to change the order of the tabs. Folders and everything else get their own tabs.", "Cada pestaña reúne elementos por tipo de archivo, patrón de nombre (* y ?) y/o por lo recientemente que cambiaron; gana la primera regla que coincida. Arrastra el asa para cambiar el orden de las pestañas. Las carpetas y todo lo demás tienen sus propias pestañas."),
+    ("Sort into tabs by kind", "Ordenar en pestañas por tipo"),
+    ("Splits this folder's items into tabs (Apps, Files, Pictures…) using the auto-sort tab rules", "Divide los elementos de esta carpeta en pestañas (Aplicaciones, Archivos, Imágenes…) con las reglas de las pestañas de orden automático"),
+    ("Tabs by kind", "Pestañas por tipo"),
 ];
 
 pub static CA: &[(&str, &str)] = &[
@@ -1198,6 +1201,9 @@ pub static CA: &[(&str, &str)] = &[
     ("Copy the default tabs", "Copiar les pestanyes predeterminades"),
     ("These are the default tabs of auto-sort boxes (a box can have its own tabs in Personalize). Each tab collects items by file type, name pattern (* and ?) and/or how recently they changed; the first matching rule wins. Drag the handle to change the order of the tabs. Folders and everything else get their own tabs.", "Aquestes són les pestanyes predeterminades dels quadres d'ordre automàtic (un quadre pot tenir les seves a Personalitza). Cada pestanya reuneix elements per tipus de fitxer, patró de nom (* i ?) i/o per com de recentment han canviat; guanya la primera regla que coincideix. Arrossega la nansa per canviar l'ordre de les pestanyes. Les carpetes i tota la resta tenen les seves pròpies pestanyes."),
     ("Each tab collects items by file type, name pattern (* and ?) and/or how recently they changed; the first matching rule wins. Drag the handle to change the order of the tabs. Folders and everything else get their own tabs.", "Cada pestanya reuneix elements per tipus de fitxer, patró de nom (* i ?) i/o per com de recentment han canviat; guanya la primera regla que coincideix. Arrossega la nansa per canviar l'ordre de les pestanyes. Les carpetes i tota la resta tenen les seves pròpies pestanyes."),
+    ("Sort into tabs by kind", "Ordenar en pestanyes per tipus"),
+    ("Splits this folder's items into tabs (Apps, Files, Pictures…) using the auto-sort tab rules", "Divideix els elements d'aquesta carpeta en pestanyes (Aplicacions, Fitxers, Imatges…) amb les regles de les pestanyes d'ordre automàtic"),
+    ("Tabs by kind", "Pestanyes per tipus"),
 ];
 
 pub static FR: &[(&str, &str)] = &[
@@ -1657,6 +1663,9 @@ pub static FR: &[(&str, &str)] = &[
     ("Copy the default tabs", "Copier les onglets par défaut"),
     ("These are the default tabs of auto-sort boxes (a box can have its own tabs in Personalize). Each tab collects items by file type, name pattern (* and ?) and/or how recently they changed; the first matching rule wins. Drag the handle to change the order of the tabs. Folders and everything else get their own tabs.", "Ce sont les onglets par défaut des cadres à tri automatique (un cadre peut avoir les siens dans Personnaliser). Chaque onglet rassemble les éléments par type de fichier, modèle de nom (* et ?) et/ou ancienneté de modification ; la première règle qui correspond l'emporte. Faites glisser la poignée pour changer l'ordre des onglets. Les dossiers et tout le reste ont leurs propres onglets."),
     ("Each tab collects items by file type, name pattern (* and ?) and/or how recently they changed; the first matching rule wins. Drag the handle to change the order of the tabs. Folders and everything else get their own tabs.", "Chaque onglet rassemble les éléments par type de fichier, modèle de nom (* et ?) et/ou ancienneté de modification ; la première règle qui correspond l'emporte. Faites glisser la poignée pour changer l'ordre des onglets. Les dossiers et tout le reste ont leurs propres onglets."),
+    ("Sort into tabs by kind", "Trier en onglets par type"),
+    ("Splits this folder's items into tabs (Apps, Files, Pictures…) using the auto-sort tab rules", "Répartit les éléments de ce dossier en onglets (Applications, Fichiers, Images…) selon les règles des onglets du tri automatique"),
+    ("Tabs by kind", "Onglets par type"),
 ];
 
 pub static DE: &[(&str, &str)] = &[
@@ -2116,6 +2125,9 @@ pub static DE: &[(&str, &str)] = &[
     ("Copy the default tabs", "Standard-Registerkarten kopieren"),
     ("These are the default tabs of auto-sort boxes (a box can have its own tabs in Personalize). Each tab collects items by file type, name pattern (* and ?) and/or how recently they changed; the first matching rule wins. Drag the handle to change the order of the tabs. Folders and everything else get their own tabs.", "Das sind die Standard-Registerkarten der automatisch sortierenden Boxen (eine Box kann unter Anpassen eigene haben). Jede Registerkarte sammelt Elemente nach Dateityp, Namensmuster (* und ?) und/oder danach, wie kürzlich sie geändert wurden; die erste passende Regel gilt. Ziehen Sie den Griff, um die Reihenfolge der Registerkarten zu ändern. Ordner und alles andere bekommen eigene Registerkarten."),
     ("Each tab collects items by file type, name pattern (* and ?) and/or how recently they changed; the first matching rule wins. Drag the handle to change the order of the tabs. Folders and everything else get their own tabs.", "Jede Registerkarte sammelt Elemente nach Dateityp, Namensmuster (* und ?) und/oder danach, wie kürzlich sie geändert wurden; die erste passende Regel gilt. Ziehen Sie den Griff, um die Reihenfolge der Registerkarten zu ändern. Ordner und alles andere bekommen eigene Registerkarten."),
+    ("Sort into tabs by kind", "In Registerkarten nach Art sortieren"),
+    ("Splits this folder's items into tabs (Apps, Files, Pictures…) using the auto-sort tab rules", "Teilt die Elemente dieses Ordners nach den Regeln der automatischen Sortierung in Registerkarten auf (Apps, Dateien, Bilder …)"),
+    ("Tabs by kind", "Registerkarten nach Art"),
 ];
 
 pub static IT: &[(&str, &str)] = &[
@@ -2575,6 +2587,9 @@ pub static IT: &[(&str, &str)] = &[
     ("Copy the default tabs", "Copia le schede predefinite"),
     ("These are the default tabs of auto-sort boxes (a box can have its own tabs in Personalize). Each tab collects items by file type, name pattern (* and ?) and/or how recently they changed; the first matching rule wins. Drag the handle to change the order of the tabs. Folders and everything else get their own tabs.", "Queste sono le schede predefinite dei riquadri a ordinamento automatico (un riquadro può avere le proprie in Personalizza). Ogni scheda raccoglie gli elementi per tipo di file, schema del nome (* e ?) e/o da quanto tempo sono stati modificati; vince la prima regola corrispondente. Trascina la maniglia per cambiare l'ordine delle schede. Le cartelle e tutto il resto hanno le proprie schede."),
     ("Each tab collects items by file type, name pattern (* and ?) and/or how recently they changed; the first matching rule wins. Drag the handle to change the order of the tabs. Folders and everything else get their own tabs.", "Ogni scheda raccoglie gli elementi per tipo di file, schema del nome (* e ?) e/o da quanto tempo sono stati modificati; vince la prima regola corrispondente. Trascina la maniglia per cambiare l'ordine delle schede. Le cartelle e tutto il resto hanno le proprie schede."),
+    ("Sort into tabs by kind", "Ordina in schede per tipo"),
+    ("Splits this folder's items into tabs (Apps, Files, Pictures…) using the auto-sort tab rules", "Divide gli elementi di questa cartella in schede (App, File, Immagini…) con le regole delle schede dell'ordinamento automatico"),
+    ("Tabs by kind", "Schede per tipo"),
 ];
 
 pub static PT: &[(&str, &str)] = &[
@@ -3034,6 +3049,9 @@ pub static PT: &[(&str, &str)] = &[
     ("Copy the default tabs", "Copiar os separadores predefinidos"),
     ("These are the default tabs of auto-sort boxes (a box can have its own tabs in Personalize). Each tab collects items by file type, name pattern (* and ?) and/or how recently they changed; the first matching rule wins. Drag the handle to change the order of the tabs. Folders and everything else get their own tabs.", "Estes são os separadores predefinidos das caixas de ordenação automática (uma caixa pode ter os seus em Personalizar). Cada separador reúne itens por tipo de ficheiro, padrão de nome (* e ?) e/ou há quanto tempo foram alterados; a primeira regra que corresponder prevalece. Arraste a pega para mudar a ordem dos separadores. As pastas e tudo o resto têm os seus próprios separadores."),
     ("Each tab collects items by file type, name pattern (* and ?) and/or how recently they changed; the first matching rule wins. Drag the handle to change the order of the tabs. Folders and everything else get their own tabs.", "Cada separador reúne itens por tipo de ficheiro, padrão de nome (* e ?) e/ou há quanto tempo foram alterados; a primeira regra que corresponder prevalece. Arraste a pega para mudar a ordem dos separadores. As pastas e tudo o resto têm os seus próprios separadores."),
+    ("Sort into tabs by kind", "Ordenar em separadores por tipo"),
+    ("Splits this folder's items into tabs (Apps, Files, Pictures…) using the auto-sort tab rules", "Divide os itens desta pasta em separadores (Aplicações, Ficheiros, Imagens…) com as regras dos separadores da ordenação automática"),
+    ("Tabs by kind", "Separadores por tipo"),
 ];
 
 #[cfg(test)]
