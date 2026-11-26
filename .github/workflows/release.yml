@@ -34,10 +34,25 @@ jobs:
 
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
 
+      # The C runtime is built into the program (crt-static): without it the program needs
+      # VCRUNTIME140.dll, which a fresh Windows (like winget's test machines) doesn't have, and
+      # Windows then shows a "DLL not found" box that waits for a click.
       - name: Build (dist profile, exact versions from Cargo.lock)
+        env:
+          RUSTFLAGS: -C target-feature=+crt-static
         run: cargo build --profile dist --locked
 
+      - name: Check the program needs no Visual C++ runtime
+        shell: pwsh
+        run: |
+          $text = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes("target\dist\desktopshepherd.exe"))
+          $bad = [regex]::Matches($text, '(?i)(vcruntime|msvcp)[0-9_]*\.dll') | ForEach-Object Value | Sort-Object -Unique
+          if ($bad) { Write-Error "The program still needs: $($bad -join ', ')"; exit 1 }
+          "OK: no Visual C++ runtime DLLs needed"
+
       - name: Test
+        env:
+          RUSTFLAGS: -C target-feature=+crt-static
         run: cargo test --locked
 
       - name: Package
