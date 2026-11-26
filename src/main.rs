@@ -165,7 +165,7 @@ fn main() {
     }
     // `--silent` (or /S, -s, /quiet): no windows at all, for winget and scripts.
     #[cfg(windows)]
-    if install::is_setup_exe() && install::wants_setup(&args) {
+    if (install::is_setup_exe() && install::wants_setup(&args)) || install::wants_install(&args) {
         let code = install::run_setup(install::is_silent(&args));
         std::process::exit(code);
     }

@@ -5,7 +5,7 @@
 **Tidy, frosted-glass boxes for your Windows 11 desktop icons. Light on resources, safe by design.**
 
 [Download the latest release](https://github.com/radioactivetoy/DesktopShepherd/releases/latest)
-(Setup or Portable) - current version: 1.0.3
+(Setup or Portable) - current version: 1.0.4
 
 <img src="docs/screenshots/overview.png" alt="DesktopShepherd boxes on a Windows 11 desktop" width="100%">
 
@@ -175,7 +175,8 @@ Get the latest files from the
   `portable.txt` file next to it, all settings live in a `data` folder beside the program.
   Delete `portable.txt` to use your user profile instead.
 
-- **Scripted install:** run the Setup with `--silent` for an install with no questions, and
+- **Scripted install:** run the Setup with `--install --silent` for an install with no questions
+  (works whatever the file is called), and
   `desktopshepherd.exe --uninstall --silent` to remove it (your boxes are kept).
 - **winget:** a submission to the winget catalogue is in review; it is not available there yet.
 

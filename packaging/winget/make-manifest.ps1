@@ -3,7 +3,7 @@
  Usage:  .\make-manifest.ps1 -Tag v1.1.0
  It downloads that release's SHA256SUMS.txt (read-only), takes the Setup file's SHA-256, and writes
  the three YAML files with the new version, URL and hash to packaging\winget\out\<version>\.
- The release must already be published and must contain the --silent switch.
+ The release must already be published and must understand --install (1.0.4 or later).
 #>
 param(
     [Parameter(Mandatory = $true)][string]$Tag,
@@ -33,7 +33,7 @@ foreach ($f in 'radioactivetoy.DesktopShepherd.yaml', 'radioactivetoy.DesktopShe
     $t = $t -replace '(?m)^(\s+InstallerUrl: ).*$', "`${1}$base/$setup"
     $t = $t -replace '(?m)^(\s+InstallerSha256: ).*$', "`${1}$hash"
     $t = $t -replace '(?m)^(ReleaseNotesUrl: ).*$', "`${1}https://github.com/$Repo/releases/tag/$Tag"
-    $t = $t -replace '(?m)^# NOTE: rc\.2 has no --silent.*\r?\n', ''
+    $t = $t -replace '(?m)^# NOTE: .*\r?\n(# .*\r?\n)?', ''
     [IO.File]::WriteAllText((Join-Path $OutDir $f), ($t -replace "`r`n", "`n"), (New-Object Text.UTF8Encoding($false)))
 }
 Write-Host "Written to $OutDir (version $version, SHA-256 $hash)"

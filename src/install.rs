@@ -130,10 +130,16 @@ pub fn is_silent(args: &[String]) -> bool {
     args.iter().skip(1).any(|a| is_silent_flag(a))
 }
 
-/// True when the command line asks for the normal setup: nothing but silent switches after the
-/// program name (any other `--` option belongs to the program itself).
+/// True when the command line asks for the normal setup: nothing but silent switches (and
+/// `--install`) after the program name (any other `--` option belongs to the program itself).
 pub fn wants_setup(args: &[String]) -> bool {
-    !args.iter().skip(1).any(|a| a.starts_with("--") && !is_silent_flag(a))
+    !args.iter().skip(1).any(|a| a.starts_with("--") && !is_silent_flag(a) && !a.eq_ignore_ascii_case("--install"))
+}
+
+/// `--install`: run the setup whatever the file is called. winget (and other tools) may save the
+/// downloaded installer under another name, so "Setup" in the name can't be relied on.
+pub fn wants_install(args: &[String]) -> bool {
+    args.iter().skip(1).any(|a| a.eq_ignore_ascii_case("--install")) && wants_setup(args)
 }
 
 /// A message for the person; in silent mode only written to the log.
@@ -308,6 +314,19 @@ mod tests {
         assert!(!is_silent(&v(&["--silent"]))); // that is the program name slot
         assert!(!is_silent(&v(&["setup.exe", "--uninstall"])));
         assert!(!is_silent(&v(&["setup.exe", "/silent"])));
+    }
+
+    #[test]
+    fn install_switch_works_under_any_name() {
+        // winget may save the installer as e.g. "<hash>.exe": --install still runs the setup.
+        assert!(wants_install(&v(&["C:\\T\\WinGet\\3f6da844.exe", "--install", "--silent"])));
+        assert!(wants_install(&v(&["x.exe", "--INSTALL"])));
+        assert!(is_silent(&v(&["x.exe", "--install", "--silent"])));
+        assert!(!is_silent(&v(&["x.exe", "--install"])));
+        assert!(wants_setup(&v(&["setup.exe", "--install", "--silent"])));
+        assert!(!wants_install(&v(&["x.exe"])));
+        assert!(!wants_install(&v(&["x.exe", "--silent"])));
+        assert!(!wants_install(&v(&["x.exe", "--install", "--worker"])));
     }
 
     #[test]

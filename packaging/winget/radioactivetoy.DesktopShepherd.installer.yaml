@@ -1,5 +1,6 @@
 # yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.6.0.schema.json
-# NOTE: rc.2 has no --silent switch yet. Use make-manifest.ps1 with the first release that has it.
+# NOTE: --install needs 1.0.4 or later (winget may rename the downloaded installer, so the
+# "Setup" in its file name can't be relied on). Use make-manifest.ps1.
 PackageIdentifier: radioactivetoy.DesktopShepherd
 PackageVersion: 1.0.0-rc.2
 Platform:
@@ -12,8 +13,9 @@ InstallModes:
 - silent
 - silentWithProgress
 InstallerSwitches:
-  Silent: --silent
-  SilentWithProgress: --silent
+  Interactive: --install
+  Silent: --install --silent
+  SilentWithProgress: --install --silent
 UpgradeBehavior: install
 ProductCode: DesktopShepherd
 Installers:

@@ -1,6 +1,6 @@
-# Status (1.0.3, 2026-11-25)
+# Status (1.0.4, 2026-11-26)
 
-Current version: **1.0.3** (1.0.0 was the first stable release; tags v0.2.0-beta.1..5, v1.0.0-rc.1..3 before it).
+Current version: **1.0.4** (1.0.0 was the first stable release; tags v0.2.0-beta.1..5, v1.0.0-rc.1..3 before it).
 v1.0.0-rc.1, rc.2 and rc.3. The workflow (read-only build job + separate publish job, actions
 pinned to SHAs, Rust 1.100.0) publishes the Setup exe, the Portable zip and `SHA256SUMS.txt`, and
 marks beta and rc tags as pre-releases. Release notes live in `docs/release-notes/<tag>.md`; after
@@ -8,6 +8,9 @@ the workflow finishes they are put on the release page and the release is made "
 it shows on the repo main page:
 `gh release edit <tag> --title "DesktopShepherd 1.0 RC N" --notes-file docs/release-notes/<tag>.md --prerelease=false --latest`.
 
+1.0.4: `--install` runs the setup whatever the file is called (winget renamed the downloaded
+installer, so the "Setup" name check failed and Microsoft's silent-install test timed out); winget
+switches are now `--install --silent` (Interactive: `--install`).
 1.0.3: auto-sort tab rules per box (`Fence.categories`, None = the Settings list, which is the
 default; Personalize > "Tabs by kind"); folder boxes can be split into tabs by kind
 (`Fence.kind_tabs`, `Fence::rule_tabs()`; old folder boxes with `auto_sort` convert on load,
@@ -296,7 +299,7 @@ egui font atlases, and the icon textures.
 - Microsoft Store: not started (needs the owner's free Partner Center account; plan in
   `docs/plans/next-features.md` section 9).
 - Bluetooth batteries: not yet tested with a real device (devices that don't report a battery don't show).
-- Silent install (`--silent`) not tested end to end.
+- Silent install: tested end to end on 2026-11-26 (renamed installer, `--install --silent`: installed in 2 s, exit 0, no windows). Silent uninstall not yet run end to end.
 - Native-speaker review of the FR/DE/IT/PT texts (maybe Brazilian Portuguese; German "Strg" instead of "Ctrl").
 - Laptop: per-monitor-setup positions still need a test on a real laptop.
 - Code signing: the installer and program are not signed yet (SmartScreen warning).

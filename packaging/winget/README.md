@@ -9,7 +9,8 @@ can type `winget install radioactivetoy.DesktopShepherd` and get it installed (a
 ## The files here
 - `radioactivetoy.DesktopShepherd.yaml` - the version file.
 - `radioactivetoy.DesktopShepherd.installer.yaml` - where to download the setup, its SHA-256
-  fingerprint, and the silent switch (`--silent`).
+  fingerprint, and the install switches (`--install --silent`; `--install` because winget may rename the
+  downloaded installer).
 - `radioactivetoy.DesktopShepherd.locale.en-US.yaml` - name, description, licence, links.
 - `make-manifest.ps1` - fills in version, download link and fingerprint for a release.
 
@@ -32,7 +33,7 @@ files to `packaging\winget\out\<version>\`. Nothing is uploaded.
    work; the setup asks it to quit by itself.) Turn the setting off again with
    `winget settings --disable LocalManifestFiles`.
 
-Silent mode by hand: `DesktopShepherd-Setup-<version>.exe --silent` installs (or updates) with no
+Silent mode by hand: `DesktopShepherd-Setup-<version>.exe --install --silent` installs (or updates) with no
 windows and exit code 0 (non-zero = failed; details in `%APPDATA%\DesktopShepherd\log.txt`). It does not start
 the program afterwards. `DesktopShepherd.exe --uninstall --silent` removes it and keeps your boxes.
 
