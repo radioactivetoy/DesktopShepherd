@@ -5,7 +5,7 @@
 **Tidy, frosted-glass boxes for your Windows 11 desktop icons. Light on resources, safe by design.**
 
 [Download the latest release](https://github.com/radioactivetoy/DesktopShepherd/releases/latest)
-(Setup or Portable) - current version: 1.0.4
+(Setup or Portable) - current version: 1.0.5
 
 <img src="docs/screenshots/overview.png" alt="DesktopShepherd boxes on a Windows 11 desktop" width="100%">
 

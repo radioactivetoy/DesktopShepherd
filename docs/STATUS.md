@@ -1,6 +1,6 @@
-# Status (1.0.4, 2026-11-26)
+# Status (1.0.5, 2026-11-26)
 
-Current version: **1.0.4** (1.0.0 was the first stable release; tags v0.2.0-beta.1..5, v1.0.0-rc.1..3 before it).
+Current version: **1.0.5** (1.0.0 was the first stable release; tags v0.2.0-beta.1..5, v1.0.0-rc.1..3 before it).
 v1.0.0-rc.1, rc.2 and rc.3. The workflow (read-only build job + separate publish job, actions
 pinned to SHAs, Rust 1.100.0) publishes the Setup exe, the Portable zip and `SHA256SUMS.txt`, and
 marks beta and rc tags as pre-releases. Release notes live in `docs/release-notes/<tag>.md`; after
@@ -8,6 +8,10 @@ the workflow finishes they are put on the release page and the release is made "
 it shows on the repo main page:
 `gh release edit <tag> --title "DesktopShepherd 1.0 RC N" --notes-file docs/release-notes/<tag>.md --prerelease=false --latest`.
 
+1.0.5: release builds have the C runtime built in (`RUSTFLAGS=-C target-feature=+crt-static` in
+release.yml, plus a step that fails if the exe still names VCRUNTIME/MSVCP DLLs): winget's clean
+test machine has no Visual C++ runtime, so Windows showed "VCRUNTIME140.dll was not found" and
+the unattended install waited for a click. +146 KB.
 1.0.4: `--install` runs the setup whatever the file is called (winget renamed the downloaded
 installer, so the "Setup" name check failed and Microsoft's silent-install test timed out); winget
 switches are now `--install --silent` (Interactive: `--install`).
